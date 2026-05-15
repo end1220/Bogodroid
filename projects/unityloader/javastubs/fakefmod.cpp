@@ -97,7 +97,7 @@ void FMODAudioDevice::runAudio() {
     while (mRunning.load()) {
         while(SDL_GetQueuedAudioSize(mAudioDevice) < 4096){
             local_fmodProcess();
-            SDL_QueueAudio(mAudioDevice, mAudioBuffer.data(), mAudioBuffer.size());    
+            SDL_QueueAudio(mAudioDevice, mAudioBuffer.data(), mAudioBuffer.size());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
