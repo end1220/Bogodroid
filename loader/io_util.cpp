@@ -12,7 +12,7 @@ bool load_so_from_file(so_module *mod, const char *filename, uintptr_t addr)
   std::ifstream file(filename, std::ios::binary);
   if (!file.is_open())
   {
-    std::cerr << "Error opening file: " << filename << std::endl;
+    warning("Error opening file: %s\n", filename);
     return false;
   }
   // Determine the file size

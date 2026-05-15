@@ -21,7 +21,6 @@
 #define __USE_MISC
 #include <cstdlib>
 #include <execinfo.h>
-#include <iostream>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -39,6 +38,7 @@
 
 #include "platform.h"
 #include "so_util.h"
+#include "logging.h"
 
 #if defined(__aarch64__)
 #include "arm64_encodings.h"
@@ -80,6 +80,11 @@ uintptr_t so_alloc_arena(so_module* so, uintptr_t range, uintptr_t dst, size_t s
 
     // keep allocations 4-byte aligned for simplicity
     sz = ALIGN_MEM(sz, 4);
+
+    static size_t g_total_block_alloc = 0;
+    g_total_block_alloc += sz;
+    BD_LOG("MEM", "block_alloc sz=%zu B total=%zu KB exec=%d",
+            sz, g_total_block_alloc / 1024, (int)(range != 0));
 
     if (sz <= (blkavail(patch)) && inrange(so->patch_base, dst, range)) {
         so->patch_head += sz;
@@ -165,10 +170,22 @@ int so_load(so_module* mod, const char* filename, uintptr_t load_addr, void* so_
     size_t load_sz = max_vaddr - min_vaddr;
     size_t load_total_sz = load_sz + PATCH_SZ;
 
-    // Now memory map the requested size
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE;
+    // MAP_POPULATE intentionally absent: forces eager alloc of full mapping.
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     if (load_addr > 0)
         flags |= MAP_FIXED;
+
+    {
+        static size_t g_total_so_mmap = 0;
+        g_total_so_mmap += load_total_sz;
+        BD_LOG("MEM", "so_load mmap filename=%s load_addr=0x%lx sz=%zu MB load_sz=%zu MB patch_sz=%d MB total=%zu MB",
+                filename ? filename : "(null)",
+                (unsigned long)load_addr,
+                load_total_sz / (1024 * 1024),
+                load_sz / (1024 * 1024),
+                PATCH_SZ / (1024 * 1024),
+                g_total_so_mmap / (1024 * 1024));
+    }
 
     void* shd = mmap((void*)(load_addr - PATCH_SZ), load_total_sz, PROT_READ | PROT_WRITE, flags, 0, 0);
 
@@ -315,13 +332,8 @@ int so_load(so_module* mod, const char* filename, uintptr_t load_addr, void* so_
 void reloc_err(uintptr_t got0)
 {
     void* array[50]; // Array to store stack trace addresses
-    size_t size;
-
-    // Get the stack trace
-    size = backtrace(array, 50);
-
-    // Print the stack trace
-    std::cerr << "Unknown Symbol encountered\n";
+    size_t size = backtrace(array, 50);
+    BD_LOG("SYM", "Unknown symbol encountered");
     backtrace_symbols_fd(array, size, STDERR_FILENO);
     gdb_break_unknown_symbol();
     // Find to which module this missing symbol belongs

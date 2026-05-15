@@ -3,14 +3,16 @@
 #include "gles2.h"
 #include "glad.h"
 #include "glad_egl.h"
+#include "android.h" // for SharedPreferences::flush_all
+#include "logging.h"
 
-#include <iostream>
 #include <csignal>
 #include <execinfo.h>
 #include <unistd.h>
 
 void print_native_callbacks(ANativeActivity nActivity)
 {
+#ifndef NDEBUG
     printf("onStart: %p\n", (void*)nActivity.callbacks->onStart);
     printf("onResume: %p\n", (void*)nActivity.callbacks->onResume);
     printf("onSaveInstanceState: %p\n", (void*)nActivity.callbacks->onSaveInstanceState);
@@ -27,26 +29,25 @@ void print_native_callbacks(ANativeActivity nActivity)
     printf("onContentRectChanged: %p\n", (void*)nActivity.callbacks->onContentRectChanged);
     printf("onConfigurationChanged: %p\n", (void*)nActivity.callbacks->onConfigurationChanged);
     printf("onLowMemory: %p\n", (void*)nActivity.callbacks->onLowMemory);
+#endif
 }
 
 void segfault_handler(int signal) {
-    void *array[50];  // Array to store stack trace addresses
-    size_t size;
-
-    // Get the stack trace
-    size = backtrace(array, 50);
-
-    // Print the stack trace
-    std::cerr << "Error: signal " << signal << ":\n";
+    void *array[50];
+    size_t size = backtrace(array, 50);
+    BD_LOG("SEGV", "signal %d", signal);
     backtrace_symbols_fd(array, size, STDERR_FILENO);
-
-    // Exit the program
-    exit(1);
+    _exit(1);
 }
 
 void exit_handler(int signal) {
-    printf("Caught signal %d, exiting...\n", signal);
-    exit(0);
+    // Flush prefs first — small synchronous write, safe under memory pressure.
+    jnivm::android::content::SharedPreferences::flush_all();
+    // _exit instead of exit: skip C++ dtors / atexit / stdio flush. On 1GB
+    // devices the cleanup cascade (Mali teardown + IL2CPP shutdown) OOMs.
+    const char msg[] = "Caught signal, fast-exiting via _exit\n";
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    _exit(0);
 }
 
 void print_backtrace_on_segfault()
