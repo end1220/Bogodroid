@@ -8,6 +8,7 @@ build-release/
 build-release-pure/
 build_release/
 build_cross/
+build-docker*/
 dist/
 libjnivm/build/
 il2cpp/
