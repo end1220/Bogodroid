@@ -10,6 +10,8 @@
 #include <inttypes.h>
 #include <memory>
 #include <dlfcn.h>
+#include <toml++/toml.hpp>
+extern toml::table config;
 
 SDL_Window* sdl_win;
 SDL_GLContext sdl_ctx;
@@ -49,25 +51,6 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     SDL_GL_MakeCurrent(sdl_win, sdl_ctx);
     SDL_GL_SwapWindow(sdl_win);
 
-    using namespace std::chrono;
-
-    // Persist across calls
-    static int frameCount = 0;
-    static auto lastTime = high_resolution_clock::now();
-    static float fps = 0.0f;
-
-    frameCount++;
-    auto now = high_resolution_clock::now();
-    duration<float> elapsed = now - lastTime;
-
-    if (elapsed.count() >= 1.0f) {
-        fps = frameCount / elapsed.count();
-        frameCount = 0;
-        lastTime = now;
-        warning("FPS: %f\n", fps);
-    }
-    // verbose("EGL_SDL", "[Thread: %" PRIxPTR "] eglSwapBuffers about to call getInstance().", (uintptr_t)pthread_self());
-
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {
         // choreographer->dispatchFrameCallbacks(true);
@@ -79,7 +62,6 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
 // Just return the current display
 EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
 {
-    printf("[NATIVE] eglGetDisplay\n");
     if (egl_display)
         return egl_display;
 
@@ -89,7 +71,9 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
         // return -1;
     }
 
-    sdl_win = SDL_CreateWindow("Teapot", 0, 0, 640, 480, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    // Fullscreen at native LCD resolution.
+    sdl_win = SDL_CreateWindow("Teapot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                               0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (sdl_win == NULL) {
         fatal_error("Failed to create SDL Window: %s\n", SDL_GetError());
         // return -1;
@@ -146,7 +130,8 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     }
 
     if (glExtensions) {
-        printf("OpenGL Extensions: %s\n", glExtensions);
+        // ~3KB list — debug-only via BOOT_LOG; short Vendor/Renderer above stays.
+        BOOT_LOG("OpenGL Extensions: %s\n", glExtensions);
     } else {
         fatal_error("Failed to retrieve OpenGL extensions.\n");
     }
@@ -271,6 +256,15 @@ EGLSurface eglCreateWindowSurface_impl(EGLDisplay display, EGLConfig config, Nat
 EGLBoolean eglQuerySurface_impl(EGLDisplay display, EGLSurface surface, EGLint attribute, EGLint* value)
 {
     verbose("EGL_SDL", "eglQuerySurface\n");
+    // Return logical [device] size, not physical — fixes 16:9-on-4:3 stretch.
+    if (attribute == EGL_WIDTH) {
+        *value = config["device"]["displayWidth"].value_or<int>(640);
+        return EGL_TRUE;
+    }
+    if (attribute == EGL_HEIGHT) {
+        *value = config["device"]["displayHeight"].value_or<int>(480);
+        return EGL_TRUE;
+    }
 #ifdef FAKE_EGL
     if (attribute == EGL_WIDTH)
         *value = 640;

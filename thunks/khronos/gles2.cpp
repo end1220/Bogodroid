@@ -5,13 +5,218 @@
 #include "so_util.h"
 #include "thunk_gen.h"
 #include "thunk_gen_dyn.h"
+#include "logging.h"
 
 #include "gles2_funcs.hpp"
+
+#include <cstdio>
+#include <cstring>
+#include <cstdint>
+#include <vector>
+#include <unordered_map>
+#include <algorithm>
+#include <toml++/toml.hpp>
+extern toml::table config;
 
 static int symtable_gles2_index = 0;
 DynLibFunction symtable_gles2[4096] = {};
 
 #define PTR_RESOLVE(x) resolve_thunked<&glad_##x>(#x, symtable_gles2_index, symtable_gles2, SDL_GL_GetProcAddress)
+
+// Texture-size cap. Unity ships textures sized for high-end Android phones
+// that OOM on low-end Mali handhelds. wsm.toml [gpu] textureMaxDim caps the
+// longest side and box-downsamples uploads. Strips (LUTs) and RTs match the
+// display size are skipped; only RGBA8 / RGB8 / SRGB / ETC2 / ASTC are
+// capped — HDR float / depth / stencil pass through unchanged.
+static int bd_get_max_tex_dim()
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = config["gpu"]["textureMaxDim"].value_or<int>(0);
+        BD_LOG("CAP", "textureMaxDim = %d (0 = disabled)", cached);
+    }
+    return cached;
+}
+
+static bool bd_format_is_capable(GLenum sized_internalformat)
+{
+    switch (sized_internalformat) {
+        case 0x8058 /*GL_RGBA8*/:
+        case 0x8051 /*GL_RGB8*/:
+        case 0x8C41 /*GL_SRGB8*/:
+        case 0x8C43 /*GL_SRGB8_ALPHA8*/:
+        case 0x9274: case 0x9275: case 0x9276: case 0x9277:
+        case 0x9278: case 0x9279:    // ETC2 family
+        case 0x93B0: case 0x93B1: case 0x93B2: case 0x93B3:
+        case 0x93B4: case 0x93B5: case 0x93B6: case 0x93B7:
+        case 0x93B8: case 0x93B9: case 0x93BA: case 0x93BB:
+        case 0x93BC: case 0x93BD:    // ASTC LDR
+            return true;
+        default:
+            return false;
+    }
+}
+
+static int bd_bpp_from_format_type(GLenum format, GLenum type)
+{
+    int comps = 0;
+    switch (format) {
+        case 0x1908 /*GL_RGBA*/:           comps = 4; break;
+        case 0x1907 /*GL_RGB*/:            comps = 3; break;
+        case 0x80E1 /*GL_BGRA*/:           comps = 4; break;
+        case 0x1909 /*GL_LUMINANCE*/:      comps = 1; break;
+        case 0x190A /*GL_LUMINANCE_ALPHA*/:comps = 2; break;
+        case 0x1906 /*GL_ALPHA*/:          comps = 1; break;
+        case 0x1903 /*GL_RED*/:            comps = 1; break;
+        case 0x8227 /*GL_RG*/:             comps = 2; break;
+        default: return 0;
+    }
+    int bpc = 0;
+    switch (type) {
+        case 0x1401 /*GL_UNSIGNED_BYTE*/:  bpc = 1; break;
+        case 0x1403 /*GL_UNSIGNED_SHORT*/: bpc = 2; break;
+        case 0x1405 /*GL_UNSIGNED_INT*/:   bpc = 4; break;
+        case 0x1406 /*GL_FLOAT*/:          bpc = 4; break;
+        case 0x140B /*GL_HALF_FLOAT*/:     bpc = 2; break;
+        default: return 0;
+    }
+    return comps * bpc;
+}
+
+static void bd_box_downsample(const uint8_t* src, int src_w, int src_h,
+                               uint8_t* dst, int dst_w, int dst_h, int bpp)
+{
+    for (int dy = 0; dy < dst_h; dy++) {
+        int sy0 = dy * src_h / dst_h;
+        int sy1 = (dy + 1) * src_h / dst_h;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (int dx = 0; dx < dst_w; dx++) {
+            int sx0 = dx * src_w / dst_w;
+            int sx1 = (dx + 1) * src_w / dst_w;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            int sum[4] = {0, 0, 0, 0};
+            int n = 0;
+            for (int sy = sy0; sy < sy1 && sy < src_h; sy++) {
+                for (int sx = sx0; sx < sx1 && sx < src_w; sx++) {
+                    const uint8_t* sp = src + (sy * src_w + sx) * bpp;
+                    for (int c = 0; c < bpp; c++) sum[c] += sp[c];
+                    n++;
+                }
+            }
+            uint8_t* dp = dst + (dy * dst_w + dx) * bpp;
+            if (n > 0) {
+                for (int c = 0; c < bpp; c++) dp[c] = (uint8_t)(sum[c] / n);
+            } else {
+                for (int c = 0; c < bpp; c++) dp[c] = 0;
+            }
+        }
+    }
+}
+
+struct BD_ScaleInfo {
+    int orig_w, orig_h;
+    int new_w, new_h;
+    float scale;
+};
+static std::unordered_map<unsigned, BD_ScaleInfo> g_tex_scales;
+static unsigned g_bound_tex_2d = 0;
+
+extern "C" void bd_glBindTexture(GLenum target, GLuint texture)
+{
+    if (target == 0x0DE1 /*GL_TEXTURE_2D*/) g_bound_tex_2d = texture;
+    if (glad_glBindTexture) glad_glBindTexture(target, texture);
+}
+
+extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
+{
+    if (textures) {
+        for (GLsizei i = 0; i < n; i++) {
+            g_tex_scales.erase((unsigned)textures[i]);
+            if (textures[i] == g_bound_tex_2d) g_bound_tex_2d = 0;
+        }
+    }
+    if (glad_glDeleteTextures) glad_glDeleteTextures(n, textures);
+}
+
+extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
+                                   GLsizei width, GLsizei height)
+{
+    GLsizei out_w = width, out_h = height;
+    int max_dim = bd_get_max_tex_dim();
+    int short_side = std::min(width, height);
+    int long_side  = std::max(width, height);
+    bool looks_like_lut = (short_side <= 32) || (long_side > 4 * short_side);
+    int disp_w = config["device"]["displayWidth"].value_or<int>(0);
+    int disp_h = config["device"]["displayHeight"].value_or<int>(0);
+    bool looks_like_rt =
+        (disp_w > 0 && (int)width == disp_w && (int)height == disp_h);
+
+    if (target == 0x0DE1 /*GL_TEXTURE_2D*/
+        && max_dim > 0
+        && long_side > max_dim
+        && bd_format_is_capable(internalformat)
+        && !looks_like_lut
+        && !looks_like_rt) {
+        float s = (float)max_dim / (float)long_side;
+        int nw = std::max(4, ((int)(width * s) / 4) * 4);
+        int nh = std::max(4, ((int)(height * s) / 4) * 4);
+        if (g_bound_tex_2d != 0) {
+            g_tex_scales[g_bound_tex_2d] =
+                BD_ScaleInfo{(int)width, (int)height, nw, nh, (float)nw / (float)width};
+        }
+        out_w = nw; out_h = nh;
+    }
+    if (glad_glTexStorage2D) {
+        glad_glTexStorage2D(target, levels, internalformat, out_w, out_h);
+    }
+}
+
+extern "C" void bd_glTexSubImage2D(GLenum target, GLint level,
+                                    GLint xoffset, GLint yoffset,
+                                    GLsizei width, GLsizei height,
+                                    GLenum format, GLenum type, const void* pixels)
+{
+    auto it = g_tex_scales.find(g_bound_tex_2d);
+    if (it == g_tex_scales.end() || target != 0x0DE1 /*GL_TEXTURE_2D*/) {
+        if (glad_glTexSubImage2D)
+            glad_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
+        return;
+    }
+    int bpp = bd_bpp_from_format_type(format, type);
+    if (bpp == 0 || pixels == nullptr) {
+        if (glad_glTexSubImage2D)
+            glad_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
+        return;
+    }
+    const auto& info = it->second;
+    int new_x = (int)(xoffset * info.scale);
+    int new_y = (int)(yoffset * info.scale);
+    int new_w = (int)(width * info.scale);
+    int new_h = (int)(height * info.scale);
+    if (new_w < 1) new_w = 1;
+    if (new_h < 1) new_h = 1;
+    if (new_x < 0) new_x = 0;
+    if (new_y < 0) new_y = 0;
+    if (new_x + new_w > info.new_w) new_w = info.new_w - new_x;
+    if (new_y + new_h > info.new_h) new_h = info.new_h - new_y;
+    if (new_w <= 0 || new_h <= 0) return;
+    std::vector<uint8_t> resized((size_t)new_w * (size_t)new_h * (size_t)bpp);
+    bd_box_downsample((const uint8_t*)pixels, (int)width, (int)height,
+                      resized.data(), new_w, new_h, bpp);
+    if (glad_glTexSubImage2D) {
+        glad_glTexSubImage2D(target, level, new_x, new_y, new_w, new_h, format, type, resized.data());
+    }
+}
+
+static void bd_symtable_override(const char* sym, uintptr_t fn)
+{
+    for (int i = 0; i < symtable_gles2_index; i++) {
+        if (symtable_gles2[i].symbol && std::strcmp(symtable_gles2[i].symbol, sym) == 0) {
+            symtable_gles2[i].func = fn;
+            return;
+        }
+    }
+}
 
 void load_gles2_funcs()
 {
@@ -968,4 +1173,10 @@ void load_gles2_funcs()
 	glad_glTextureFoveationParametersQCOM = (PFNGLTEXTUREFOVEATIONPARAMETERSQCOMPROC)PTR_RESOLVE(glTextureFoveationParametersQCOM);
 	glad_glStartTilingQCOM = (PFNGLSTARTTILINGQCOMPROC)PTR_RESOLVE(glStartTilingQCOM);
 	glad_glEndTilingQCOM = (PFNGLENDTILINGQCOMPROC)PTR_RESOLVE(glEndTilingQCOM);
+
+	// [BD-CAP] Splice in texture-cap wrappers.  No-op when textureMaxDim=0.
+	bd_symtable_override("glTexStorage2D", (uintptr_t)&bd_glTexStorage2D);
+	bd_symtable_override("glTexSubImage2D", (uintptr_t)&bd_glTexSubImage2D);
+	bd_symtable_override("glBindTexture", (uintptr_t)&bd_glBindTexture);
+	bd_symtable_override("glDeleteTextures", (uintptr_t)&bd_glDeleteTextures);
 }
