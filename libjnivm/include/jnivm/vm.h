@@ -2,6 +2,7 @@
 #define JNIVM_VM_H_1
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <typeindex>
@@ -59,6 +60,51 @@ namespace jnivm {
 #endif
         // Map of all classes hooked or implicitly declared
         std::unordered_map<std::string, std::shared_ptr<Class>> classes;
+
+        // Fallback for defaultVal<jobject>: returns a typed instance instead
+        // of the anonymous Object dummy, preserving dynamic_cast.
+        std::unordered_map<std::string,
+                           std::function<std::shared_ptr<Object>()>> class_factories;
+        std::mutex factories_mtx;
+
+        template<typename T>
+        void registerFactory(const std::string& jni_name) {
+            std::lock_guard<std::mutex> lock(factories_mtx);
+            class_factories[jni_name] = []() {
+                return std::static_pointer_cast<Object>(std::make_shared<T>());
+            };
+        }
+
+        // Fixed-value returns for unregistered methods. Keyed by
+        // "class|method|sig"; type-erased so one map covers every J primitive.
+        // (writer + type_index instead of std::any — libjnivm is C++14.)
+        // Consulted by defaultValForMethod<T> before the zero/null fallback.
+        struct DefaultReturn {
+            std::type_index type;
+            std::function<void(void*)> writer;
+            DefaultReturn() : type(typeid(void)) {}
+        };
+        std::unordered_map<std::string, DefaultReturn> default_returns;
+        std::mutex defaults_mtx;
+
+        template<typename T>
+        void setDefault(const char* jni_class, const char* method,
+                        const char* signature, T value) {
+            std::string key;
+            key.reserve(64);
+            key.append(jni_class ? jni_class : "");
+            key.push_back('|');
+            key.append(method ? method : "");
+            key.push_back('|');
+            key.append(signature ? signature : "");
+            DefaultReturn dr;
+            dr.type = typeid(T);
+            dr.writer = [value](void* out) {
+                *static_cast<T*>(out) = value;
+            };
+            std::lock_guard<std::mutex> lock(defaults_mtx);
+            default_returns[std::move(key)] = std::move(dr);
+        }
 
         std::mutex mtx;
         // Stores all global references

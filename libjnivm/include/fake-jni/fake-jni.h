@@ -91,6 +91,16 @@ namespace FakeJni {
 
         }
 
+        template<class T> inline void registerFactory(const std::string& jni_name) {
+            jnivm::VM::registerFactory<T>(jni_name);
+        }
+
+        template<typename T>
+        inline void setDefault(const char* jni_class, const char* method,
+                                const char* signature, T value) {
+            jnivm::VM::setDefault<T>(jni_class, method, signature, value);
+        }
+
         virtual std::shared_ptr<JClass> findClass(const char * name);
 
         std::vector<std::shared_ptr<FakeJni::JClass>> getClasses();

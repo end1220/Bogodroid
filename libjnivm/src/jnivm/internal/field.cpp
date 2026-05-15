@@ -40,9 +40,13 @@ jfieldID jnivm::GetFieldID(JNIEnv *env, jclass cl_, const char *name, const char
             }
         }
         if(ReturnNull) {
-#ifdef JNI_TRACE
+#ifndef NDEBUG
             if(trace) {
-                LOG("JNIVM", "Unresolved symbol, Class=`%s`, %sField=`%s`, Signature=`%s`", cl ? cl->nativeprefix.data() : nullptr, isStatic ? "Static" : "", name, type);
+                jnivm::log_stub_miss_once(
+                    isStatic ? "Static FieldID" : "FieldID",
+                    cl ? cl->nativeprefix.data() : "(null)",
+                    name ? name : "(null)",
+                    type ? type : "(null)");
             }
 #endif
             return nullptr;

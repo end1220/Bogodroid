@@ -12,6 +12,15 @@ namespace jnivm {
     template<> void defaultVal(ENV* env, std::string signature);
     template<> jobject defaultVal(ENV* env, std::string signature);
 
+    // Default-value-with-method-context: consults VM::default_returns
+    // (declarative stubs registered via VM::setDefault<T>) first; on miss,
+    // delegates to defaultVal<T>(env, signature). cls/name may be null —
+    // null on either side skips the registry lookup and goes straight to
+    // the type-default path.
+    template<class T> T defaultValForMethod(ENV* env, const char* cls,
+                                            const char* name,
+                                            const std::string& signature);
+
     template <class T, class...Y> struct MDispatchBase {
         static T CallMethod(JNIEnv * env, Y...p, jmethodID id, va_list param);
     };

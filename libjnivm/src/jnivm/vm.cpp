@@ -9,6 +9,7 @@
 #include <locale>
 #include <sstream>
 #include <climits>
+#include <cstdio>
 #include "internal/log.h"
 #include <jnivm/weak.h>
 #include <stdexcept>
@@ -75,8 +76,10 @@ jboolean IsAssignableFrom(JNIEnv *env, jclass c1, jclass c2) {
 	auto&& clazz2 = JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), c2);
 	if(strcmp(clazz1.get()->getName().c_str(), "java/lang/String") == 0 && strcmp(clazz2.get()->getName().c_str(), "java/lang/Object") == 0)
 	{
+#ifndef NDEBUG
 		printf("[JNIVM] Override: String is assignable to Object. (Silly hack)\n");
-		return true; 
+#endif
+		return true;
 	}
 	return HasBaseClass(env, JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), c1).get(), JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), c2).get());
 };
@@ -90,9 +93,18 @@ jobject ToReflectedField(JNIEnv * env, jclass c, jfieldID fid, jboolean isStatic
 jint Throw(JNIEnv *env, jthrowable ex) {
 	auto except = JNITypes<std::shared_ptr<jnivm::Throwable>>::JNICast(ENV::FromJNIEnv(env), ex);
 	(ENV::FromJNIEnv(env))->current_exception = except ? except : nullptr;
+#ifndef NDEBUG
+	LOG("BD-EXC", "Throw() ex=%p", (void*)ex);
+#endif
 	return 0;
 };
 jint ThrowNew(JNIEnv *env, jclass c, const char * message) {
+#ifndef NDEBUG
+	auto cls = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), c);
+	LOG("BD-EXC", "ThrowNew class=%s msg=%s",
+	        cls ? cls->nativeprefix.data() : "(null)",
+	        message ? message : "(null)");
+#endif
 	try {
 		throw std::runtime_error(message);
 	} catch(...) {
@@ -252,10 +264,12 @@ jclass GetObjectClass(JNIEnv *env, jobject jo) {
 	return jo ? JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(ENV::FromJNIEnv(env), JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(ENV::FromJNIEnv(env), jo)->getClassInternal(ENV::FromJNIEnv(env))) : env->FindClass("Invalid");
 };
 jboolean IsInstanceOf(JNIEnv *env, jobject jo, jclass cl) {
+#ifndef NDEBUG
 	printf("[JNIVM] Is %s an instance of %s? - %d\n",
 		JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(ENV::FromJNIEnv(env), jo).get()->getClass().getName().c_str(),
 		JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), cl).get()->getName().c_str(),
 		jo && IsAssignableFrom(env, GetObjectClass(env, jo), cl));
+#endif
 	return jo && IsAssignableFrom(env, GetObjectClass(env, jo), cl);
 };
 

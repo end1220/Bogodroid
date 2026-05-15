@@ -1,8 +1,24 @@
 #include "method.h"
 #include "log.h"
 #include <jnivm/internal/jValuesfromValist.h>
+#include <cstdio>
+#include <mutex>
+#include <unordered_set>
+#include <string>
 
 using namespace jnivm;
+
+// Print each (kind, class, name, sig) tuple only once.
+void jnivm::log_stub_miss_once(const char* kind, const char* cls, const char* meth, const char* sig) {
+    static std::mutex mtx;
+    static std::unordered_set<std::string> seen;
+    std::string key = std::string(kind) + "|" + (cls?cls:"?") + "|" + (meth?meth:"?") + "|" + (sig?sig:"?");
+    std::lock_guard<std::mutex> lock(mtx);
+    if (seen.insert(key).second) {
+        LOG("JNIVM", "[STUB-MISS] %s: Class=`%s` Member=`%s` Sig=`%s` -> returning default",
+            kind, cls?cls:"???", meth?meth:"???", sig?sig:"???");
+    }
+}
 
 template<bool isStatic, bool ReturnNull, bool AllowNative, bool trace>
 jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const char *str1) {
@@ -52,9 +68,13 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
             }
         }
         if(ReturnNull) {
-#ifdef JNI_TRACE
+#ifndef NDEBUG
             if(trace) {
-                LOG("JNIVM", "Unresolved symbol, Class=`%s`, %sMethod=`%s`, Signature=`%s`", cur ? cur->nativeprefix.data() : nullptr, AllowNative ? "Native" : isStatic ? "Static" : "", str0, str1);
+                log_stub_miss_once(
+                    AllowNative ? "Native MethodID" : isStatic ? "Static MethodID" : "MethodID",
+                    cur ? cur->nativeprefix.data() : "(null)",
+                    str0 ? str0 : "(null)",
+                    str1 ? str1 : "(null)");
             }
 #endif
             return nullptr;
@@ -89,7 +109,55 @@ template<class T> T jnivm::defaultVal(ENV* env, std::string signature) {
 template<> void jnivm::defaultVal(ENV* env, std::string signature) {
 }
 
+// Consult VM::default_returns before falling back to defaultVal<T>.
+// type_index match guards against "registered as int, read as bool".
+template<class T> T jnivm::defaultValForMethod(ENV* env, const char* cls,
+                                                const char* name,
+                                                const std::string& signature) {
+    if (cls && name && env) {
+        auto& vm = *env->GetVM();
+        std::string key;
+        key.reserve(64);
+        key.append(cls);
+        key.push_back('|');
+        key.append(name);
+        key.push_back('|');
+        key.append(signature);
+        std::lock_guard<std::mutex> lock(vm.defaults_mtx);
+        auto it = vm.default_returns.find(key);
+        if (it != vm.default_returns.end() && it->second.type == typeid(T)) {
+            T out{};
+            it->second.writer(&out);
+            return out;
+        }
+    }
+    return defaultVal<T>(env, signature);
+}
+template<> void jnivm::defaultValForMethod(ENV* env, const char*, const char*,
+                                            const std::string& signature) {
+    defaultVal<void>(env, signature);
+}
+
 template<> jobject jnivm::defaultVal(ENV* env, std::string signature) {
+    // Explicit factory registry — always active (each entry is opt-in).
+    if(!signature.empty()) {
+        size_t off = signature.find_last_of(")");
+        if(signature[off + 1] == 'L' && signature[signature.size() - 1] == ';') {
+            std::string cls_name = signature.substr(off + 2, signature.size() - (off + 3));
+            auto& vm = *env->GetVM();
+            std::function<std::shared_ptr<Object>()> ctor;
+            {
+                std::lock_guard<std::mutex> lock(vm.factories_mtx);
+                auto it = vm.class_factories.find(cls_name);
+                if (it != vm.class_factories.end()) {
+                    ctor = it->second;
+                }
+            }
+            if (ctor) {
+                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, ctor());
+            }
+        }
+    }
 #ifdef JNI_RETURN_NON_ZERO
     if(!signature.empty()) {
         size_t off = signature.find_last_of(")");
@@ -166,7 +234,7 @@ template<> jobject jnivm::defaultVal(ENV* env, std::string signature) {
 }
 
 static Method* findNonVirtualOverload(Class*cl, Method*mid) {
-    if(!cl) {
+    if(!cl || !mid) {
         return mid;
     }
     auto res = std::find_if(cl->methods.begin(), cl->methods.end(), [mid](auto&& m) {
@@ -174,18 +242,29 @@ static Method* findNonVirtualOverload(Class*cl, Method*mid) {
     });
     if(res != cl->methods.end()) {
         return res->get();
-    } else {
-        return nullptr;
     }
+    return mid;
 }
 
 static Method* findVirtualOverload(jnivm::ENV *env, Class*cl, Method*mid) {
-    auto r = findNonVirtualOverload(cl, mid);
-    if(r != nullptr) {
-        return r;
-    } else {
-        return findVirtualOverload(env, mid->GetBaseClasses(env)[0].get(), mid);
+    if (!mid) return nullptr;
+    if (cl) {
+        auto res = std::find_if(cl->methods.begin(), cl->methods.end(), [mid](auto&& m) {
+            return !m->_static && mid->name == m->name && mid->signature == m->signature && m->nativehandle;
+        });
+        if (res != cl->methods.end()) {
+            return res->get();
+        }
+        if (cl->baseclasses) {
+            for (auto&& base : cl->baseclasses(env)) {
+                if (base) {
+                    auto r2 = findVirtualOverload(env, base.get(), mid);
+                    if (r2 && r2 != mid) return r2;
+                }
+            }
+        }
     }
+    return mid;
 }
 
 template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject obj, jmethodID id, jvalue *param) {
@@ -197,8 +276,18 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
         LOG("JNIVM", "CallMethod field is null");
 #endif
     if (mid && mid->nativehandle) {
+        auto orig_name = mid->name;
+        auto orig_sig = mid->signature;
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
         mid = findVirtualOverload(ENV::FromJNIEnv(env), cl.get(), mid);
+        if (!mid || !mid->nativehandle) {
+            log_stub_miss_once("Virtual",
+                cl ? cl->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig.data());
+            return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+                cl ? cl->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig);
+        }
 #ifdef JNI_TRACE
         LOG("JNIVM", "Call Member Function Class=`%s` Method=`%s` Signature=`%s`", cl ? cl->nativeprefix.data() : "???", mid->name.data(), mid->signature.data());
 #endif
@@ -214,11 +303,15 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
             return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
         }
     } else {
-#ifdef JNI_TRACE
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
-        LOG("JNIVM", "Call Unknown Member Function Class=`%s` Method=`%s` Signature=`%s`", cl ? cl->nativeprefix.data() : "???", mid ? mid->name.data() : "???", mid ? mid->signature.data() : "???");
-#endif
-        return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
+        log_stub_miss_once("Unknown Member",
+            cl ? cl->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature.data() : nullptr);
+        return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+            cl ? cl->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature : "");
     }
 };
 
@@ -259,11 +352,21 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
         LOG("JNIVM", "CallMethod field is null");
 #endif
     if (mid && mid->nativehandle) {
-        auto clz = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl); 
+        auto orig_name = mid->name;
+        auto orig_sig = mid->signature;
+        auto clz = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);
 #ifdef JNI_TRACE
         LOG("JNIVM", "Call NonVirtual Member Function Class=`%s` Method=`%s` Signature=`%s`", clz ? clz->nativeprefix.data() : "???", mid->name.data(), mid ? mid->signature.data() : "???");
 #endif
         mid = findNonVirtualOverload(clz.get(), mid);
+        if (!mid || !mid->nativehandle) {
+            log_stub_miss_once("NonVirtual",
+                clz ? clz->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig.data());
+            return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+                clz ? clz->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig);
+        }
         try {
             return static_cast<jnivm::impl::MethodHandleBase<T>*>(mid->nativehandle.get())->NonVirtualInstanceInvoke(ENV::FromJNIEnv(env), obj, param, jnivm::impl::MethodHandleBase<T>{});
         } catch (...) {
@@ -276,11 +379,15 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
             return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
         }
     } else {
-#ifdef JNI_TRACE
         auto clz = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);
-        LOG("JNIVM", "Call Unknown NonVirtual Member Function Class=`%s` Method=`%s` Signature=`%s`", clz ? clz->nativeprefix.data() : "???", mid ? mid->name.data() : "???", mid ? mid->signature.data() : "???");
-#endif
-        return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
+        log_stub_miss_once("Unknown NonVirtual",
+            clz ? clz->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature.data() : nullptr);
+        return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+            clz ? clz->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature : "");
     }
 };
 
@@ -309,10 +416,14 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jclass _cl
             return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
         }
     } else {
-#ifdef JNI_TRACE
-        LOG("JNIVM", "Call Unknown Static Function Class=`%s` Method=`%s` Signature=`%s`", cl ? cl->nativeprefix.data() : "???", mid ? mid->name.data() : "???", mid ? mid->signature.data() : "???");
-#endif
-        return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
+        log_stub_miss_once("Unknown Static",
+            cl ? cl->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature.data() : nullptr);
+        return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+            cl ? cl->nativeprefix.data() : nullptr,
+            mid ? mid->name.data() : nullptr,
+            mid ? mid->signature : "");
     }
 };
 
@@ -344,7 +455,8 @@ DeclareTemplate(jobject);
 DeclareTemplate(void);
 #undef DeclareTemplate
 
-#define DeclareTemplate(T) template T jnivm::defaultVal(ENV* env, std::string signature)
+#define DeclareTemplate(T) template T jnivm::defaultVal(ENV* env, std::string signature); \
+                           template T jnivm::defaultValForMethod(ENV* env, const char* cls, const char* name, const std::string& sig)
 DeclareTemplate(jboolean);
 DeclareTemplate(jbyte);
 DeclareTemplate(jshort);

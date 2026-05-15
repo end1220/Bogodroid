@@ -1,6 +1,7 @@
 #include <jnivm/internal/findclass.h>
 #include <jnivm/env.h>
 #include <jnivm/jnitypes.h>
+#include <cstdio>
 #include <cstring>
 #include "log.h"
 
@@ -86,6 +87,9 @@ std::shared_ptr<jnivm::Class> jnivm::InternalFindClass(ENV *env, const char *nam
 		curc = ccl->second;
 	} else {
 		if(returnZero) return nullptr;
+#ifndef NDEBUG
+		LOG("BD-PHANTOM", "FindClass(%s) - not registered, auto-stub", name);
+#endif
 		curc = std::make_shared<Class>();
 		const char * lastslash = strrchr(name, '/');
 		curc->name = lastslash != nullptr ? lastslash + 1 : name;
