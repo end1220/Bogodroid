@@ -89,7 +89,6 @@ add_executable(${CMAKE_PROJECT_NAME}
     javastubs/android_misc.cpp
     javastubs/android_descriptors.cpp
     javastubs/javac.cpp
-    javastubs/gplay.cpp
     platform/common/toml_include.cpp
     platform/common/debug_utils.cpp
     platform/common/config.cpp
@@ -165,7 +164,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     )
 endif()
 
-# Link against the library targets from libjnivm
+# Link against the library targets from libjnivm.
+# libbsd + libmd are statically linked so each port doesn't need to ship
+# libbsd.so.0 / libmd.so.0 alongside the loader (saves ~120 KB on disk per
+# port and avoids missing-libbsd issues on bare ROMs).
 target_link_libraries(${CMAKE_PROJECT_NAME}
     PRIVATE
     fake-jni
@@ -174,7 +176,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     SDL2
     dl
     pthread
+    -Wl,-Bstatic
     bsd
+    md
+    -Wl,-Bdynamic
     z
 )
 
@@ -229,6 +234,18 @@ option(BD_ENABLE_OPENSLES_SHIM "Compile OpenSL ES → SDL bridge (currently sile
 if(BD_ENABLE_OPENSLES_SHIM)
     message(STATUS "BD_ENABLE_OPENSLES_SHIM on -> linking OpenSL ES thunk")
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_OPENSLES_SHIM)
+endif()
+
+# Google Play Game Services (achievements, leaderboards, ReviewManager, ...).
+# Off by default: typical handheld titles don't link Google Play SDKs. Drops
+# ~340 KB (vtables + RTTI mangled names + 16 class bodies). Re-enable per-port
+# if `strings .../lib/arm64-v8a/*.so | grep com/google/android/(gms|play)`
+# returns hits — the game would be calling these via JNI / reflection.
+option(BD_ENABLE_GPLAY "Compile Google Play Game Services stubs" OFF)
+if(BD_ENABLE_GPLAY)
+    message(STATUS "BD_ENABLE_GPLAY on -> compiling Google Play stubs")
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE javastubs/gplay.cpp)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_GPLAY)
 endif()
 
 option(BOGO_QUIET "Silence BD_LOG and jnivm LOG (log.txt nearly empty)" OFF)

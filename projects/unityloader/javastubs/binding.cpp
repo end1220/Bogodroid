@@ -1,7 +1,9 @@
 #include "android.h"
 #include "baron/baron.h"
 #include "fakefmod.h"
+#ifdef BD_ENABLE_GPLAY
 #include "gplay.h"
+#endif
 #include "javac.h"
 #include "jnibridge.h"
 #include "unity.h"
@@ -11,7 +13,9 @@ void InitJNIBinding(FakeJni::Jvm* vm)
 
     InitJNIJavaClasses(vm);
     InitJNIAndroidClasses(vm);
+#ifdef BD_ENABLE_GPLAY
     InitJNIGooglePlayClasses(vm);
+#endif
 
     // vm->registerClass<jnivm::java::util::NoSuchElementException>();
     // vm->registerClass<jnivm::com::unity3d::player::NativeLoader>();
