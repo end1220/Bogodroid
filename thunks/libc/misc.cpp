@@ -18,6 +18,7 @@
 #include <inttypes.h>
 #include <link.h>
 #include <stdbool.h>
+#include <atomic>
 
 
 
@@ -50,46 +51,7 @@ extern "C" long syscall_impl(long number,
         int* uaddr2 = (int*)arg5;
         unsigned int val3 = (unsigned int)arg6;
 
-        // // Isolate the primary operation (e.g., WAIT, WAKE) from flags
-        // int op_cmd = op & FUTEX_CMD_MASK; // FUTEX_CMD_MASK is ~FUTEX_PRIVATE_FLAG
-        // const char* priv_str = (op & FUTEX_PRIVATE_FLAG) ? "_PRIVATE" : "";
-
-        // // --- Detailed Logging Based on Operation ---
-        // switch (op_cmd) {
-        //     case FUTEX_WAIT:
-        //         fprintf(stderr, "[FUTEX_WAIT] ---> Thread %ld waiting on addr %p. ", syscall(SYS_gettid), uaddr);
-        //         fprintf(stderr, "Op: FUTEX_WAIT%s. Expected val: %u. ", priv_str, val);
-        //         if (timeout) {
-        //             fprintf(stderr, "Timeout: %ld s, %ld ns.\n", timeout->tv_sec, timeout->tv_nsec);
-        //         } else {
-        //             fprintf(stderr, "Timeout: INFINITE.\n");
-        //         }
-        //         break;
-
-        //     case FUTEX_WAKE:
-        //         fprintf(stderr, "[FUTEX_WAKE] ---> Thread %ld waking up addr %p. ", syscall(SYS_gettid), uaddr);
-        //         fprintf(stderr, "Op: FUTEX_WAKE%s. Wake count: %u.\n", priv_str, val);
-        //         break;
-
-        //     default:
-        //         fprintf(stderr, "[FUTEX_OTHER] -> Thread %ld calling futex on addr %p. ", syscall(SYS_gettid), uaddr);
-        //         fprintf(stderr, "Op: %d (Unknown). Val: %u.\n", op, val);
-        //         break;
-        // }
-
-        // --- Make the actual syscall to the host kernel ---
-        long ret = syscall(SYS_futex, uaddr, op, val, timeout, uaddr2, val3);
-
-        // // --- Log the result ---
-        // if (ret == -1) {
-        //     fprintf(stderr, "[FUTEX_RESULT] <--- Call FAILED for addr %p. Return: %ld, Errno: %d (%s)\n",
-        //             uaddr, ret, errno, strerror(errno));
-        // } else {
-        //     fprintf(stderr, "[FUTEX_RESULT] <--- Call SUCCEEDED for addr %p. Return: %ld (woken threads)\n",
-        //             uaddr, ret);
-        // }
-
-        return ret;
+        return syscall(SYS_futex, uaddr, op, val, timeout, uaddr2, val3);
     }
 
     {
@@ -108,7 +70,7 @@ extern "C" ABI_ATTR void abort_impl(void)
 
 extern "C" ABI_ATTR void* dlopen_impl(const char* filename, int flags)
 {
-    printf("Guest called dlopen for %s\n", filename);
+    BD_DEBUG("DLOPEN", "%s", filename ? filename : "(null)");
 
     if (filename == NULL)
         return NULL;
@@ -120,13 +82,11 @@ extern "C" ABI_ATTR void* dlopen_impl(const char* filename, int flags)
     so_module* head = so_get_head();
     while(head)
     {
-        printf("Checking %s\n", head->path);
         realpath(head->path, resolved2);
         if (strcmp(resolved1, resolved2) == 0)
             return head;
         head = head->next;
     }
-
 
     return (void*)0xDEAD;
 }
@@ -152,10 +112,7 @@ extern "C" ABI_ATTR int dladdr_impl(const void* addr, Dl_info* info)
 
 extern "C" ABI_ATTR void* dlsym_impl(void* handle, const char* name)
 {
-
-    void* addr = (void*)so_resolve_link((so_module*)handle, name);
-    printf("dlsym(%p, %s) = 0x%p\n", handle, name, addr);
-    return addr;
+    return (void*)so_resolve_link((so_module*)handle, name);
 }
 
 extern "C" ABI_ATTR const void*
@@ -235,6 +192,70 @@ extern "C" ABI_ATTR int __system_property_get_impl(const char* name, char* value
 {
     WARN_STUB;
     value[0] = 0;
+    return 0;
+}
+
+// libunity sometimes passes NULL from internal failures straight into libc
+// string ops, which then segfault. These wrappers return safe sentinels.
+extern "C" ABI_ATTR size_t strlen_safe_impl(const char* s)
+{
+    if (!s) {
+        static std::atomic<int> n{0};
+        int cur = ++n;
+        if (cur <= 5) {
+            BD_DEBUG("STRGUARD", "strlen(NULL) #%d (returning 0)", cur);
+        }
+        return 0;
+    }
+    return strlen(s);
+}
+
+extern "C" ABI_ATTR char* strchr_safe_impl(const char* s, int c)
+{
+    if (!s) return nullptr;
+    return (char*)strchr(s, c);
+}
+
+extern "C" ABI_ATTR char* strrchr_safe_impl(const char* s, int c)
+{
+    if (!s) return nullptr;
+    return (char*)strrchr(s, c);
+}
+
+extern "C" ABI_ATTR int strcmp_safe_impl(const char* a, const char* b)
+{
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return strcmp(a, b);
+}
+
+extern "C" ABI_ATTR int strncmp_safe_impl(const char* a, const char* b, size_t n)
+{
+    if (n == 0) return 0;
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return strncmp(a, b, n);
+}
+
+extern "C" ABI_ATTR char* strstr_safe_impl(const char* haystack, const char* needle)
+{
+    if (!haystack || !needle) return nullptr;
+    return (char*)strstr(haystack, needle);
+}
+
+extern "C" ABI_ATTR const void* __system_property_find_impl(const char* name)
+{
+    WARN_STUB;
+    return nullptr;
+}
+
+extern "C" ABI_ATTR int __system_property_read_impl(const void* pi, char* name, char* value)
+{
+    WARN_STUB;
+    if (name) name[0] = 0;
+    if (value) value[0] = 0;
     return 0;
 }
 
@@ -479,8 +500,20 @@ extern "C" ABI_ATTR int dl_iterate_phdr_impl(
 }
 
 
+// Skip C++ dtors / atexit / Mali release on shutdown — the cleanup cascade
+// alloc-spikes and OOMs 1GB devices. Flush prefs first (small sync write).
+namespace jnivm { namespace android { namespace content { class SharedPreferences; } } }
+extern "C" void bd_flush_prefs_impl();
+
+extern "C" ABI_ATTR void exit_impl(int status)
+{
+    BD_LOG("EXIT", "guest exit() intercepted -> flush + _exit");
+    bd_flush_prefs_impl();
+    _exit(status);
+}
+
 extern "C" ABI_ATTR void __assert_impl(const char *expression, const char *file, int line) {
-    fprintf(stderr, "Guest assertion failed: %s, file %s, line %d\n", expression, file, line);
+    fatal_error("Guest assertion failed: %s, file %s, line %d\n", expression, file, line);
     abort();
 }
 
@@ -638,7 +671,7 @@ switch (name) {
     //case 0x009e: return sysconf(_SC_NSIG); TODO: Not supported on Linux
     default: {
         long result = sysconf(name);
-        printf("sysconf(%d) returned %ld\n", name, result);
+        BD_DEBUG("SYSCONF", "unmapped query %d -> host result %ld", name, result);
         return result;
     }
 }

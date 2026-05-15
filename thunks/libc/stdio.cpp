@@ -22,9 +22,73 @@ BIONIC_FILE *stdin_impl = &__sF_fake[0];
 BIONIC_FILE *stdout_impl = &__sF_fake[1];
 BIONIC_FILE *stderr_impl = &__sF_fake[2];
 
+extern "C" char* bd_redirect_datadir(const char* path);  // from fcntl.cpp
+extern "C" const char* bd_kill_analytics_check(const char* path); // from fcntl.cpp
+
+#include <sys/stat.h>
+#include <errno.h>
+
+// On ENOENT for write-mode open, mkdir all parents then retry once.
+// Unity ships shader cache writes to a non-existent ../cache/UnityShaderCache/.
+static void bd_mkdir_parents(const char* path)
+{
+    char buf[1024];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) return;
+    memcpy(buf, path, len + 1);
+    char* slash = strrchr(buf, '/');
+    if (!slash || slash == buf) return;
+    *slash = '\0';
+    for (char* p = buf + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
+
 ABI_ATTR BIONIC_FILE *fopen_impl(const char *arg1, const char* arg2)
 {
-    FILE *f = fopen(arg1, arg2);
+    arg1 = bd_kill_analytics_check(arg1);
+
+    char* redirected = bd_redirect_datadir(arg1);
+    const char* path = redirected ? redirected : arg1;
+    FILE *f = fopen(path, arg2);
+
+    // Retry once after mkdir -p on ENOENT.
+    if (!f && path && arg2 && errno == ENOENT &&
+        (strchr(arg2, 'w') || strchr(arg2, 'a'))) {
+        bd_mkdir_parents(path);
+        f = fopen(path, arg2);
+        if (f) {
+            BD_LOG("MKPARENT", "auto-created parent for %s", path);
+        }
+    }
+
+    if (path && (strstr(path, "catalog.json") || strstr(path, ".bundle")
+                 || strstr(path, "settings.json")
+                 || strstr(path, "/aa/")
+                 || strstr(path, "AddressablesLink"))) {
+        BD_DEBUG("ASSET", "fopen(%s, \"%s\") = %s",
+                path, arg2 ? arg2 : "(null)", f ? "OK" : "FAIL");
+    }
+    if (arg2 && (strchr(arg2, 'w') || strchr(arg2, 'a') || strchr(arg2, '+'))) {
+        BD_DEBUG("WROPEN", "fopen(%s, \"%s\") = %p",
+                path ? path : "(null)", arg2, (void*)f);
+    }
+    if (path && (strstr(path, "playerprefs") || strstr(path, "shared_prefs"))) {
+        BD_DEBUG("PREFS-IO", "fopen(%s, \"%s\") = %p",
+                path, arg2 ? arg2 : "(null)", (void*)f);
+    }
+    if (path && strstr(path, "Settings.txt")) {
+        BD_DEBUG("GRAPHICS-IO", "fopen(%s, \"%s\") = %s",
+                path, arg2 ? arg2 : "(null)", f ? "OK" : "FAIL");
+    }
+
+    if (redirected) free(redirected);
+
     if (!f)
         return NULL;
 

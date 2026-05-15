@@ -215,6 +215,14 @@ extern "C" ABI_ATTR int __android_log_print_impl(int, const char *, const char *
 extern "C" ABI_ATTR int __android_log_vprint_impl(int, const char *, const char *, va_list);
 extern "C" ABI_ATTR void android_set_abort_message_impl(const char *);
 extern "C" ABI_ATTR int __system_property_get_impl(const char *, char *);
+extern "C" ABI_ATTR const void* __system_property_find_impl(const char *);
+extern "C" ABI_ATTR int __system_property_read_impl(const void *, char *, char *);
+extern "C" ABI_ATTR size_t strlen_safe_impl(const char *);
+extern "C" ABI_ATTR char* strchr_safe_impl(const char *, int);
+extern "C" ABI_ATTR char* strrchr_safe_impl(const char *, int);
+extern "C" ABI_ATTR int strcmp_safe_impl(const char *, const char *);
+extern "C" ABI_ATTR int strncmp_safe_impl(const char *, const char *, size_t);
+extern "C" ABI_ATTR char* strstr_safe_impl(const char *, const char *);
 extern "C" ABI_ATTR void syslog_impl(int priority, const char *format, ...);
 extern "C" ABI_ATTR int __open_2_impl(const char *, int);
 extern "C" ABI_ATTR void __assert_impl(const char *expression, const char *file, int line);
@@ -273,6 +281,7 @@ ABI_ATTR int flock_impl(int fd, int operation);
 
 ABI_ATTR int prctl_impl(int op, int arg1, int arg2, int arg3);
 extern "C" ABI_ATTR int dl_iterate_phdr_impl(void);
+extern "C" ABI_ATTR void exit_impl(int status);
 
 extern ABI_ATTR long sysconf_impl(int name);
 ABI_ATTR int strerror_r_impl(int errnum, char *buf, size_t buflen);

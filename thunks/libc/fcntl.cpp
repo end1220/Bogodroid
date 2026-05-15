@@ -99,9 +99,67 @@ char* clean_jar_path(const char* path) {
 
     return clean_path;
 }
+// Rewrites absolute /data/data/<pkg>/... to the host dataDir.
+// Returns NULL if no rewrite; otherwise malloc'd, caller must keep alive.
+#include "toml++/toml.hpp"
+extern toml::table config;
+extern "C" char* bd_redirect_datadir(const char* path)
+{
+    if (!path || path[0] != '/') return nullptr;
+    static std::string prefix; static std::string real_root;
+    static bool initialized = false;
+    if (!initialized) {
+        std::string pkg = config["package"]["packageName"].value_or<std::string>("");
+        if (!pkg.empty()) prefix = "/data/data/" + pkg + "/";
+        std::string dd = config["paths"]["android_data"].value_or<std::string>("../");
+        if (char* abs = realpath(dd.c_str(), nullptr)) {
+            real_root = abs;
+            free(abs);
+            if (!real_root.empty() && real_root.back() != '/') real_root.push_back('/');
+        }
+        initialized = true;
+    }
+    if (prefix.empty() || real_root.empty()) return nullptr;
+    if (strncmp(path, prefix.c_str(), prefix.size()) != 0) return nullptr;
+    std::string redirected = real_root + (path + prefix.size());
+    BD_LOG("DATADIR", "redirect %s -> %s", path, redirected.c_str());
+    return strdup(redirected.c_str());
+}
+
+// Redirect Unity Analytics event writes to /dev/null. The game writes 30+
+// tiny files/sec; without this they grind eMMC and contend for IO.
+static const char* bd_kill_analytics(const char* path)
+{
+    static int cached = -1; // -1 = unknown, 0 = pass, 1 = block
+    if (cached < 0) {
+        cached = config["unity"]["block_analytics"].value_or<bool>(true) ? 1 : 0;
+    }
+    if (cached && path && strstr(path, "/Analytics/")) {
+        return "/dev/null";
+    }
+    return path;
+}
+
+extern "C" const char* bd_kill_analytics_check(const char* path)
+{
+    return bd_kill_analytics(path);
+}
+
 ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode)
 {
     verbose("NATIVE","Opening file %s",filename);
+    filename = bd_kill_analytics(filename);
+
+    char* redirected = bd_redirect_datadir(filename);
+    // Leaked intentionally — bounded by one strdup per /data/data write open.
+    if (redirected) filename = redirected;
+
+    if (filename && (strstr(filename, "playerprefs") || strstr(filename, "shared_prefs"))) {
+        BD_DEBUG("PREFS-IO", "open(%s, flags=0x%x)", filename, flags);
+    }
+    if (filename && strstr(filename, "Settings.txt")) {
+        BD_DEBUG("GRAPHICS-IO", "open(%s, flags=0x%x)", filename, flags);
+    }
 
     // if (strcmp(filename,"/proc/cpuinfo") == 0)
     // {
@@ -130,6 +188,19 @@ ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode)
     char* clean_path = clean_jar_path(filename);
     int fd = open(clean_path, flags, mode);
     verbose("NATIVE","Got file descriptor %d",fd);
+
+    if (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) {
+        BD_DEBUG("WROPEN", "open(%s, flags=0x%x) = %d",
+                clean_path, flags, fd);
+    }
+    if (clean_path && (strstr(clean_path, "catalog.json") ||
+                       strstr(clean_path, ".bundle") ||
+                       strstr(clean_path, "settings.json") ||
+                       strstr(clean_path, "/aa/") ||
+                       strstr(clean_path, "AddressablesLink"))) {
+        BD_DEBUG("ASSET", "open(%s, flags=0x%x) = %d %s",
+                clean_path, flags, fd, fd >= 0 ? "OK" : "FAIL");
+    }
     return fd;
 }
 
