@@ -1,10 +1,14 @@
 .vscode/
+.claude/settings.local.json
 gamefiles/*
 !gamefiles/support_files
 !gamefiles/teapot/
 build/
+build-release/
+build-release-pure/
 build_release/
 build_cross/
+dist/
 libjnivm/build/
 il2cpp/
 projects/unityloader/monocompat/il2cpp_log_shim.cpp

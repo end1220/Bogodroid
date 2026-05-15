@@ -1,5 +1,9 @@
 # Bogodroid NEO
 
+> **Cross-compile from macOS / x86 Linux → ARM64 PortMaster handheld?**
+> 看 **[BUILD-DOCKER.md](./BUILD-DOCKER.md)**（中文，专门写的 Docker 工作流）。
+> 下面 `How to Build` 一节是上游原生 Linux 编译，路线不同。
+
 This is an experimental project attempting to create a wrapper environment around native libraries from ARM Android Apps, with the intent of running the libraries (or entire apps and games) on ARM Linux (armhf and arm64) handhelds. The current focus is on supporting the Unity game engine.
 
 The project is heavily based on [JohnnyOnFlame/gmloader-net](https://github.com/JohnnyonFlame/gmloader-next) and [ChristopherHX/libjnivm](https://github.com/ChristopherHX/libjnivm).

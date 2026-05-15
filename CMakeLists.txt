@@ -120,10 +120,15 @@ add_executable(${CMAKE_PROJECT_NAME}
     thunks/khronos/gles2.cpp
 
     thunks/egl_sdl/egl_sdl.cpp
+
+    thunks/zlib/zlib.cpp
+
+    thunks/opensles/opensles.cpp
 )
 
-target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC 
+target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
     ${CMAKE_SOURCE_DIR}/tomlplusplus/include
+    ${CMAKE_SOURCE_DIR}/tomlplusplus/vendor   # nlohmann/json.hpp lives here
     ${CMAKE_SOURCE_DIR}/libjnivm/include
     ${CMAKE_SOURCE_DIR}/loader/
     ${CMAKE_SOURCE_DIR}/thunks/
@@ -161,7 +166,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # Link against the library targets from libjnivm
-target_link_libraries(${CMAKE_PROJECT_NAME} 
+target_link_libraries(${CMAKE_PROJECT_NAME}
     PRIVATE
     fake-jni
     baron
@@ -170,6 +175,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     dl
     pthread
     bsd
+    z
 )
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
@@ -193,3 +199,45 @@ target_precompile_headers(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:<javac.h>>
     $<$<COMPILE_LANGUAGE:CXX>:<android.h>>
 )
+
+# RK3566 handhelds ship with GLIBCXX < 3.4.31 — static-link the runtime.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR NOT DEFINED CMAKE_BUILD_TYPE)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
+        -ffunction-sections -fdata-sections -fvisibility=hidden -flto)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        -Wl,--gc-sections -flto -s)
+endif()
+
+option(BD_ENABLE_TRACE "Enable BD-* diagnostic logs in optimized build" OFF)
+if(BD_ENABLE_TRACE)
+    message(STATUS "BD_ENABLE_TRACE on -> undefining NDEBUG (trace logs active)")
+    # libjnivm is compiled separately; -UNDEBUG must reach its TU too.
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -UNDEBUG)
+    foreach(t IN ITEMS jnivm fake-jni baron)
+        if(TARGET ${t})
+            target_compile_options(${t} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
+endif()
+
+# Default OFF: with the shim active FMOD probes OpenSL, sees no progress,
+# and gives up *without* falling back to AudioTrack — silent audio. Absent,
+# dlsym returns nil and FMOD routes to AudioTrack/fakefmod which works.
+option(BD_ENABLE_OPENSLES_SHIM "Compile OpenSL ES → SDL bridge (currently silent — see source)" OFF)
+if(BD_ENABLE_OPENSLES_SHIM)
+    message(STATUS "BD_ENABLE_OPENSLES_SHIM on -> linking OpenSL ES thunk")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_OPENSLES_SHIM)
+endif()
+
+option(BOGO_QUIET "Silence BD_LOG and jnivm LOG (log.txt nearly empty)" OFF)
+if(BOGO_QUIET)
+    message(STATUS "BOGO_QUIET on -> silencing BD_LOG and jnivm LOG")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOGO_QUIET)
+    foreach(t IN ITEMS jnivm fake-jni baron)
+        if(TARGET ${t})
+            target_compile_definitions(${t} PRIVATE BOGO_QUIET)
+        endif()
+    endforeach()
+endif()
