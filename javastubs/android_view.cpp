@@ -178,6 +178,26 @@ long jnivm::android::view::KeyEvent::getEventTime()
     return this->timestamp;
 }
 
+long jnivm::android::view::KeyEvent::getDownTime()
+{
+    return this->downTime;
+}
+
+int jnivm::android::view::KeyEvent::getRepeatCount()
+{
+    return this->repeatCount;
+}
+
+int jnivm::android::view::KeyEvent::getFlags()
+{
+    return this->flags;
+}
+
+int jnivm::android::view::KeyEvent::getScanCode()
+{
+    return this->scanCode;
+}
+
 ///// MotionEvent
 
 int jnivm::android::view::MotionEvent::getPointerCount()
@@ -486,10 +506,14 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::KeyEvent) { FakeJni::Constructor<KeyEvent, std::shared_ptr<jnivm::android::view::InputDevice>, int, int, int> {} },
 
-    { FakeJni::Function<&KeyEvent::getKeyCode> {}, "getKeyCode", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&KeyEvent::getAction> {}, "getAction", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&KeyEvent::getMetaState> {}, "getMetaState", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&KeyEvent::getEventTime> {}, "getEventTime", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getKeyCode> {},     "getKeyCode",     FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getAction> {},      "getAction",      FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getMetaState> {},   "getMetaState",   FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getEventTime> {},   "getEventTime",   FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getDownTime> {},    "getDownTime",    FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getRepeatCount> {}, "getRepeatCount", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getFlags> {},       "getFlags",       FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getScanCode> {},    "getScanCode",    FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::MotionRange) { FakeJni::Constructor<MotionRange, int, int, float, float, float, float> {} },

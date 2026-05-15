@@ -47,6 +47,9 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::media::MediaRouter>();
     vm->registerClass<jnivm::android::media::AudioDeviceInfo>();
     vm->registerClass<jnivm::android::media::AudioManager>();
+    vm->registerClass<jnivm::android::media::MediaExtractor>();
+    vm->registerClass<jnivm::android::media::MediaFormat>();
+    vm->registerClass<jnivm::android::media::MediaCodec>();
 
     // OS
     vm->registerClass<jnivm::android::os::Build>();
@@ -60,6 +63,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::os::HandlerThread>();
     vm->registerClass<jnivm::android::os::Environment>();
     vm->registerClass<jnivm::android::os::PowerManager>();
+    vm->registerClass<jnivm::android::os::ParcelFileDescriptor>();
 
     // Content
     vm->registerClass<jnivm::android::content::SharedPreferences>();
@@ -90,4 +94,34 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     // Provider
     vm->registerClass<jnivm::android::provider::Settings>();
     vm->registerClass<jnivm::android::provider::Settings::Secure>();
+
+    // Factory registrations — classes whose only role is "be a non-null
+    // instance the guest can hold and ignore". defaultVal<jobject> parses
+    // the JNI signature, looks up the JNI class name here, and builds the
+    // typed instance via std::make_shared<T>(). Method calls on the
+    // returned dummy hit the STUB-MISS path and fall to type-default
+    // returns.
+    //
+    // Adding a new entry replaces a hand-written one-line C++ method like
+    //   X Context::getX() { return std::make_shared<X>(); }
+    // plus its descriptor entry. The class still needs to exist in
+    // android.h (so make_shared<T>() compiles) and have at least an empty
+    // BEGIN_NATIVE_DESCRIPTOR so jnivm can dispatch into it.
+    vm->registerFactory<jnivm::android::media::MediaExtractor>("android/media/MediaExtractor");
+    vm->registerFactory<jnivm::android::media::MediaFormat>("android/media/MediaFormat");
+    vm->registerFactory<jnivm::android::media::MediaCodec>("android/media/MediaCodec");
+    vm->registerFactory<jnivm::android::os::ParcelFileDescriptor>("android/os/ParcelFileDescriptor");
+    vm->registerFactory<jnivm::java::io::FileDescriptor>("java/io/FileDescriptor");
+
+    // Context return types — methods on Context that just hand back a
+    // default-constructed instance of each. Migrated from hand-written
+    // bodies in android_content.cpp.
+    vm->registerFactory<jnivm::android::content::res::AssetManager>("android/content/res/AssetManager");
+    vm->registerFactory<jnivm::android::content::res::Resources>("android/content/res/Resources");
+    vm->registerFactory<jnivm::android::content::pm::PackageManager>("android/content/pm/PackageManager");
+    vm->registerFactory<jnivm::android::content::pm::PackageInfo>("android/content/pm/PackageInfo");
+    vm->registerFactory<jnivm::android::content::ContentResolver>("android/content/ContentResolver");
+    vm->registerFactory<jnivm::android::view::Window>("android/view/Window");
+    vm->registerFactory<jnivm::android::os::Bundle>("android/os/Bundle");
+    vm->registerFactory<jnivm::java::util::Map>("java/util/Map");
 }

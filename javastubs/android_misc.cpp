@@ -16,6 +16,36 @@ std::shared_ptr<FakeJni::JString> jnivm::android::net::Uri::encode(std::shared_p
     return string;
 }
 
+std::shared_ptr<FakeJni::JString> jnivm::android::net::Uri::decode(std::shared_ptr<FakeJni::JString> string)
+{
+    // Real percent decoding: turns "%XX" back into bytes, "+" into space.
+    // Game may URL-encode some payload before putString and decode after
+    // getString — identity stub would corrupt that round-trip.
+    if (!string) return std::make_shared<FakeJni::JString>("");
+    const std::string& in = *string;
+    std::string out;
+    out.reserve(in.size());
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            int hi = hex(in[i + 1]), lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back((char)((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        if (in[i] == '+') { out.push_back(' '); continue; }
+        out.push_back(in[i]);
+    }
+    return std::make_shared<FakeJni::JString>(out.c_str());
+}
+
 ///// DisplayManager
 
 std::shared_ptr<jnivm::android::view::Display>
@@ -104,6 +134,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::net::Uri) { FakeJni::Constructor<Uri> {} },
     { FakeJni::Function<&Uri::encode> {}, "encode", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&Uri::decode> {}, "decode", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::input::InputManager) { FakeJni::Constructor<InputManager> {} },

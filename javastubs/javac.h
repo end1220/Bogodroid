@@ -33,6 +33,37 @@ namespace java {
             long longValue();
         };
 
+        // [BD] Shadow class providing additional methods on java/lang/String.
+        // Real String is jnivm::String (FakeJni::JString) but it's defined
+        // in libjnivm without DEFINE_CLASS_NAME, so we can't attach methods
+        // to it via BEGIN_NATIVE_DESCRIPTOR. Instead this stub class shares
+        // the JNI name "java/lang/String" — registering both maps to the
+        // same VM Class object, so methods land in the same method table.
+        class StringStubs : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("java/lang/String")
+            // No-arg static factory: Unity IL2CPP looks up String::<init> with
+            // sig ()Ljava/lang/String; — its way of asking "give me an empty
+            // String". Real JVM resolves this via the standard String() ctor
+            // producing "". We return a fresh empty JString here.
+            static std::shared_ptr<FakeJni::JString> initEmpty();
+        };
+
+        class Integer : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("java/lang/Integer")
+            int value;
+            Integer() : value(0) {}
+            Integer(jint v) : value(v) {}
+            jint intValue();
+            jlong longValue();
+            jfloat floatValue();
+            jdouble doubleValue();
+            std::shared_ptr<FakeJni::JString> toString();
+            static std::shared_ptr<Integer> valueOf(jint v);
+            static jint parseInt(std::shared_ptr<FakeJni::JString> s);
+        };
+
         class Boolean : public virtual Object {
         private:
             jboolean value;
@@ -135,6 +166,11 @@ namespace java {
         public:
             DEFINE_CLASS_NAME("java/lang/System")
             static long nanoTime();
+            // Throws UnsatisfiedLinkError so games (e.g. Hollow Knight's
+            // NativeInput plugin) fall back to Unity Input when their .so
+            // can't be loaded under Bogodroid.
+            static void load(std::shared_ptr<FakeJni::JString> filename);
+            static void loadLibrary(std::shared_ptr<FakeJni::JString> libname);
         };
 
         // Fake method reflect, just so Unity cann call "toString" on it
@@ -167,6 +203,12 @@ namespace java {
             File(std::shared_ptr<FakeJni::JString> path);
             std::shared_ptr<FakeJni::JString> getPath();
             std::shared_ptr<FakeJni::JString> toString();
+        };
+
+        // Factory-stubbed. See android_descriptors.cpp.
+        class FileDescriptor : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("java/io/FileDescriptor")
         };
     }
 
@@ -242,6 +284,9 @@ namespace java {
             DEFINE_CLASS_NAME("java/util/Locale")
             static std::shared_ptr<jnivm::java::util::Locale> getDefault();
             std::shared_ptr<FakeJni::JString> toLanguageTag();
+            std::shared_ptr<FakeJni::JString> getLanguage();
+            std::shared_ptr<FakeJni::JString> getCountry();
+            std::shared_ptr<FakeJni::JString> toString();
         };
 
     }

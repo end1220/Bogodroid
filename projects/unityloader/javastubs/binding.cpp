@@ -36,6 +36,23 @@ void InitJNIBinding(FakeJni::Jvm* vm)
 
     vm->registerClass<jnivm::org::fmod::FMODAudioDevice>();
 
+    // ── Trivial default returns ───────────────────────────────────────
+    // Methods that always answer with a fixed value go here instead of
+    // getting a hand-written C++ body + a descriptor entry. When the
+    // game calls these via JNI, jnivm finds no method, takes the
+    // STUB-MISS path, and consults this registry before returning the
+    // generic type-default. Adding a new entry: pick the JNI class /
+    // method / signature triple and the value. No code change in
+    // javastubs/, no descriptor edit, no rebuild of a header.
+    //
+    // If the same method ever needs real logic, just write the C++
+    // member function + descriptor entry as before; the descriptor
+    // path takes precedence over this registry.
+    vm->setDefault<jboolean>("android/media/AudioManager",    "isBluetoothA2dpOn", "()Z", JNI_FALSE);
+    vm->setDefault<jint>    ("android/media/AudioManager",    "getStreamVolume",   "(I)I", 100);
+    vm->setDefault<jint>    ("android/media/AudioDeviceInfo", "getType",           "()I",
+                              jnivm::android::media::AudioDeviceInfo::TYPE_WIRED_HEADPHONES);
+
     HookStringExtensions(vm);
     HookClassExtensions(vm);
     HookIntExtensions(vm);

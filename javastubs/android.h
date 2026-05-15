@@ -7,10 +7,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <pthread.h>
 #include <queue>
+#include <set>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -23,6 +26,7 @@ namespace android {
         public:
             DEFINE_CLASS_NAME("android/net/Uri")
             static std::shared_ptr<FakeJni::JString> encode(std::shared_ptr<FakeJni::JString> string);
+            static std::shared_ptr<FakeJni::JString> decode(std::shared_ptr<FakeJni::JString> string);
         };
 
     }
@@ -120,6 +124,7 @@ namespace android {
             DEFINE_CLASS_NAME("android/view/InputDevice")
 
             static inline int SOURCE_KEYBOARD = 0x00000101;
+            static inline int SOURCE_DPAD = 0x00000201;
             static inline int SOURCE_GAMEPAD = 0x00000401;
             static inline int SOURCE_JOYSTICK = 0x01000010;
             static inline int SOURCE_MOUSE = 0x00002002;
@@ -346,7 +351,16 @@ namespace android {
 
             int action;
             int keyCode;
-            int state;
+            int state;          // metaState
+            // Standard Android KeyEvent fields. Apps and Unity InputSystem
+            // routinely call these getters; if we leave them at 0, holdTime
+            // (= eventTime - downTime) becomes ~eventTime which trips most
+            // long-press / repeat logic in games. See Android docs:
+            // https://developer.android.com/reference/android/view/KeyEvent
+            long downTime    = 0;
+            int  repeatCount = 0;
+            int  flags       = 0;
+            int  scanCode    = 0;
             long timestamp = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             KeyEvent(std::shared_ptr<jnivm::android::view::InputDevice> dev, int act, int code, int st)
                 : InputEvent(dev)
@@ -356,10 +370,14 @@ namespace android {
             {
             }
 
-            int getKeyCode();
-            int getAction();
-            int getMetaState();
+            int  getKeyCode();
+            int  getAction();
+            int  getMetaState();
             long getEventTime();
+            long getDownTime();
+            int  getRepeatCount();
+            int  getFlags();
+            int  getScanCode();
         };
 
         class MotionEvent : public InputEvent {
@@ -370,6 +388,8 @@ namespace android {
             static inline int AXIS_Y = 1;
             static inline int AXIS_Z = 11;
             static inline int AXIS_RZ = 14;
+            static inline int AXIS_HAT_X = 15;       // D-pad horizontal hat axis
+            static inline int AXIS_HAT_Y = 16;       // D-pad vertical hat axis
             static inline int AXIS_LTRIGGER = 17;
             static inline int AXIS_RTRIGGER = 18;
             static inline int AXIS_BRAKE = 23;
@@ -441,7 +461,7 @@ namespace android {
             DEFINE_CLASS_NAME("android/media/AudioDeviceInfo")
             inline static int TYPE_BLUETOOTH_A2DP = 8;
             inline static int TYPE_WIRED_HEADPHONES = 4;
-            int getType();
+            // getType() lives in binding.cpp via vm->setDefault.
         };
 
         class AudioManager : public FakeJni::JObject {
@@ -451,10 +471,9 @@ namespace android {
             inline static FakeJni::JString PROPERTY_OUTPUT_SAMPLE_RATE = (FakeJni::JString) "PROPERTY_OUTPUT_SAMPLE_RATE";
             inline static int GET_DEVICES_OUTPUTS = 2;
             inline static int STREAM_MUSIC = 3;
-            bool isBluetoothA2dpOn();
+            // isBluetoothA2dpOn / getStreamVolume live in binding.cpp via vm->setDefault.
             std::shared_ptr<FakeJni::JString> getProperty(std::shared_ptr<FakeJni::JString> property);
             std::shared_ptr<jnivm::Array<jnivm::android::media::AudioDeviceInfo>> getDevices(int type);
-            int getStreamVolume(int stream);
         };
 
         class MediaRouterRouteInfo : public FakeJni::JObject {
@@ -468,6 +487,22 @@ namespace android {
             DEFINE_CLASS_NAME("android/media/MediaRouter")
             inline static int ROUTE_TYPE_LIVE_VIDEO = 2;
             std::shared_ptr<jnivm::android::media::MediaRouterRouteInfo> getSelectedRoute(int type);
+        };
+
+        // Factory-stubbed: jnivm builds a typed dummy in defaultVal<jobject>
+        // via the registry in android_descriptors.cpp. Method calls fall to
+        // type-default returns (int=0, void=no-op, Object=factory recurse).
+        class MediaExtractor : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/media/MediaExtractor")
+        };
+        class MediaFormat : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/media/MediaFormat")
+        };
+        class MediaCodec : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/media/MediaCodec")
         };
     }
 
@@ -500,6 +535,12 @@ namespace android {
             DEFINE_CLASS_NAME("android/os/Bundle")
             bool containsKey(std::shared_ptr<FakeJni::JString> key);
             std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def);
+        };
+
+        // Factory-stubbed. See android_descriptors.cpp.
+        class ParcelFileDescriptor : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/os/ParcelFileDescriptor")
         };
 
         class Handler;
@@ -672,6 +713,19 @@ namespace android {
             public:
                 DEFINE_CLASS_NAME("android/content/pm/ApplicationInfo")
 
+                // [BD-DATADIR] absolute path of "<pkg>/data" — Unity reads this
+                // field to compute the PlayerPrefs path:
+                //   <dataDir>/shared_prefs/<bundle>.v2.playerprefs.xml
+                // Populated by Context::getApplicationInfo() from
+                // config["paths"]["android_data"].
+                std::shared_ptr<FakeJni::JString> dataDir = std::make_shared<FakeJni::JString>("");
+                std::shared_ptr<FakeJni::JString> nativeLibraryDir = std::make_shared<FakeJni::JString>("");
+                // packageName is what Unity prefixes the prefs name with:
+                //   prefsName = applicationInfo.packageName + ".v2.playerprefs"
+                // If null/empty, prefs file becomes ".v2.playerprefs.kv" instead
+                // of "<pkg>.v2.playerprefs.kv" — same data but wrong filename.
+                std::shared_ptr<FakeJni::JString> packageName = std::make_shared<FakeJni::JString>("");
+
                 std::shared_ptr<jnivm::Array<FakeJni::JString>> splitPublicSourceDirs = std::make_shared<jnivm::Array<FakeJni::JString>>();
             };
 
@@ -680,8 +734,11 @@ namespace android {
                 DEFINE_CLASS_NAME("android/content/pm/PackageManager")
                 inline static FakeJni::JString FEATURE_AUDIO_LOW_LATENCY = (FakeJni::JString) "FEATURE_AUDIO_LOW_LATENCY";
                 inline static int PERMISSION_GRANTED = 0;
-                std::shared_ptr<PackageInfo> getPackageInfo(std::shared_ptr<FakeJni::JString> packageName, int number);
+                // getPackageInfo -> registerFactory (PackageInfo).
                 bool hasSystemFeature(std::shared_ptr<FakeJni::JString> feature);
+                // Returns empty string ("no installer recorded"). Game code
+                // typically uses this for analytics/logging only.
+                std::shared_ptr<FakeJni::JString> getInstallerPackageName(std::shared_ptr<FakeJni::JString> packageName);
             };
         }
 
@@ -700,23 +757,66 @@ namespace android {
             };
         }
 
+        class SharedPreferences;
+
         class SharedPreferencesEditor : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/content/SharedPreferences$Editor")
+            // Editor stages changes; apply()/commit() flushes them to its
+            // owning SharedPreferences (and onto disk).
+            std::weak_ptr<SharedPreferences> owner;
+            std::map<std::string, int>          pending_int;
+            std::map<std::string, long long>    pending_long;
+            std::map<std::string, float>        pending_float;
+            std::map<std::string, bool>         pending_bool;
+            std::map<std::string, std::string>  pending_string;
+            std::set<std::string>               pending_remove;
+            bool                                pending_clear = false;
+
             void apply();
-            std::shared_ptr<jnivm::android::content::SharedPreferencesEditor> putInt(std::shared_ptr<FakeJni::JString> key, int val);
-            std::shared_ptr<jnivm::android::content::SharedPreferencesEditor> putString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> val);
+            bool commit();
+            std::shared_ptr<SharedPreferencesEditor> putInt(std::shared_ptr<FakeJni::JString> key, int val);
+            std::shared_ptr<SharedPreferencesEditor> putLong(std::shared_ptr<FakeJni::JString> key, jlong val);
+            std::shared_ptr<SharedPreferencesEditor> putFloat(std::shared_ptr<FakeJni::JString> key, float val);
+            std::shared_ptr<SharedPreferencesEditor> putBoolean(std::shared_ptr<FakeJni::JString> key, bool val);
+            std::shared_ptr<SharedPreferencesEditor> putString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> val);
+            std::shared_ptr<SharedPreferencesEditor> remove(std::shared_ptr<FakeJni::JString> key);
+            std::shared_ptr<SharedPreferencesEditor> clear();
         };
 
         class SharedPreferences : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/content/SharedPreferences")
+            // [BD-PREFS] in-memory backing; flushed to disk by exit handler
+            // (or commit()) to <android_files>/shared_prefs/<name>.kv.
+            // Plain text format: one record per line "<type>\t<key>\t<value>"
+            // type: i=int  l=long  f=float  b=bool  s=string (escaped).
+            std::string                         name;
+            std::map<std::string, int>          int_vals;
+            std::map<std::string, long long>    long_vals;
+            std::map<std::string, float>        float_vals;
+            std::map<std::string, bool>         bool_vals;
+            std::map<std::string, std::string>  string_vals;
+            bool                                dirty = false;
+            // commit() rate limit — last successful disk write timestamp
+            // (steady_clock seconds since epoch). 0 = never. See commit().
+            std::atomic<long long>              last_save_epoch_s{0};
+
+            SharedPreferences() = default;
+            void load(const std::string& fromName);
+            void save() const;
+            // Flush every cached SharedPreferences with dirty=true. Call from
+            // exit handler so ALL pending apply() data lands on eMMC.
+            static void flush_all();
+
             bool contains(std::shared_ptr<FakeJni::JString> key);
             int getInt(std::shared_ptr<FakeJni::JString> key, int def);
+            jlong getLong(std::shared_ptr<FakeJni::JString> key, jlong def);
             float getFloat(std::shared_ptr<FakeJni::JString> key, float def);
+            bool getBoolean(std::shared_ptr<FakeJni::JString> key, bool def);
             std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def);
-            std::shared_ptr<jnivm::java::util::Map> getAll();
-            std::shared_ptr<jnivm::android::content::SharedPreferencesEditor> edit();
+            // getAll -> registerFactory (Map).
+            std::shared_ptr<SharedPreferencesEditor> edit();
         };
 
         class ContentResolver : public FakeJni::JObject {
@@ -737,29 +837,26 @@ namespace android {
             inline static int MODE_PRIVATE = 0;
 
             std::shared_ptr<FakeJni::JObject> getSystemService(std::shared_ptr<FakeJni::JString> service);
-            std::shared_ptr<jnivm::android::content::res::AssetManager> getAssets();
             std::shared_ptr<jnivm::android::content::pm::ApplicationInfo> getApplicationInfo();
             std::shared_ptr<FakeJni::JString> getPackageCodePath();
             std::shared_ptr<FakeJni::JString> getPackageName();
-            std::shared_ptr<jnivm::android::content::pm::PackageManager> getPackageManager();
             std::shared_ptr<jnivm::android::content::SharedPreferences> getSharedPreferences(std::shared_ptr<FakeJni::JString> str, int num);
             std::shared_ptr<jnivm::java::io::File> getFilesDir();
+            std::shared_ptr<jnivm::java::io::File> getDataDir();
             std::shared_ptr<jnivm::java::io::File> getExternalCacheDir();
             std::shared_ptr<jnivm::java::io::File> getCacheDir();
             std::shared_ptr<jnivm::java::io::File> getExternalFilesDir(std::shared_ptr<FakeJni::JString> path);
             static std::shared_ptr<jnivm::java::io::File> getExternalFilesDirInternal();
-            std::shared_ptr<jnivm::java::io::File> getObbDir();
-            std::shared_ptr<jnivm::Array<jnivm::java::io::File>> getObbDirs();
             int checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission);
-            std::shared_ptr<jnivm::android::content::res::Resources> getResources();
-            std::shared_ptr<jnivm::android::view::Window> getWindow();
-            std::shared_ptr<ContentResolver> getContentResolver();
+            // getAssets / getPackageManager / getResources / getWindow /
+            // getContentResolver / getObbDir / getObbDirs -> STUB-MISS path
+            // (registerFactory in android_descriptors.cpp).
         };
 
         class Intent : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/content/Intent")
-            std::shared_ptr<jnivm::android::os::Bundle> getExtras();
+            // getExtras -> registerFactory (Bundle).
         };
     }
 

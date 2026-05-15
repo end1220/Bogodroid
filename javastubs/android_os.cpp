@@ -8,6 +8,7 @@ extern toml::table config;
 #include <fstream>
 #include <pthread.h>
 #include <inttypes.h>
+#include <unistd.h>
 
 ///// Bundle
 
@@ -407,6 +408,8 @@ bool jnivm::android::os::PowerManager::isSustainedPerformanceModeSupported()
     return false;
 }
 
+///// ParcelFileDescriptor — factory-stubbed. See android_descriptors.cpp.
+
 ///// OS Descriptors
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build> {} },
@@ -474,4 +477,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::PowerManager) { FakeJni::Constructor<PowerManager> {} },
     { FakeJni::Function<&PowerManager::isSustainedPerformanceModeSupported> {}, "isSustainedPerformanceModeSupported", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::ParcelFileDescriptor)
     END_NATIVE_DESCRIPTOR

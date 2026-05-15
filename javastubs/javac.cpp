@@ -2,6 +2,9 @@
 #include "../globals.h"
 #include "baron/baron.h"
 #include "logging.h"
+#include "toml++/toml.hpp"
+
+extern toml::table config;
 
 ///// Long
 
@@ -198,6 +201,22 @@ long jnivm::java::lang::System::nanoTime()
     return time_point_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()).time_since_epoch().count();
 }
 
+// System.load / loadLibrary: no-op. Games typically wrap these in a
+// platform-detect path; on Bogodroid we have no Java-side classloader to
+// register natives, so silent success is safer than throwing — throwing
+// breaks games that don't have a UnsatisfiedLinkError catch on the call site.
+void jnivm::java::lang::System::load(std::shared_ptr<FakeJni::JString> filename)
+{
+    BD_LOG("JNI", "System.load('%s') -> no-op (Bogodroid)",
+            filename ? filename->asStdString().c_str() : "(null)");
+}
+
+void jnivm::java::lang::System::loadLibrary(std::shared_ptr<FakeJni::JString> libname)
+{
+    BD_LOG("JNI", "System.loadLibrary('%s') -> no-op (Bogodroid)",
+            libname ? libname->asStdString().c_str() : "(null)");
+}
+
 ///// FakeMethod
 
 jnivm::java::lang::reflect::FakeMethod::FakeMethod(std::shared_ptr<FakeJni::JString> method)
@@ -276,6 +295,26 @@ std::shared_ptr<FakeJni::JObject> jnivm::java::util::ArrayListIterator::next()
 
 ///// Locale
 
+// Read [locale] tag = "zh-CN" from toml; default en-US.
+// Games like Hollow Knight pick UI language from
+// java.util.Locale.getDefault().getLanguage().
+static std::string bd_locale_tag()
+{
+    return config["locale"]["tag"].value_or<std::string>("en-US");
+}
+static std::string bd_locale_language()
+{
+    auto tag = bd_locale_tag();
+    auto dash = tag.find_first_of("-_");
+    return dash == std::string::npos ? tag : tag.substr(0, dash);
+}
+static std::string bd_locale_country()
+{
+    auto tag = bd_locale_tag();
+    auto dash = tag.find_first_of("-_");
+    return dash == std::string::npos ? std::string{} : tag.substr(dash + 1);
+}
+
 std::shared_ptr<jnivm::java::util::Locale> jnivm::java::util::Locale::getDefault()
 {
     return std::make_shared<jnivm::java::util::Locale>();
@@ -283,7 +322,55 @@ std::shared_ptr<jnivm::java::util::Locale> jnivm::java::util::Locale::getDefault
 
 std::shared_ptr<FakeJni::JString> jnivm::java::util::Locale::toLanguageTag()
 {
-    return std::make_shared<FakeJni::JString>("en-US");
+    return std::make_shared<FakeJni::JString>(bd_locale_tag());
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::util::Locale::getLanguage()
+{
+    return std::make_shared<FakeJni::JString>(bd_locale_language());
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::util::Locale::getCountry()
+{
+    return std::make_shared<FakeJni::JString>(bd_locale_country());
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::util::Locale::toString()
+{
+    auto tag = bd_locale_tag();
+    // toString uses underscore: zh_CN
+    for (auto& c : tag) if (c == '-') c = '_';
+    return std::make_shared<FakeJni::JString>(tag);
+}
+
+///// Integer (java.lang.Integer wrapper)
+
+jint jnivm::java::lang::Integer::intValue()    { return value; }
+jlong jnivm::java::lang::Integer::longValue()  { return (jlong)value; }
+jfloat jnivm::java::lang::Integer::floatValue(){ return (jfloat)value; }
+jdouble jnivm::java::lang::Integer::doubleValue(){ return (jdouble)value; }
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::Integer::toString()
+{
+    return std::make_shared<FakeJni::JString>(std::to_string(value).c_str());
+}
+
+std::shared_ptr<jnivm::java::lang::Integer> jnivm::java::lang::Integer::valueOf(jint v)
+{
+    return std::make_shared<jnivm::java::lang::Integer>(v);
+}
+
+jint jnivm::java::lang::Integer::parseInt(std::shared_ptr<FakeJni::JString> s)
+{
+    if (!s) return 0;
+    try { return std::stoi(s->asStdString()); }
+    catch (...) { return 0; }
+}
+
+///// StringStubs (factory for empty String — see javac.h for rationale)
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::StringStubs::initEmpty()
+{
+    return std::make_shared<FakeJni::JString>();
 }
 
 ///// Iterator
@@ -367,6 +454,9 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     { FakeJni::Function<&File::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::io::FileDescriptor) { FakeJni::Constructor<FileDescriptor> {} },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::util::Map) { FakeJni::Constructor<Map> {} },
     { FakeJni::Function<&Map::entrySet> {}, "entrySet", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
@@ -397,6 +487,25 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::util::Locale) { FakeJni::Constructor<Locale> {} },
     { FakeJni::Function<&Locale::getDefault> {}, "getDefault", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&Locale::toLanguageTag> {}, "toLanguageTag", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Locale::getLanguage> {}, "getLanguage", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Locale::getCountry> {}, "getCountry", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Locale::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::StringStubs)
+    { FakeJni::Function<&StringStubs::initEmpty> {}, "<init>", FakeJni::JMethodID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Integer)
+    { FakeJni::Constructor<Integer> {} },
+    { FakeJni::Constructor<Integer, jint> {} },
+    { FakeJni::Function<&Integer::intValue> {}, "intValue", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Integer::longValue> {}, "longValue", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Integer::floatValue> {}, "floatValue", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Integer::doubleValue> {}, "doubleValue", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Integer::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Integer::valueOf> {}, "valueOf", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&Integer::parseInt> {}, "parseInt", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Runnable) { FakeJni::Function<&Runnable::run> {}, "run", FakeJni::JMethodID::PUBLIC },
@@ -407,6 +516,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::System) { FakeJni::Constructor<System> {} },
     { FakeJni::Function<&System::nanoTime> {}, "nanoTime", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&System::load> {}, "load", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&System::loadLibrary> {}, "loadLibrary", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Thread) { FakeJni::Constructor<Thread, std::shared_ptr<FakeJni::JString>> {} },
@@ -440,6 +551,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     vm->registerClass<jnivm::java::lang::reflect::FakeMethod>();
     vm->registerClass<jnivm::java::io::InputStream>();
     vm->registerClass<jnivm::java::io::File>();
+    vm->registerClass<jnivm::java::io::FileDescriptor>();
     vm->registerClass<jnivm::java::util::Map>();
     vm->registerClass<jnivm::java::util::Set>();
     vm->registerClass<jnivm::java::util::List>();
@@ -448,6 +560,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     vm->registerClass<jnivm::java::util::ArrayListIterator>();
     vm->registerClass<jnivm::java::util::Scanner>();
     vm->registerClass<jnivm::java::util::Locale>();
+    vm->registerClass<jnivm::java::lang::Integer>();
+    vm->registerClass<jnivm::java::lang::StringStubs>();
 }
 
 ///// Extensions to built-in Java classes
