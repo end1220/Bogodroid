@@ -1,0 +1,58 @@
+name: build
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  unityloader:
+    name: unityloader ${{ matrix.id }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: full
+            cmake_extra: -DBOGO_QUIET=ON -DBD_ENABLE_GPLAY=ON
+            asset: unityloader-aarch64-glibc2.31
+          - id: slim
+            cmake_extra: -DBOGO_QUIET=ON
+            asset: unityloader-aarch64-glibc2.31-slim
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.builder
+          tags: bogo-builder:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cross-compile unityloader (${{ matrix.id }})
+        run: |
+          docker run --rm -v "$PWD":/work -w /work bogo-builder:ci bash -c '
+            cmake -B build -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              ${{ matrix.cmake_extra }}
+            cmake --build build -j
+          '
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp build/unityloader '${{ matrix.asset }}'
+          gh release upload "${{ github.event.release.tag_name }}" \
+            '${{ matrix.asset }}' --clobber
