@@ -51,6 +51,6 @@ public:
     void setMotionCallback(std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> cb);
 
     // Utilities
-    static constexpr int toAndroidKeycode(SDL_Scancode sdl_scancode);
-    static constexpr int toAndroidKeycode(SDL_ControllerButtonEvent sdl_button);
+    static int toAndroidKeycode(SDL_Scancode sdl_scancode);
+    static int toAndroidKeycode(SDL_ControllerButtonEvent sdl_button);
 };

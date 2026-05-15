@@ -1,7 +1,9 @@
 #include "input_backend.h"
 #include "android.h"
 #include "logging.h"
-#include <iostream>
+#include <map>
+#include <string>
+#include <cctype>
 
 #include "toml++/toml.hpp"
 extern toml::table config;
@@ -10,6 +12,172 @@ static bool input_enable_controller = false;
 static bool input_mouse_touch_mode = false;
 static bool input_mouse_accurate_mode = false;
 static int buttonState;
+
+// wsm.toml [input.remap] — SDL controller button → Android KEYCODE.
+static std::map<int, int> g_button_remap;
+
+// Some handhelds route D-pad / Select / Start through the keyboard scancode
+// path instead of the joystick path; mirror the same remap there.
+static std::map<int, int> g_scancode_remap;
+
+enum BD_AxisDir : int {
+    BD_LSTICK_LEFT = 0, BD_LSTICK_RIGHT, BD_LSTICK_UP, BD_LSTICK_DOWN,
+    BD_RSTICK_LEFT,     BD_RSTICK_RIGHT, BD_RSTICK_UP, BD_RSTICK_DOWN,
+    BD_L2,              BD_R2,
+    BD_AXIS_DIR_COUNT
+};
+static std::map<int, int> g_axis_remap;
+static bool g_axis_pressed[BD_AXIS_DIR_COUNT] = { false };
+// Hysteresis prevents auto-repeat near the threshold.
+static constexpr float BD_AXIS_PRESS_THR   = 0.60f;
+static constexpr float BD_AXIS_RELEASE_THR = 0.30f;
+
+// false → no HAT axis; D-pad delivered only as KEYCODE_DPAD_*. Sidesteps
+// Unity InputSystem's NavigationModel sticky-latch race on quick taps.
+// true  → AOSP-standard (HAT + KEYCODE), but exposes the race.
+static bool input_dpad_synthesize_hat = true;
+
+// (deviceId, keyCode) -> last ACTION_DOWN eventTime, so getDownTime() reads
+// the press start (Android contract: hold time = eventTime - downTime).
+static std::map<std::pair<int,int>, long> g_key_down_time;
+static long bd_stamp_keyevent_downtime(int deviceId, int keyCode, int action, long eventTime)
+{
+    auto key = std::make_pair(deviceId, keyCode);
+    if (action == jnivm::android::view::KeyEvent::ACTION_DOWN) {
+        g_key_down_time[key] = eventTime;
+        return eventTime;
+    }
+    auto it = g_key_down_time.find(key);
+    return (it != g_key_down_time.end()) ? it->second : eventTime;
+}
+
+static void bd_axis_synth(BD_AxisDir dir, float value, int sign,
+                          const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
+                          std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey);
+
+// "E" / "TAB" / "DPAD_UP" / "KEYCODE_M" -> KeyEvent::KEYCODE_*; -1 if unknown.
+static int parse_keycode_name(std::string s)
+{
+    if (s.empty()) return -1;
+    for (auto& c : s) c = (char)std::toupper((unsigned char)c);
+    if (s.rfind("KEYCODE_", 0) == 0) s = s.substr(8);
+
+    using K = jnivm::android::view::KeyEvent;
+
+    if (s.size() == 1 && s[0] >= 'A' && s[0] <= 'Z')
+        return K::KEYCODE_A + (s[0] - 'A');
+    if (s.size() == 1 && s[0] >= '0' && s[0] <= '9')
+        return K::KEYCODE_0 + (s[0] - '0');
+
+    if (s == "TAB")        return K::KEYCODE_TAB;
+    if (s == "ENTER")      return K::KEYCODE_ENTER;
+    if (s == "ESCAPE" || s == "ESC") return K::KEYCODE_ESCAPE;
+    if (s == "SPACE")      return K::KEYCODE_SPACE;
+    if (s == "DEL" || s == "BACKSPACE") return K::KEYCODE_DEL;
+    if (s == "DPAD_UP")    return K::KEYCODE_DPAD_UP;
+    if (s == "DPAD_DOWN")  return K::KEYCODE_DPAD_DOWN;
+    if (s == "DPAD_LEFT")  return K::KEYCODE_DPAD_LEFT;
+    if (s == "DPAD_RIGHT") return K::KEYCODE_DPAD_RIGHT;
+    if (s == "BUTTON_A")   return K::KEYCODE_BUTTON_A;
+    if (s == "BUTTON_B")   return K::KEYCODE_BUTTON_B;
+    if (s == "BUTTON_X")   return K::KEYCODE_BUTTON_X;
+    if (s == "BUTTON_Y")   return K::KEYCODE_BUTTON_Y;
+    if (s == "BUTTON_L1")  return K::KEYCODE_BUTTON_L1;
+    if (s == "BUTTON_L2")  return K::KEYCODE_BUTTON_L2;
+    if (s == "BUTTON_R1")  return K::KEYCODE_BUTTON_R1;
+    if (s == "BUTTON_R2")  return K::KEYCODE_BUTTON_R2;
+    if (s == "BUTTON_START")  return K::KEYCODE_BUTTON_START;
+    if (s == "BUTTON_SELECT") return K::KEYCODE_BUTTON_SELECT;
+    if (s == "BUTTON_THUMBL") return K::KEYCODE_BUTTON_THUMBL;
+    if (s == "BUTTON_THUMBR") return K::KEYCODE_BUTTON_THUMBR;
+    if (s == "NONE" || s == "DISABLE" || s == "OFF") return K::KEYCODE_UNKNOWN;
+    return -1;
+}
+
+static void load_input_remap()
+{
+    static bool loaded = false;
+    if (loaded) return;
+    loaded = true;
+
+    // Trigger default: digital-trigger handhelds (R36S etc.) expect L2/R2
+    // keycodes. SDL exposes triggers as 0..32767 axes; we synthesize on cross.
+    g_axis_remap[BD_L2] = jnivm::android::view::KeyEvent::KEYCODE_BUTTON_L2;
+    g_axis_remap[BD_R2] = jnivm::android::view::KeyEvent::KEYCODE_BUTTON_R2;
+
+    auto remap = config["input"]["remap"];
+    if (!remap.is_table()) return;
+    auto* tbl = remap.as_table();
+
+    auto bind = [&](const char* cfg_key, int sdl_button) {
+        auto v = (*tbl)[cfg_key].value<std::string>();
+        if (!v) return;
+        int kc = parse_keycode_name(*v);
+        if (kc >= 0) {
+            g_button_remap[sdl_button] = kc;
+            BD_LOG("INPUT-REMAP", "%s -> %s (keycode %d)",
+                    cfg_key, v->c_str(), kc);
+        }
+    };
+    // SDL button surface; L2/R2 and stick directions are axes — bound below.
+    bind("a",       SDL_CONTROLLER_BUTTON_A);
+    bind("b",       SDL_CONTROLLER_BUTTON_B);
+    bind("x",       SDL_CONTROLLER_BUTTON_X);
+    bind("y",       SDL_CONTROLLER_BUTTON_Y);
+    bind("select",  SDL_CONTROLLER_BUTTON_BACK); // SDL calls Select "BACK"
+    bind("back",    SDL_CONTROLLER_BUTTON_BACK); // alias
+    bind("start",   SDL_CONTROLLER_BUTTON_START);
+    bind("guide",   SDL_CONTROLLER_BUTTON_GUIDE);
+    bind("l1",      SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    bind("r1",      SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    bind("l3",      SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    bind("r3",      SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+    bind("dpup",    SDL_CONTROLLER_BUTTON_DPAD_UP);
+    bind("dpdown",  SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    bind("dpleft",  SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    bind("dpright", SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+
+    // Stick / trigger -> keycode (synthesized on threshold cross alongside MotionEvent).
+    auto bind_axis = [&](const char* cfg_key, BD_AxisDir dir) {
+        auto v = (*tbl)[cfg_key].value<std::string>();
+        if (!v) return;
+        int kc = parse_keycode_name(*v);
+        if (kc >= 0) {
+            g_axis_remap[dir] = kc;
+            BD_LOG("INPUT-REMAP", "%s -> %s (keycode %d)",
+                    cfg_key, v->c_str(), kc);
+        }
+    };
+    bind_axis("lstick_left",  BD_LSTICK_LEFT);
+    bind_axis("lstick_right", BD_LSTICK_RIGHT);
+    bind_axis("lstick_up",    BD_LSTICK_UP);
+    bind_axis("lstick_down",  BD_LSTICK_DOWN);
+    bind_axis("rstick_left",  BD_RSTICK_LEFT);
+    bind_axis("rstick_right", BD_RSTICK_RIGHT);
+    bind_axis("rstick_up",    BD_RSTICK_UP);
+    bind_axis("rstick_down",  BD_RSTICK_DOWN);
+    bind_axis("l2",           BD_L2);
+    bind_axis("r2",           BD_R2);
+
+    // Mirror remap on the scancode path (some handhelds route here, not joystick).
+    auto bind_scancode = [&](const char* cfg_key, SDL_Scancode sc) {
+        auto v = (*tbl)[cfg_key].value<std::string>();
+        if (!v) return;
+        int kc = parse_keycode_name(*v);
+        if (kc >= 0) {
+            g_scancode_remap[sc] = kc;
+            BD_LOG("INPUT-REMAP", "%s (scancode %d) -> %s (keycode %d)",
+                    cfg_key, sc, v->c_str(), kc);
+        }
+    };
+    bind_scancode("dpup",    SDL_SCANCODE_UP);
+    bind_scancode("dpdown",  SDL_SCANCODE_DOWN);
+    bind_scancode("dpleft",  SDL_SCANCODE_LEFT);
+    bind_scancode("dpright", SDL_SCANCODE_RIGHT);
+    bind_scancode("select",  SDL_SCANCODE_ESCAPE);
+    bind_scancode("back",    SDL_SCANCODE_ESCAPE);
+    bind_scancode("start",   SDL_SCANCODE_RETURN);
+}
 
 InputBackend& InputBackend::instance()
 {
@@ -22,9 +190,14 @@ InputBackend::InputBackend()
     input_enable_controller = config["input"]["controller"].value_or<bool>(false);
     input_mouse_touch_mode = config["input"]["touch_mode"].value_or<bool>(false);
     input_mouse_accurate_mode = config["input"]["accurate_mode"].value_or<bool>(false);
+    input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
+    if (!input_dpad_synthesize_hat) {
+        BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = false (D-pad → KeyEvent only, no HAT axis)");
+    }
+    load_input_remap();
 
     if (SDL_Init(SDL_INIT_EVENTS) < 0) {
-        std::cerr << "SDL Init failed: " << SDL_GetError() << std::endl;
+        BD_LOG("INPUT", "SDL_Init(EVENTS) failed: %s", SDL_GetError());
         return;
     }
 
@@ -36,18 +209,33 @@ InputBackend::InputBackend()
 
     if (input_enable_controller) {
         if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) < 0) {
-            std::cerr << "SDL Joystick Init failed: " << SDL_GetError() << std::endl;
+            BD_LOG("INPUT", "SDL_Init(JOYSTICK|GAMECONTROLLER) failed: %s", SDL_GetError());
             return;
         }
 
-        // mouse->addMotionRange(jnivm::android::view::MotionEvent::AXIS_VSCROLL, mouse->source, -1.0f, 1.0f, 0.0f, 0.0f);
-        auto xbox = addDevice(INPUT_ID_XBOX, "Xbox 360 Controller", 0x045E, 0x028E, jnivm::android::view::InputDevice::SOURCE_GAMEPAD | jnivm::android::view::InputDevice::SOURCE_JOYSTICK);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_X, xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Y, xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_RZ, xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Z, xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_GAS, xbox->source, 0.0f, 1.0f, 0.0f, 0.0f);
-        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_BRAKE, xbox->source, 0.0f, 1.0f, 0.0f, 0.0f);
+        // AOSP gamepad contract (AndroidGameControllerState.cs):
+        //   stick L/R = AXIS_X/Y, AXIS_Z/RZ ; trigger L/R = AXIS_LTRIGGER/RTRIGGER
+        //   dpad = AXIS_HAT_X/Y. Source bits intentionally omit KEYBOARD —
+        //   setting it makes Unity spawn a duplicate device and split routing.
+        auto xbox = addDevice(INPUT_ID_XBOX, "Xbox 360 Controller", 0x045E, 0x028E,
+                              jnivm::android::view::InputDevice::SOURCE_GAMEPAD
+                            | jnivm::android::view::InputDevice::SOURCE_JOYSTICK
+                            | jnivm::android::view::InputDevice::SOURCE_DPAD);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_X,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Y,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Z,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_RZ,       xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
+        if (input_dpad_synthesize_hat) {
+            // Registering HAT motionRange flips Unity to GamepadWithDpadAxes.
+            xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_HAT_X, xbox->source, -1.0f, 1.0f, 0.0f, 0.0f);
+            xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_HAT_Y, xbox->source, -1.0f, 1.0f, 0.0f, 0.0f);
+        }
+        // Triggers fan out to both LTRIGGER/RTRIGGER and BRAKE/GAS — different
+        // Unity AndroidSupport layouts read different axes; cover all four.
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_LTRIGGER, xbox->source,  0.0f, 1.0f, 0.0f,  0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_RTRIGGER, xbox->source,  0.0f, 1.0f, 0.0f,  0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_BRAKE,    xbox->source,  0.0f, 1.0f, 0.0f,  0.0f);
+        xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_GAS,      xbox->source,  0.0f, 1.0f, 0.0f,  0.0f);
 
         // Open game controllers
         for (int i = 0; i < SDL_NumJoysticks(); ++i) {
@@ -57,14 +245,16 @@ InputBackend::InputBackend()
             }
         }
 
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_X] = 0.0f;
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_Y] = 0.0f;
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_RZ] = 0.0f;
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_Z] = 0.0f;
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_BRAKE] = 0.0f;
-        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_GAS] = 0.0f;
-        // mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_LTRIGGER] = 0.0f;
-        // mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_RTRIGGER] = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_X]        = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_Y]        = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_Z]        = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_RZ]       = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_HAT_X]    = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_HAT_Y]    = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_LTRIGGER] = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_RTRIGGER] = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_BRAKE]    = 0.0f;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_GAS]      = 0.0f;
     }
 }
 
@@ -134,8 +324,13 @@ void InputBackend::runEventLoop()
                     break;
                 int action = (e.type == SDL_KEYDOWN) ? jnivm::android::view::KeyEvent::ACTION_DOWN : jnivm::android::view::KeyEvent::ACTION_UP;
                 int keyCode = InputBackend::toAndroidKeycode(e.key.keysym.scancode);
-
+                if (e.type == SDL_KEYDOWN) {
+                    BD_DEBUG("INPUT", "KEYDOWN scancode=%d -> KEYCODE=%d",
+                            e.key.keysym.scancode, keyCode);
+                }
                 auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(devices[INPUT_ID_KEYBOARD], action, keyCode, 0);
+                keyEvent->downTime = bd_stamp_keyevent_downtime(
+                    INPUT_ID_KEYBOARD, keyCode, action, keyEvent->timestamp);
                 onKey(keyEvent);
                 break;
             }
@@ -265,7 +460,10 @@ void InputBackend::runEventLoop()
                 if (!onMotion)
                     break;
 
-                int axis = -1;
+                // Trigger published on both LTRIGGER/BRAKE (or RTRIGGER/GAS)
+                // — AOSP fan-out (Android 4.3+).
+                int axis  = -1;
+                int axis2 = -1;
                 float value = 0.0f;
                 bool isTrigger = false;
 
@@ -283,11 +481,13 @@ void InputBackend::runEventLoop()
                     axis = jnivm::android::view::MotionEvent::AXIS_RZ;
                     break;
                 case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-                    axis = jnivm::android::view::MotionEvent::AXIS_BRAKE;
+                    axis  = jnivm::android::view::MotionEvent::AXIS_LTRIGGER;
+                    axis2 = jnivm::android::view::MotionEvent::AXIS_BRAKE;
                     isTrigger = true;
                     break;
                 case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-                    axis = jnivm::android::view::MotionEvent::AXIS_GAS;
+                    axis  = jnivm::android::view::MotionEvent::AXIS_RTRIGGER;
+                    axis2 = jnivm::android::view::MotionEvent::AXIS_GAS;
                     isTrigger = true;
                     break;
                 }
@@ -302,6 +502,23 @@ void InputBackend::runEventLoop()
                     value = e.caxis.value < 0 ? e.caxis.value / 32768.0f : e.caxis.value / 32767.0f;
                 }
 
+                // AOSP dead-zone rescale. Skipping this leaks stick drift into
+                // every D-pad MotionEvent (we ship the whole axisValues map).
+                if (!isTrigger) {
+                    constexpr float kFlat = 0.12f;
+                    if (value > -kFlat && value < kFlat) {
+                        value = 0.0f;
+                    } else if (value > 0.0f) {
+                        value = (value - kFlat) / (1.0f - kFlat);
+                    } else {
+                        value = (value + kFlat) / (1.0f - kFlat);
+                    }
+                }
+
+                if (axis2 != -1) {
+                    mControllerAxisState[axis2] = value;
+                }
+
                 // Update the single value in our state map
                 mControllerAxisState[axis] = value;
 
@@ -312,6 +529,35 @@ void InputBackend::runEventLoop()
                 motionEvent->axisValues = mControllerAxisState;
 
                 onMotion(motionEvent);
+
+                // Axis -> synthetic key (only fires for bound directions).
+                {
+                    auto dev = devices[INPUT_ID_XBOX];
+                    switch (e.caxis.axis) {
+                    case SDL_CONTROLLER_AXIS_LEFTX:
+                        bd_axis_synth(BD_LSTICK_LEFT,  value, -1, dev, onKey);
+                        bd_axis_synth(BD_LSTICK_RIGHT, value, +1, dev, onKey);
+                        break;
+                    case SDL_CONTROLLER_AXIS_LEFTY:
+                        bd_axis_synth(BD_LSTICK_UP,    value, -1, dev, onKey);
+                        bd_axis_synth(BD_LSTICK_DOWN,  value, +1, dev, onKey);
+                        break;
+                    case SDL_CONTROLLER_AXIS_RIGHTX:
+                        bd_axis_synth(BD_RSTICK_LEFT,  value, -1, dev, onKey);
+                        bd_axis_synth(BD_RSTICK_RIGHT, value, +1, dev, onKey);
+                        break;
+                    case SDL_CONTROLLER_AXIS_RIGHTY:
+                        bd_axis_synth(BD_RSTICK_UP,    value, -1, dev, onKey);
+                        bd_axis_synth(BD_RSTICK_DOWN,  value, +1, dev, onKey);
+                        break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
+                        bd_axis_synth(BD_L2,           value, +1, dev, onKey);
+                        break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
+                        bd_axis_synth(BD_R2,           value, +1, dev, onKey);
+                        break;
+                    }
+                }
                 break;
             }
 
@@ -321,12 +567,54 @@ void InputBackend::runEventLoop()
                     break;
                 if (!onKey)
                     break;
-                // Controller buttons are sent as KeyEvents.
-                int action = (e.type == SDL_CONTROLLERBUTTONDOWN) ? jnivm::android::view::KeyEvent::ACTION_DOWN : jnivm::android::view::KeyEvent::ACTION_UP;
+                int action  = (e.type == SDL_CONTROLLERBUTTONDOWN)
+                              ? jnivm::android::view::KeyEvent::ACTION_DOWN
+                              : jnivm::android::view::KeyEvent::ACTION_UP;
                 int keyCode = toAndroidKeycode(e.cbutton);
+                bool is_dpad = (e.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
+                                e.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+                if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+                    BD_DEBUG("INPUT", "CONTROLLER button=%d -> KEYCODE=%d",
+                            e.cbutton.button, keyCode);
+                }
+                auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(
+                    devices[INPUT_ID_XBOX], action, keyCode, 0);
+                keyEvent->downTime = bd_stamp_keyevent_downtime(
+                    INPUT_ID_XBOX, keyCode, action, keyEvent->timestamp);
 
-                auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(devices[INPUT_ID_XBOX], action, keyCode, 0);
+                // Mirror dpad on the HAT axis (AOSP fans out KeyEvent+MotionEvent).
+                // Release uses +0.0f to avoid -0.0f sign surprises downstream.
+                // Skipped when dpad_synthesize_hat = false (Unity sticky-latch race).
+                std::shared_ptr<jnivm::android::view::MotionEvent> motionEvent;
+                if (onMotion && is_dpad && input_dpad_synthesize_hat) {
+                    bool down = (action == jnivm::android::view::KeyEvent::ACTION_DOWN);
+                    int   axis = -1;
+                    float signedV = 0.0f;
+                    switch (e.cbutton.button) {
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_Y;
+                            signedV = down ? -1.0f : 0.0f; break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_Y;
+                            signedV = down ? +1.0f : 0.0f; break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_X;
+                            signedV = down ? -1.0f : 0.0f; break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_X;
+                            signedV = down ? +1.0f : 0.0f; break;
+                    }
+                    if (axis >= 0) {
+                        mControllerAxisState[axis] = signedV;
+                        auto dev = devices[INPUT_ID_XBOX];
+                        motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
+                            dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
+                        motionEvent->axisValues = mControllerAxisState;
+                    }
+                }
+
                 onKey(keyEvent);
+                if (motionEvent) onMotion(motionEvent);
                 break;
             }
 
@@ -338,9 +626,42 @@ void InputBackend::runEventLoop()
     }
 }
 
-constexpr int InputBackend::toAndroidKeycode(SDL_ControllerButtonEvent sdl_button)
+// Edge-trigger a synthesized KeyEvent for one axis-direction slot.
+// value in [-1,1] (sticks) or [0,1] (triggers); sign = ±1 selects the slot.
+static void bd_axis_synth(BD_AxisDir dir, float value, int sign,
+                          const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
+                          std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey)
+{
+    auto it = g_axis_remap.find(dir);
+    if (it == g_axis_remap.end()) return;        // not bound -> ignore
+    if (!onKey) return;
+    int keycode = it->second;
+    float v = value * (float)sign;               // make "press direction" positive
+    bool& pressed = g_axis_pressed[dir];
+    if (!pressed && v >= BD_AXIS_PRESS_THR) {
+        pressed = true;
+        auto ev = std::make_shared<jnivm::android::view::KeyEvent>(
+            dev, jnivm::android::view::KeyEvent::ACTION_DOWN, keycode, 0);
+        ev->downTime = bd_stamp_keyevent_downtime(
+            dev->id, keycode, jnivm::android::view::KeyEvent::ACTION_DOWN, ev->timestamp);
+        onKey(ev);
+    } else if (pressed && v <= BD_AXIS_RELEASE_THR) {
+        pressed = false;
+        auto ev = std::make_shared<jnivm::android::view::KeyEvent>(
+            dev, jnivm::android::view::KeyEvent::ACTION_UP, keycode, 0);
+        ev->downTime = bd_stamp_keyevent_downtime(
+            dev->id, keycode, jnivm::android::view::KeyEvent::ACTION_UP, ev->timestamp);
+        onKey(ev);
+    }
+}
+
+int InputBackend::toAndroidKeycode(SDL_ControllerButtonEvent sdl_button)
 {
     uint8_t button = sdl_button.button;
+    auto it = g_button_remap.find(button);
+    if (it != g_button_remap.end()) {
+        return it->second;
+    }
     switch (button) {
     case SDL_CONTROLLER_BUTTON_A:
         return jnivm::android::view::KeyEvent::KEYCODE_BUTTON_B;
@@ -377,8 +698,12 @@ constexpr int InputBackend::toAndroidKeycode(SDL_ControllerButtonEvent sdl_butto
     }
 }
 
-constexpr int InputBackend::toAndroidKeycode(SDL_Scancode sdl_scancode)
+int InputBackend::toAndroidKeycode(SDL_Scancode sdl_scancode)
 {
+    auto it = g_scancode_remap.find(sdl_scancode);
+    if (it != g_scancode_remap.end()) {
+        return it->second;
+    }
     switch (sdl_scancode) {
     case SDL_SCANCODE_0:
         return jnivm::android::view::KeyEvent::KEYCODE_0;
