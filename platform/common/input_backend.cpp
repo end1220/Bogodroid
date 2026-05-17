@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Substantial additions Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
+// (Upstream attribution preserved via git log.)
 #include "input_backend.h"
 #include "android.h"
 #include "logging.h"

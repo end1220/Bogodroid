@@ -1,0 +1,37 @@
+AUTHORS — Bogodroid (this fork)
+
+This file credits the substantial contributors to this Bogodroid fork.
+Per-commit attribution lives in `git log`; this list focuses on people
+who shaped major subsystems.
+
+Maintainer / fork lead
+----------------------
+jenny92-tech <jennyliu90223@gmail.com>
+  Owns this fork (https://github.com/jenny92-tech/Bogodroid).
+  Major work: Docker cross-compile pipeline, OpenSL ES shim,
+  Android input backend, GLES2 thunk overrides, libc font-path
+  redirect, javastubs for Hollow Knight + Black Myth boot,
+  unityloader startup orchestration.
+
+Upstream — Bogodroid NEO
+------------------------
+binarycounter and the upstream Bogodroid NEO contributors.
+  Original framework and the `neo` branch this fork tracks:
+  https://github.com/binarycounter/Bogodroid
+
+Upstream — predecessors
+-----------------------
+JohnnyOnFlame <https://github.com/JohnnyonFlame>
+  Author of gmloader-net; Bogodroid is heavily derived from it.
+
+ChristopherHX <https://github.com/ChristopherHX>
+  Author of libjnivm (MIT), bundled as a submodule.
+
+Notes
+-----
+- Bogodroid as a whole is GPL v3 (see LICENSE.md).
+- libjnivm and tomlplusplus submodules retain their own MIT licenses.
+- Bundled CJK fallback font in HK port (DroidSansFallback.ttf) is
+  Apache 2.0; see the LICENSE next to the font for full text.
+- This file is not exhaustive — `git log --pretty=format:"%an"` is
+  authoritative for code authorship at the line/commit level.
