@@ -23,6 +23,7 @@ BIONIC_FILE *stdout_impl = &__sF_fake[1];
 BIONIC_FILE *stderr_impl = &__sF_fake[2];
 
 extern "C" char* bd_redirect_datadir(const char* path);  // from fcntl.cpp
+extern "C" char* bd_redirect_system_fonts(const char* path); // from fcntl.cpp
 extern "C" const char* bd_kill_analytics_check(const char* path); // from fcntl.cpp
 
 #include <sys/stat.h>
@@ -54,6 +55,7 @@ ABI_ATTR BIONIC_FILE *fopen_impl(const char *arg1, const char* arg2)
     arg1 = bd_kill_analytics_check(arg1);
 
     char* redirected = bd_redirect_datadir(arg1);
+    if (!redirected) redirected = bd_redirect_system_fonts(arg1);
     const char* path = redirected ? redirected : arg1;
     FILE *f = fopen(path, arg2);
 

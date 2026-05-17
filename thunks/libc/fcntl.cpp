@@ -126,6 +126,35 @@ extern "C" char* bd_redirect_datadir(const char* path)
     return strdup(redirected.c_str());
 }
 
+// Rewrite Android's hard-coded font lookup paths into $cwd/fonts/ so each
+// port can ship its own CJK fallback. Without this, Unity's FontEngine probes
+// /etc/fonts.xml and /system/fonts/ — both empty on a Linux handheld — and
+// renders non-Latin text blank.
+extern "C" char* bd_redirect_system_fonts(const char* path)
+{
+    if (!path) return nullptr;
+
+    const char* tail;  // what to append after $cwd/fonts/
+    if      (strncmp(path, "/system/fonts/", 14) == 0)        tail = path + 14;
+    else if (strcmp (path, "/system/fonts") == 0)             tail = "";
+    else if (strcmp (path, "/etc/fonts.xml") == 0)            tail = "fonts.xml";
+    else if (strcmp (path, "/etc/system_fonts.xml") == 0)     tail = "system_fonts.xml";
+    else if (strcmp (path, "/vendor/etc/fallback_fonts.xml") == 0)
+                                                              tail = "fallback_fonts.xml";
+    else return nullptr;
+
+    static std::string root;
+    if (root.empty()) {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd))) return nullptr;
+        root = std::string(cwd) + "/fonts";
+    }
+
+    std::string out = *tail ? root + "/" + tail : root;
+    BD_LOG("FONTS", "%s -> %s", path, out.c_str());
+    return strdup(out.c_str());
+}
+
 // Redirect Unity Analytics event writes to /dev/null. The game writes 30+
 // tiny files/sec; without this they grind eMMC and contend for IO.
 static const char* bd_kill_analytics(const char* path)
@@ -153,6 +182,10 @@ ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode)
     char* redirected = bd_redirect_datadir(filename);
     // Leaked intentionally — bounded by one strdup per /data/data write open.
     if (redirected) filename = redirected;
+
+    char* fonts_redirect = bd_redirect_system_fonts(filename);
+    // Leaked intentionally — bounded by font count probed at startup.
+    if (fonts_redirect) filename = fonts_redirect;
 
     if (filename && (strstr(filename, "playerprefs") || strstr(filename, "shared_prefs"))) {
         BD_DEBUG("PREFS-IO", "open(%s, flags=0x%x)", filename, flags);
@@ -241,7 +274,22 @@ ABI_ATTR int close_impl(int fd)
     return close(fd);
 }
 
+// Font-path thunks: redirect /system/fonts/ + /etc/*fonts.xml etc. before
+// falling through to the normal path. Leaked strdup is bounded by ~10 font
+// probes at startup, same pattern as bd_redirect_datadir in open_impl.
+ABI_ATTR int access_impl(const char* path, int mode) {
+    char* redir = bd_redirect_system_fonts(path);
+    return access(redir ? redir : path, mode);
+}
+
+ABI_ATTR int faccessat_impl(int dirfd, const char* path, int mode, int flags) {
+    char* redir = bd_redirect_system_fonts(path);
+    return faccessat(dirfd, redir ? redir : path, mode, flags);
+}
+
 ABI_ATTR DIR* opendir_impl(const char* path) {
+    char* redir = bd_redirect_system_fonts(path);
+    if (redir) return opendir(redir);
     char* clean_path = clean_jar_path(path);
     if (!clean_path) return NULL;
     DIR* dir = opendir(clean_path);
@@ -252,6 +300,8 @@ ABI_ATTR DIR* opendir_impl(const char* path) {
 // fstatat_impl
 ABI_ATTR int fstatat_impl(int dirfd, const char* path, struct stat* buf, int flags) {
     verbose("NATIVE","fstatat(%d, %s, flags=%d)", dirfd, path, flags);
+    char* redir = bd_redirect_system_fonts(path);
+    if (redir) return fstatat(dirfd, redir, buf, flags);
     char* clean_path = clean_jar_path(path);
     if (!clean_path) {
         return -1;
@@ -264,6 +314,8 @@ ABI_ATTR int fstatat_impl(int dirfd, const char* path, struct stat* buf, int fla
 // stat
 ABI_ATTR int stat_impl(const char* path, struct stat* buf) {
     verbose("NATIVE", "stat(%s)", path);
+    char* redir = bd_redirect_system_fonts(path);
+    if (redir) return stat(redir, buf);
     char* clean_path = clean_jar_path(path);
     if (!clean_path) {
         return -1;
@@ -276,6 +328,8 @@ ABI_ATTR int stat_impl(const char* path, struct stat* buf) {
 // lstat
 ABI_ATTR int lstat_impl(const char* path, struct stat* buf) {
     verbose("NATIVE","lstat(%s)", path);
+    char* redir = bd_redirect_system_fonts(path);
+    if (redir) return lstat(redir, buf);
     char* clean_path = clean_jar_path(path);
     if (!clean_path) {
         return -1;

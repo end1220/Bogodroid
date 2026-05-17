@@ -274,6 +274,8 @@ const char *const sys_signame_impl[] = {
     "SYS"     // 31: SIGSYS
 };
 ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode);
+ABI_ATTR int access_impl(const char *path, int mode);
+ABI_ATTR int faccessat_impl(int dirfd, const char *path, int mode, int flags);
 ABI_ATTR ssize_t read_impl(int fd, void *buf, size_t count);
 ABI_ATTR ssize_t write_impl(int fd, void *buf, size_t count);
 ABI_ATTR int close_impl(int fd);

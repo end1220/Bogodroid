@@ -272,13 +272,16 @@ extern "C" ABI_ATTR int __open_2_impl(const char* pathname, int flags)
 char* clean_jar_path(const char* path);
 
 // Taken from https://github.com/libhybris/libhybris/blob/master/hybris/common/hooks.c
+extern "C" char* bd_redirect_system_fonts(const char* path); // from fcntl.cpp
+
 ABI_ATTR int scandirat_impl(int fd, const char* dir,
     struct bionic_dirent*** namelist,
     int (*filter)(const struct bionic_dirent*),
     int (*compar)(const struct bionic_dirent**,
         const struct bionic_dirent**))
 {
-    char* clean_path = clean_jar_path(dir);
+    char* fonts_redirect = bd_redirect_system_fonts(dir);
+    char* clean_path = fonts_redirect ? fonts_redirect : clean_jar_path(dir);
     struct dirent** namelist_r;
     struct bionic_dirent** result;
     struct bionic_dirent* filter_r;
