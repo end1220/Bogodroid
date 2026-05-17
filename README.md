@@ -1,5 +1,7 @@
 # Bogodroid NEO
 
+> © 2025-2026 jenny92-tech &lt;jennyliu90223@gmail.com&gt; · GPL v3 · See [LICENSE.md](./LICENSE.md)
+
 > **Cross-compile from macOS / x86 Linux → ARM64 PortMaster handheld?**
 > 看 **[BUILD-DOCKER.md](./BUILD-DOCKER.md)**（中文，专门写的 Docker 工作流）。
 > 下面 `How to Build` 一节是上游原生 Linux 编译，路线不同。
@@ -16,6 +18,30 @@ The idea is to:
 - Ultimately wrap Audio, GLES and Input to host interfaces and libraries.
 
 This project does not aim to be able to run your App out of the box. It is meant as a framework or starting point for your own porting project. For existing porting projects, check the "Ports in progress" table and the projects folder.
+
+# License & Community Spirit
+
+Bogodroid is licensed under **GNU GPL v3** (see [LICENSE.md](./LICENSE.md)). That license already does the heavy legal lifting: anyone who ships a binary derived from this code must publish their source under the same terms — there is no closed-source Bogodroid fork.
+
+Beyond the license, this project exists to build a shared Unity-on-Linux-handheld ecosystem. We welcome forks, pull requests, port projects, and discussion — and we hope contributors stay because they value that community, not because the GPL forced them to. What we'd rather not see:
+
+- Bogodroid bundled into paid products or services without contributing fixes back upstream.
+- Closed builds that strip attribution or pretend the work is original.
+- Forks that exist only to circumvent GPL obligations.
+
+If you build something cool on top of Bogodroid, open a PR, file an issue, or just tell us about it. That is the contribution that keeps this project moving.
+
+---
+
+Bogodroid 使用 **GNU GPL v3** 协议（见 [LICENSE.md](./LICENSE.md)）。GPL 已经在法律层面保证：任何基于本项目分发的二进制都必须以同样协议公开源码——不存在闭源的 Bogodroid fork。
+
+协议之外，本项目存在的目的是**共建 Unity-on-Linux 掌机生态**。欢迎 fork、PR、移植项目、技术讨论——更希望大家因为认同社区精神留下来，而不是被 GPL 强制约束。我们不希望见到的做法：
+
+- 把 Bogodroid 打包进收费产品或服务但从不回馈修复。
+- 闭源构建里抹去署名、把工作伪装成原创。
+- 单纯为了规避 GPL 义务而搞的 fork。
+
+如果你基于 Bogodroid 做了有趣的东西，欢迎 PR、提 issue、或者直接告诉我们。这就是让项目持续前进的真正贡献。
 
 # How to Build
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
+//
 // Minimal OpenSL ES shim that bridges FMOD's audio output to SDL.
 //
 // STATUS: DEFAULT-DISABLED via BD_ENABLE_OPENSLES_SHIM (see CMakeLists.txt).

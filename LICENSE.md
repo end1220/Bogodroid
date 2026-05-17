@@ -1,3 +1,8 @@
+Bogodroid is Copyright © 2025-2026 jenny92-tech &lt;jennyliu90223@gmail.com&gt; and
+the Bogodroid contributors, distributed under the GNU General Public License
+v3 as reproduced below. See README.md for upstream attribution and community
+guidelines.
+
 GNU General Public License
 ==========================
 

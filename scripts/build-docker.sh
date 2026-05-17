@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
+#
 # Cross-compile unityloader inside the Dockerfile.builder image
 # (Debian 11 → aarch64-linux-gnu-g++ → glibc 2.31 target).
 #

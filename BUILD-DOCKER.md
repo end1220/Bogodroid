@@ -1,5 +1,7 @@
 # BogoDroid NEO — Docker 交叉编译流程
 
+> © 2025-2026 jenny92-tech &lt;jennyliu90223@gmail.com&gt; · GPL v3
+
 > **此文档为 AI 阅读用。**未来的 Claude 会话读完本文档后应当能直接复现：
 > 在 macOS / x86 Linux 主机上用 Docker 交叉编译出 ARM64 ELF
 > （`unityloader`），并部署到 R36S Pro 等 ARM64 PortMaster 掌机。
