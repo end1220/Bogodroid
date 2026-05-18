@@ -156,6 +156,26 @@ See `tools/unity_traces` for a trace of a minimal Unity game starting up
 4. Configure your build with `-DIL2CPP_TRACE=1`
 
 
+# Port Tools
+
+## `tools/shrink_bundle.py` — texture-atlas size reducer
+
+For Unity ports targeting 1 GB-class handhelds. Many Unity games (Hollow
+Knight, etc.) ship 4096×4096 ASTC sprite atlases that consume 300+ MB of
+Mali GPU memory — too much for a 1 GB device after the system claims its
+share. This script downsamples oversized atlases at install time and
+rewrites all sprite UV coordinates to match.
+
+```bash
+pip install UnityPy Pillow astc-encoder-py
+python3 tools/shrink_bundle.py /path/to/gamedata/.../data.unity3d --cap 1280
+```
+
+Measured on Hollow Knight, 1280-cap saves ~140 MB total RSS (824 → 685 MB)
+with no visible quality loss on a 540p screen. See `python3 tools/shrink_bundle.py --help`
+for the full CLI; the file's module docstring documents which UV paths are
+handled and which (particle systems, custom shaders) may need `--skip`.
+
 # Ports in Progress
 
 | Name                              | Project Name  | Status        | Notes                                                                                                              |
