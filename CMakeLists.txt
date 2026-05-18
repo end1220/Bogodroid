@@ -148,20 +148,12 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC
 )
 
 # IL2CPP tracelogging for Unityloader
-option(IL2CPP_TRACE "Unityloader: Enables il2cpp trace logging - requires il2cpp" OFF)
+option(IL2CPP_TRACE "Unityloader: forward il2cpp internal trace (requires BD_ENABLE_LOG)" OFF)
 if(IL2CPP_TRACE AND PROJ STREQUAL "unityloader")
     target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC 
         ${PROJ_SOURCE_DIR}/il2cpp/libil2cpp
     )
     target_compile_definitions(my_target PRIVATE IL2CPP_TRACE=1)
-endif()
-
-# Add extra debug definitions ONLY for Debug builds
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(STATUS "Debug build detected: Enabling JNI_DEBUG and VERBOSE_LOG")
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC 
-        VERBOSE_LOG
-    )
 endif()
 
 # Link against the library targets from libjnivm.
@@ -215,14 +207,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR NOT DEFINED CMAKE_BUILD_TYPE)
         -Wl,--gc-sections -flto -s)
 endif()
 
-option(BD_ENABLE_TRACE "Enable BD-* diagnostic logs in optimized build" OFF)
+option(BD_ENABLE_TRACE "Enable BD_DEBUG / warning / BOOT_LOG (requires BD_ENABLE_LOG)" OFF)
 if(BD_ENABLE_TRACE)
-    message(STATUS "BD_ENABLE_TRACE on -> undefining NDEBUG (trace logs active)")
-    # libjnivm is compiled separately; -UNDEBUG must reach its TU too.
-    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -UNDEBUG)
+    message(STATUS "BD_ENABLE_TRACE on -> BD_DEBUG / warning / BOOT_LOG active")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_TRACE)
     foreach(t IN ITEMS jnivm fake-jni baron)
         if(TARGET ${t})
-            target_compile_options(${t} PRIVATE -UNDEBUG)
+            target_compile_definitions(${t} PRIVATE BD_ENABLE_TRACE)
         endif()
     endforeach()
 endif()
@@ -248,13 +239,33 @@ if(BD_ENABLE_GPLAY)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_GPLAY)
 endif()
 
-option(BOGO_QUIET "Silence BD_LOG and jnivm LOG (log.txt nearly empty)" OFF)
-if(BOGO_QUIET)
-    message(STATUS "BOGO_QUIET on -> silencing BD_LOG and jnivm LOG")
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOGO_QUIET)
+option(BD_ENABLE_LOG "Master switch for non-error logs (off by default; required by all sub-switches)" OFF)
+if(BD_ENABLE_LOG)
+    message(STATUS "BD_ENABLE_LOG on -> BD_LOG and jnivm LOG will write to stderr")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_LOG)
     foreach(t IN ITEMS jnivm fake-jni baron)
         if(TARGET ${t})
-            target_compile_definitions(${t} PRIVATE BOGO_QUIET)
+            target_compile_definitions(${t} PRIVATE BD_ENABLE_LOG)
         endif()
     endforeach()
+endif()
+
+option(BD_ENABLE_VERBOSE "Enable verbose() output (requires BD_ENABLE_LOG)" OFF)
+if(BD_ENABLE_VERBOSE)
+    message(STATUS "BD_ENABLE_VERBOSE on -> verbose() active")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_VERBOSE)
+    foreach(t IN ITEMS jnivm fake-jni baron)
+        if(TARGET ${t})
+            target_compile_definitions(${t} PRIVATE BD_ENABLE_VERBOSE)
+        endif()
+    endforeach()
+endif()
+
+# Sub-switches in the log hierarchy require the master BD_ENABLE_LOG.
+# Without it the sub-switches would silently do nothing (jnivm LOG /
+# il2cpp trace go through paths gated by BD_ENABLE_LOG), which is more
+# confusing than a build error.
+if((BD_ENABLE_TRACE OR BD_ENABLE_VERBOSE OR IL2CPP_TRACE) AND NOT BD_ENABLE_LOG)
+    message(FATAL_ERROR
+        "BD_ENABLE_TRACE / BD_ENABLE_VERBOSE / IL2CPP_TRACE require -DBD_ENABLE_LOG=ON")
 endif()

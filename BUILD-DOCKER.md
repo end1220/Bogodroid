@@ -117,10 +117,11 @@ docker run --rm --platform linux/arm64 \
 | Flag | 默认 | 作用 |
 |---|---|---|
 | `CMAKE_BUILD_TYPE=Release` | Debug | 启用 LTO + `-fvisibility=hidden` + `-Wl,--gc-sections -s`。9.5 MB → 4.9 MB |
-| `BOGO_QUIET=ON` | OFF | 关闭所有 `BD_LOG` 事件行（log.txt 只剩 jnivm `[STUB-MISS]` 与上游噪音）。SD 卡发布版用 |
+| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开 `BD_LOG` + jnivm `LOG` 事件行。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
+| `BD_ENABLE_TRACE=ON` | OFF | 在 LOG 之上额外打开 `BD_DEBUG` / `warning` / `BOOT_LOG` 细节诊断行。需 `BD_ENABLE_LOG=ON` |
+| `BD_ENABLE_VERBOSE=ON` | OFF | 在 LOG 之上额外打开 `verbose()`（365 处 legacy）。需 `BD_ENABLE_LOG=ON` |
+| `IL2CPP_TRACE=ON` | OFF | 在 LOG 之上额外打开 il2cpp 内部 trace（仅 unityloader）。需 `BD_ENABLE_LOG=ON` |
 | `BD_ENABLE_OPENSLES_SHIM=ON` | OFF | 把 `thunks/opensles/` 编进 + 暴露给 FMOD。当前 AudioTrack/fakefmod 路径已经能用，此 flag 保留为后续 A/B |
-| `BD_ENABLE_TRACE=ON` | OFF | 保留 Release 优化但取消 `-DNDEBUG`，让所有 `BD_DEBUG` / `warning` / `BOOT_LOG` 都打印出来。**诊断版专用** |
-| `IL2CPP_TRACE=ON` | OFF | il2cpp_log_shim 转发 IL2CPP 内部 trace（上游遗留） |
 
 ---
 
@@ -148,7 +149,7 @@ strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* �
 
 ### 6.1 Release 二进制里应该出现的 BD-* 标签
 
-`BD_LOG` 是事件级、release 可见的（除非 `-DBOGO_QUIET=ON`）：
+`BD_LOG` 是事件级日志，默认 **关闭**；编译时加 `-DBD_ENABLE_LOG=ON` 才会出现以下标签：
 
 | 标签 | 源文件 | 出现时机 |
 |---|---|---|
@@ -166,7 +167,7 @@ strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* �
 | `[BD-EXIT]` | `projects/unityloader/main.cpp` | Unity 主动退出 (nativeRender 返回 false) |
 | `[BD-OPENSLES]` | `thunks/opensles/opensles.cpp` | 仅 `-DBD_ENABLE_OPENSLES_SHIM=ON` 编进时 |
 
-开了 `-DBOGO_QUIET=ON` 之后**以上全没**，只剩 `fatal_error`。
+默认 build（不传 `-DBD_ENABLE_LOG=ON`）**以上全没**。崩溃信息仍然会打：`fatal_error` 走 stderr，`SIGSEGV` 走 libc `backtrace_symbols_fd` 直接打栈帧符号（不经 BD_LOG）。
 
 ### 6.2 仅在 debug / `-DBD_ENABLE_TRACE=ON` 出现的 BD-* 标签
 

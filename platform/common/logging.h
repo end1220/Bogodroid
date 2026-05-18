@@ -4,16 +4,29 @@
 #include <cstdio>
 
 // BogoDroid logging — single source of truth.
-//   fatal_error  always fires (pre-termination).
-//   BD_LOG       [BD-cat] line; release-visible unless BOGO_QUIET.
-//   BD_DEBUG     [BD-cat] line; NDEBUG-gated.
-//   warning / WARN_STUB / BOOT_LOG   NDEBUG-gated legacy paths.
-//   verbose      VERBOSE_LOG-gated legacy.
+//
+//   fatal_error          always fires (pre-termination).
+//   SIGSEGV handler      libc backtrace, always fires (debug_utils.cpp).
+//
+// All other logs are gated under a 2-level hierarchy. The master switch
+// must be on for any sub-switch to do anything; CMake enforces this.
+//
+//   -DBD_ENABLE_LOG=ON                 → BD_LOG, jnivm LOG (event level)
+//      -DBD_ENABLE_TRACE=ON            →   + BD_DEBUG, warning, BOOT_LOG
+//      -DBD_ENABLE_VERBOSE=ON          →   + verbose
+//      -DIL2CPP_TRACE=ON               →   + il2cpp internal trace
 
 #define fatal_error(msg, ...) \
     do { fprintf(stderr, "%s:%d: " msg, __FILE__, __LINE__, ##__VA_ARGS__); } while(0)
 
-#ifndef NDEBUG
+#ifdef BD_ENABLE_LOG
+    #define BD_LOG(cat, fmt, ...) \
+        fprintf(stderr, "[BD-" cat "] " fmt "\n", ##__VA_ARGS__)
+#else
+    #define BD_LOG(cat, fmt, ...) ((void)0)
+#endif
+
+#ifdef BD_ENABLE_TRACE
     #define warning(msg, ...)   do { fprintf(stderr, msg, ##__VA_ARGS__); } while(0)
     #define WARN_STUB           fprintf(stderr, "Warning, stubbed function \"%s\".\n", __FUNCTION__);
     #define BOOT_LOG(...)       printf(__VA_ARGS__)
@@ -26,14 +39,7 @@
     #define BD_DEBUG(cat, fmt, ...) ((void)0)
 #endif
 
-#ifdef BOGO_QUIET
-    #define BD_LOG(cat, fmt, ...) ((void)0)
-#else
-    #define BD_LOG(cat, fmt, ...) \
-        fprintf(stderr, "[BD-" cat "] " fmt "\n", ##__VA_ARGS__)
-#endif
-
-#ifdef VERBOSE_LOG
+#ifdef BD_ENABLE_VERBOSE
     #define verbose(tag, format, ...) printf("[" tag "] " format "\n", ##__VA_ARGS__)
 #else
     #define verbose(tag, format, ...) ((void)0)

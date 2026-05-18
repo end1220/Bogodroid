@@ -1,13 +1,15 @@
 #pragma once
 #include <cstdio>
-#ifdef BOGO_QUIET
-#define LOG(tag, format, ...) ((void)0)
-#elif defined(HAVE_LOGGER)
-#include <log.h>
-#define LOG(...) Log::debug(__VA_ARGS__)
-#else
+#ifdef BD_ENABLE_LOG
+#  if defined(HAVE_LOGGER)
+#    include <log.h>
+#    define LOG(...) Log::debug(__VA_ARGS__)
+#  else
 // stderr (unbuffered in main.cpp) so the tail survives SIGKILL.
-#define LOG(tag, format, ...) fprintf(stderr, "[" tag "]: " format "\n" , ##__VA_ARGS__)
+#    define LOG(tag, format, ...) fprintf(stderr, "[" tag "]: " format "\n" , ##__VA_ARGS__)
+#  endif
+#else
+#  define LOG(tag, format, ...) ((void)0)
 #endif
 
 // Prints each unique (kind, class, name, sig) tuple via LOG once.
