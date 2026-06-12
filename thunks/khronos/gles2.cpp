@@ -27,36 +27,61 @@ DynLibFunction symtable_gles2[4096] = {};
 #define PTR_RESOLVE(x) resolve_thunked<&glad_##x>(#x, symtable_gles2_index, symtable_gles2, SDL_GL_GetProcAddress)
 
 // Texture-size cap. Unity ships textures sized for high-end Android phones
-// that OOM on low-end Mali handhelds. wsm.toml [gpu] textureMaxDim caps the
-// longest side and box-downsamples uploads. Strips (LUTs) and RTs match the
-// display size are skipped; only RGBA8 / RGB8 / SRGB / ETC2 / ASTC are
-// capped — HDR float / depth / stencil pass through unchanged.
-static int bd_get_max_tex_dim()
+// that OOM on low-end Mali handhelds. wsm.toml [gpu] caps the longest side
+// per format family and box-downsamples uploads:
+//   textureMaxDim       — fallback for families without their own key (0 = off)
+//   textureMaxDimRGBA8  — RGBA8 / RGB8 / SRGB8 / SRGB8_ALPHA8
+//   textureMaxDimETC2   — ETC2 family
+//   textureMaxDimASTC   — ASTC LDR family
+// Strips (LUTs) and RTs matching the display size are skipped; HDR float /
+// depth / stencil pass through unchanged. ETC2/ASTC caps are forced to 0:
+// glCompressedTexSubImage2D is not intercepted, so shrinking compressed
+// storage desyncs the upload dimensions and crashes the driver.
+struct BD_TexCaps { int rgba8; int etc2; int astc; };
+
+static const BD_TexCaps& bd_get_tex_caps()
 {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = config["gpu"]["textureMaxDim"].value_or<int>(0);
-        BD_LOG("CAP", "textureMaxDim = %d (0 = disabled)", cached);
+    static BD_TexCaps caps;
+    static bool init = false;
+    if (!init) {
+        int fallback = config["gpu"]["textureMaxDim"].value_or<int>(0);
+        caps.rgba8 = config["gpu"]["textureMaxDimRGBA8"].value_or(fallback);
+        caps.etc2  = config["gpu"]["textureMaxDimETC2"].value_or(fallback);
+        caps.astc  = config["gpu"]["textureMaxDimASTC"].value_or(fallback);
+        if (caps.etc2 > 0) {
+            BD_LOG("CAP", "textureMaxDimETC2 = %d unsupported (compressed upload not intercepted), forcing 0", caps.etc2);
+            caps.etc2 = 0;
+        }
+        if (caps.astc > 0) {
+            BD_LOG("CAP", "textureMaxDimASTC = %d unsupported (compressed upload not intercepted), forcing 0", caps.astc);
+            caps.astc = 0;
+        }
+        BD_LOG("CAP", "textureMaxDim RGBA8=%d ETC2=%d ASTC=%d (0 = disabled)",
+               caps.rgba8, caps.etc2, caps.astc);
+        init = true;
     }
-    return cached;
+    return caps;
 }
 
-static bool bd_format_is_capable(GLenum sized_internalformat)
+static int bd_cap_for_format(GLenum sized_internalformat)
 {
+    const BD_TexCaps& caps = bd_get_tex_caps();
     switch (sized_internalformat) {
         case 0x8058 /*GL_RGBA8*/:
         case 0x8051 /*GL_RGB8*/:
         case 0x8C41 /*GL_SRGB8*/:
         case 0x8C43 /*GL_SRGB8_ALPHA8*/:
+            return caps.rgba8;
         case 0x9274: case 0x9275: case 0x9276: case 0x9277:
         case 0x9278: case 0x9279:    // ETC2 family
+            return caps.etc2;
         case 0x93B0: case 0x93B1: case 0x93B2: case 0x93B3:
         case 0x93B4: case 0x93B5: case 0x93B6: case 0x93B7:
         case 0x93B8: case 0x93B9: case 0x93BA: case 0x93BB:
         case 0x93BC: case 0x93BD:    // ASTC LDR
-            return true;
+            return caps.astc;
         default:
-            return false;
+            return 0;
     }
 }
 
@@ -144,8 +169,11 @@ extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
 extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
                                    GLsizei width, GLsizei height)
 {
+    BD_LOG("TEX", "glTexStorage2D %dx%d ifmt=0x%04x mips=%d bound=%u",
+           (int)width, (int)height, (unsigned)internalformat, (int)levels,
+           (unsigned)g_bound_tex_2d);
     GLsizei out_w = width, out_h = height;
-    int max_dim = bd_get_max_tex_dim();
+    int max_dim = bd_cap_for_format(internalformat);
     int short_side = std::min(width, height);
     int long_side  = std::max(width, height);
     bool looks_like_lut = (short_side <= 32) || (long_side > 4 * short_side);
@@ -157,7 +185,6 @@ extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internal
     if (target == 0x0DE1 /*GL_TEXTURE_2D*/
         && max_dim > 0
         && long_side > max_dim
-        && bd_format_is_capable(internalformat)
         && !looks_like_lut
         && !looks_like_rt) {
         float s = (float)max_dim / (float)long_side;
@@ -200,8 +227,10 @@ extern "C" void bd_glTexSubImage2D(GLenum target, GLint level,
     if (new_h < 1) new_h = 1;
     if (new_x < 0) new_x = 0;
     if (new_y < 0) new_y = 0;
-    if (new_x + new_w > info.new_w) new_w = info.new_w - new_x;
-    if (new_y + new_h > info.new_h) new_h = info.new_h - new_y;
+    int level_w = std::max(1, info.new_w >> level);
+    int level_h = std::max(1, info.new_h >> level);
+    if (new_x + new_w > level_w) new_w = level_w - new_x;
+    if (new_y + new_h > level_h) new_h = level_h - new_y;
     if (new_w <= 0 || new_h <= 0) return;
     std::vector<uint8_t> resized((size_t)new_w * (size_t)new_h * (size_t)bpp);
     bd_box_downsample((const uint8_t*)pixels, (int)width, (int)height,

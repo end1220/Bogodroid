@@ -9,6 +9,53 @@
 #include "thunk_pthread.h"
 #include <cstring>
 
+// Lazy-init race guard for bionic-style static initializers (PTHREAD_MUTEX_INITIALIZER = {0}).
+// Bionic's pthread_mutex_t is sizeof(int) on the IL2CPP ABI, so the slot is only 4-byte
+// aligned. Cannot use __atomic_load_n / __atomic_store_n on a (pthread_mutex_t**) — they
+// emit ldar/stlr which require 8-byte alignment on aarch64 and SIGBUS BUS_ADRALN otherwise.
+// Use memcpy for the unaligned 8-byte transfer (compiler emits a single ldr/str, which
+// tolerates 4-byte alignment) and pair it with an explicit thread_fence for ordering.
+// Slow path (first touch only): take g_lazy_init_lock, double-check, init, publish.
+// pthread_mutex_init/destroy are NOT thread-safe per POSIX — concurrent explicit init/destroy
+// on the same handle is still UB (caller responsibility).
+static pthread_mutex_t g_lazy_init_lock = PTHREAD_MUTEX_INITIALIZER;
+
+ABI_ATTR int pthread_mutex_init_impl(BIONIC_pthread_mutex_t *_uid, pthread_mutexattr_t **mutexattr);
+ABI_ATTR int pthread_cond_init_impl(pthread_cond_t **cnd, const int *condattr);
+
+static inline pthread_mutex_t* lazy_get_mutex(BIONIC_pthread_mutex_t *_uid)
+{
+    pthread_mutex_t **slot = (pthread_mutex_t**)_uid;
+    pthread_mutex_t *p;
+    std::memcpy(&p, slot, sizeof(p));
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (p) return p;
+    pthread_mutex_lock(&g_lazy_init_lock);
+    std::memcpy(&p, slot, sizeof(p));
+    if (!p) {
+        pthread_mutex_init_impl(_uid, NULL);
+        std::memcpy(&p, slot, sizeof(p));
+    }
+    pthread_mutex_unlock(&g_lazy_init_lock);
+    return p;
+}
+
+static inline pthread_cond_t* lazy_get_cond(pthread_cond_t **slot)
+{
+    pthread_cond_t *p;
+    std::memcpy(&p, slot, sizeof(p));
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (p) return p;
+    pthread_mutex_lock(&g_lazy_init_lock);
+    std::memcpy(&p, slot, sizeof(p));
+    if (!p) {
+        pthread_cond_init_impl(slot, NULL);
+        std::memcpy(&p, slot, sizeof(p));
+    }
+    pthread_mutex_unlock(&g_lazy_init_lock);
+    return p;
+}
+
 ABI_ATTR pthread_t pthread_self_impl()
 {
     return pthread_self();
@@ -44,11 +91,11 @@ ABI_ATTR int pthread_mutex_init_impl(BIONIC_pthread_mutex_t *_uid, pthread_mutex
 {
     pthread_mutex_t **uid = (pthread_mutex_t**)_uid;
 
-    pthread_mutexattr_t *attr = mutexattr ? *mutexattr : NULL; 
+    pthread_mutexattr_t *attr = mutexattr ? *mutexattr : NULL;
     pthread_mutex_t *m = (pthread_mutex_t *)calloc(1, sizeof(pthread_mutex_t));
-    *m = PTHREAD_MUTEX_INITIALIZER;
     if (!m)
         return -1;
+    *m = PTHREAD_MUTEX_INITIALIZER;
 
     int ret = pthread_mutex_init(m, attr);
     if (ret < 0)
@@ -57,7 +104,9 @@ ABI_ATTR int pthread_mutex_init_impl(BIONIC_pthread_mutex_t *_uid, pthread_mutex
         return -1;
     }
 
-    *uid = m;
+    // bionic slot is 4-byte-aligned; stlr requires 8-byte. memcpy emits an unaligned-safe str.
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    std::memcpy(uid, &m, sizeof(m));
 
     return 0;
 }
@@ -77,56 +126,32 @@ ABI_ATTR int pthread_mutex_destroy_impl(BIONIC_pthread_mutex_t *_uid)
 
 ABI_ATTR int pthread_mutex_lock_impl(BIONIC_pthread_mutex_t *_uid)
 {
-    pthread_mutex_t **uid = (pthread_mutex_t**)_uid;
-
-    if (uid < (pthread_mutex_t**)0x1000)
+    if ((uintptr_t)_uid < 0x1000)
         return -1;
-
-    if (!*uid)
-        pthread_mutex_init_impl(_uid, NULL);
-    
-    return pthread_mutex_lock(*uid);
+    pthread_mutex_t *m = lazy_get_mutex(_uid);
+    if (!m)
+        return -1;
+    return pthread_mutex_lock(m);
 }
 
 ABI_ATTR int pthread_mutex_unlock_impl(BIONIC_pthread_mutex_t *_uid)
 {
-    pthread_mutex_t **uid = (pthread_mutex_t**)_uid;
-
-    int ret = 0;
-    if (uid < (pthread_mutex_t**)0x1000)
+    if ((uintptr_t)_uid < 0x1000)
         return -1;
-
-    if (!*uid)
-        ret = pthread_mutex_init_impl(_uid, NULL);
-
-    if (ret < 0)
-        return ret;
-    
-    return pthread_mutex_unlock(*uid);
+    pthread_mutex_t *m = lazy_get_mutex(_uid);
+    if (!m)
+        return -1;
+    return pthread_mutex_unlock(m);
 }
 
 ABI_ATTR int pthread_mutex_trylock_impl(BIONIC_pthread_mutex_t *_uid)
 {
-    pthread_mutex_t **uid = (pthread_mutex_t**)_uid;
-
-    // Sanity check the handle's address
-    if (uid < (pthread_mutex_t**)0x1000)
-        return EINVAL; // Return a proper errno value
-
-    // Lazy initialization: if the handle is null, create the underlying Glibc mutex
-    if (!*uid)
-    {
-        int ret = pthread_mutex_init_impl(_uid, NULL);
-        if (ret != 0)
-        {
-            // If init fails, return the error. EBUSY is a possible return here
-            // if the mutex is locked, but it shouldn't be during init.
-            return ret;
-        }
-    }
-    
-    // Dereference the handle to get the real Glibc mutex and call the function
-    return pthread_mutex_trylock(*uid);
+    if ((uintptr_t)_uid < 0x1000)
+        return EINVAL;
+    pthread_mutex_t *m = lazy_get_mutex(_uid);
+    if (!m)
+        return EINVAL;
+    return pthread_mutex_trylock(m);
 }
 
 ABI_ATTR int pthread_cond_init_impl(pthread_cond_t **cnd, const int *condattr)
@@ -143,29 +168,26 @@ ABI_ATTR int pthread_cond_init_impl(pthread_cond_t **cnd, const int *condattr)
         return -1;
     }
 
-    *cnd = c;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    std::memcpy(cnd, &c, sizeof(c));
 
     return 0;
 }
 
 ABI_ATTR int pthread_cond_broadcast_impl(pthread_cond_t **cnd)
 {
-    if (!*cnd)
-    {
-        if (pthread_cond_init_impl(cnd, NULL) < 0)
-            return -1;
-    }
-    return pthread_cond_broadcast(*cnd);
+    pthread_cond_t *c = lazy_get_cond(cnd);
+    if (!c)
+        return -1;
+    return pthread_cond_broadcast(c);
 }
 
 ABI_ATTR int pthread_cond_signal_impl(pthread_cond_t **cnd)
 {
-    if (!*cnd)
-    {
-        if (pthread_cond_init_impl(cnd, NULL) < 0)
-            return -1;
-    };
-    return pthread_cond_signal(*cnd);
+    pthread_cond_t *c = lazy_get_cond(cnd);
+    if (!c)
+        return -1;
+    return pthread_cond_signal(c);
 }
 
 ABI_ATTR int pthread_cond_destroy_impl(pthread_cond_t **cnd)
@@ -181,26 +203,21 @@ ABI_ATTR int pthread_cond_destroy_impl(pthread_cond_t **cnd)
 
 ABI_ATTR int pthread_cond_wait_impl(pthread_cond_t **cnd, BIONIC_pthread_mutex_t *_mtx)
 {
-    pthread_mutex_t **mtx = (pthread_mutex_t**)_mtx;
-    
-    if (!*cnd)
-    {
-        if (pthread_cond_init_impl(cnd, NULL) < 0)
-            return -1;
-    }
-    return pthread_cond_wait(*cnd, *mtx);
+    pthread_cond_t *c = lazy_get_cond(cnd);
+    if (!c)
+        return -1;
+    // POSIX: caller must hold _mtx, so its lazy-init already happened in lock_impl.
+    pthread_mutex_t *m = *(pthread_mutex_t**)_mtx;
+    return pthread_cond_wait(c, m);
 }
 
 ABI_ATTR int pthread_cond_timedwait_impl(pthread_cond_t **cnd, BIONIC_pthread_mutex_t *_mtx, const struct timespec *t)
 {
-    pthread_mutex_t **mtx = (pthread_mutex_t**)_mtx;
-
-    if (!*cnd)
-    {
-        if (pthread_cond_init_impl(cnd, NULL) < 0)
-            return -1;
-    }
-    return pthread_cond_timedwait(*cnd, *mtx, t);
+    pthread_cond_t *c = lazy_get_cond(cnd);
+    if (!c)
+        return -1;
+    pthread_mutex_t *m = *(pthread_mutex_t**)_mtx;
+    return pthread_cond_timedwait(c, m, t);
 }
 
 ABI_ATTR int pthread_once_impl(volatile int *once_control, void (*init_routine)(void))
