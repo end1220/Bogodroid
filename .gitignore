@@ -1,5 +1,5 @@
 .vscode/
-.claude/settings.local.json
+.claude/
 gamefiles/*
 !gamefiles/support_files
 !gamefiles/teapot/
@@ -13,3 +13,7 @@ dist/
 libjnivm/build/
 il2cpp/
 projects/unityloader/monocompat/il2cpp_log_shim.cpp
+__pycache__/
+pocs/
+build-local/
+output/

@@ -37,21 +37,21 @@ What it does NOT do
 Usage
 -----
     # Default: cap at 1280, skip nothing
-    python3 tools/shrink_bundle.py /path/to/data.unity3d
+    python3 tools/unity_astc/shrink_bundle.py /path/to/data.unity3d
 
     # Tighter cap, suitable for a 540p-only device
-    python3 tools/shrink_bundle.py data.unity3d --cap 960
+    python3 tools/unity_astc/shrink_bundle.py data.unity3d --cap 960
 
     # Exclude atlases that proved broken in QA
-    python3 tools/shrink_bundle.py data.unity3d \\
+    python3 tools/unity_astc/shrink_bundle.py data.unity3d \\
         --skip particle_smoke_atlas \\
         --skip shader_palette_lut
 
     # Skip list from a file (one name per line, '#' for comments)
-    python3 tools/shrink_bundle.py data.unity3d --skip-file skip.txt
+    python3 tools/unity_astc/shrink_bundle.py data.unity3d --skip-file skip.txt
 
     # Dry run — list what would be changed, write nothing
-    python3 tools/shrink_bundle.py data.unity3d --dry-run
+    python3 tools/unity_astc/shrink_bundle.py data.unity3d --dry-run
 
 Requirements
 ------------
