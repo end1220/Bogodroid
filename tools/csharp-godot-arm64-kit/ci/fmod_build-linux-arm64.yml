@@ -1,0 +1,94 @@
+name: 🛠 Build linux arm64
+
+# Build for OLD-glibc handhelds (e.g. TrimUI Smart Pro = glibc 2.33).
+# Native arm64 runner; ubuntu 20.04 container so libc/libm symbols stay ≤ 2.31.
+# Self-contained (does NOT use the upstream composite action so the container
+# environment is consistent end-to-end).
+
+on:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: 4.5
+  FMOD_VERSION: 20306
+  TARGET_PATH: demo/addons/fmod/libs/
+  TARGET_NAME: libGodotFmod
+
+jobs:
+  build-linux-arm64:
+    name: Linux arm64 ${{ matrix.target }} (glibc≤2.31)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [template_release, template_debug, editor]
+    steps:
+      - name: System prereqs inside container
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y \
+            ca-certificates curl git binutils \
+            python3 python3-pip \
+            build-essential pkg-config \
+            libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu-dev \
+            libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev
+          ldd --version | head -1
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Python build deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install scons==4.7.0 requests
+          scons --version
+
+      - name: Download FMOD SDK (linux, contains x86_64 + arm64 libs)
+        env:
+          FMODUSER: ${{ secrets.FMODUSER }}
+          FMODPASS: ${{ secrets.FMODPASS }}
+        run: |
+          set -e
+          cd ..
+          mkdir -p libs/fmod
+          cd libs/fmod
+          python3 "$GITHUB_WORKSPACE/get_fmod.py" "$FMODUSER" "$FMODPASS" linux "$FMOD_VERSION"
+          tar -xf "fmodstudioapi${FMOD_VERSION}linux.tar.gz"
+          mv "fmodstudioapi${FMOD_VERSION}linux/api" linux
+          ls linux/core/lib/arm64 linux/studio/lib/arm64 | head -10
+
+      - name: Build (linux arm64, target=${{ matrix.target }})
+        run: |
+          scons \
+            platform=linux \
+            arch=arm64 \
+            generate_bindings=yes \
+            target=${{ matrix.target }} \
+            target_path=${{ env.TARGET_PATH }} \
+            target_name=${{ env.TARGET_NAME }} \
+            -j$(nproc)
+
+      - name: Stage FMOD arm64 runtimes alongside wrapper (so they're in the artifact)
+        run: |
+          mkdir -p demo/addons/fmod/libs/linux
+          cp -a ../libs/fmod/linux/core/lib/arm64/*   demo/addons/fmod/libs/linux/ 2>/dev/null || true
+          cp -a ../libs/fmod/linux/studio/lib/arm64/* demo/addons/fmod/libs/linux/ 2>/dev/null || true
+          ls -la demo/addons/fmod/libs/linux/
+
+      - name: Verify GLIBC requirement on built .so
+        run: |
+          for so in demo/addons/fmod/libs/linux/*.so; do
+            echo "--- $so ---"
+            objdump -T "$so" 2>/dev/null | awk '/GLIBC_/{print $5}' | sort -u
+          done
+
+      - name: Upload (wrapper + FMOD runtimes)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libGodotFmod-linux-arm64-glibc2.31-${{ matrix.target }}
+          path: demo/addons/fmod/libs/linux/**/*.*
+          if-no-files-found: error

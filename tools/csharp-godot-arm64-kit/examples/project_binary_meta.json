@@ -1,0 +1,8 @@
+{
+  "blob_ofs": 1852863616,
+  "blob_size": 22434,
+  "md5_pos": 1854000656,
+  "orig_md5": "2c12f997fc26cdf658f74d9d4b156425",
+  "new_md5": "3d21411aa4e8a70bc6ec0c814b6ecdfb",
+  "description": "StS2 project.binary with autoload/SentryInit path stubbed to a non-existent .gd \u2192 godot logs one 'couldn't load script' then skips autoload, eliminating the parse-error wall from SentryInit.gd. No other game files reference SentrySDK/SentryEvent/SentryOptions (verified)."
+}

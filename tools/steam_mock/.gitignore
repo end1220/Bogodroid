@@ -1,0 +1,3 @@
+# 自动生成,从 gen_stubs.py + gbe_fork 源
+steam_mock_gen.c
+libsteam_api64.so

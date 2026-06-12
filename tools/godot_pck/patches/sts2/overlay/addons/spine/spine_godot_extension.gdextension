@@ -1,0 +1,33 @@
+[configuration]
+
+entry_symbol = "spine_godot_library_init"
+compatibility_minimum = "4.1"
+
+[libraries]
+
+; All paths normalised to absolute res:// — godot's relative-path lookup
+; only checks inside the pck, never the filesystem, so the arm64 .so we
+; ship outside the pck (at the same res:// location on disk) is invisible
+; without the explicit res:// prefix. fmod.gdextension uses the same trick.
+
+macos.editor = "res://addons/spine/macos/libspine_godot.macos.editor.framework"
+macos.debug = "res://addons/spine/macos/libspine_godot.macos.template_debug.framework"
+macos.release = "res://addons/spine/macos/libspine_godot.macos.template_release.framework"
+
+ios.debug = "res://addons/spine/ios/libspine_godot.ios.template_debug.framework"
+ios.release = "res://addons/spine/ios/libspine_godot.ios.template_release.framework"
+
+windows.editor.x86_64 = "res://addons/spine/windows/libspine_godot.windows.editor.x86_64.dll"
+windows.debug.x86_64 = "res://addons/spine/windows/libspine_godot.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/spine/windows/libspine_godot.windows.template_release.x86_64.dll"
+
+linux.editor.x86_64 = "res://addons/spine/linux/libspine_godot.linux.editor.x86_64.so"
+linux.debug.x86_64 = "res://addons/spine/linux/libspine_godot.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/spine/linux/libspine_godot.linux.template_release.x86_64.so"
+
+linux.editor.arm64 = "res://addons/spine/linux/libspine_godot.linux.editor.arm64.so"
+linux.debug.arm64 = "res://addons/spine/linux/libspine_godot.linux.template_debug.arm64.so"
+linux.release.arm64 = "res://addons/spine/linux/libspine_godot.linux.template_release.arm64.so"
+
+android.debug.arm64 = "res://addons/spine/android/libspine_godot.android.template_debug.arm64.so"
+android.release.arm64 = "res://addons/spine/android/libspine_godot.android.template_release.arm64.so"

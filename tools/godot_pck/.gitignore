@@ -1,0 +1,10 @@
+# 大体积外部工具 + 工作目录,不进 git
+bin/*
+!bin/README.md
+work/
+*.pck
+*.zip
+*_extracted/
+*_recovered/
+__pycache__/
+*.pyc

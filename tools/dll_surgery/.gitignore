@@ -1,0 +1,4 @@
+# DLL backups + patched output — too large + proprietary StS2 IP
+backups/*.dll
+out/*.dll
+*.patched.dll
