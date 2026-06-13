@@ -6,24 +6,41 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      # ── 日志相关 / Log ──────────────────────────────────────────
+      enable_log:
+        description: "[日志] BD_ENABLE_LOG — master log switch (non-error logs to stderr)"
+        type: boolean
+        default: false
+      enable_trace:
+        description: "[日志] BD_ENABLE_TRACE — BD_DEBUG / warning / BOOT_LOG (implies log)"
+        type: boolean
+        default: false
+      enable_verbose:
+        description: "[日志] BD_ENABLE_VERBOSE — verbose() output (implies log)"
+        type: boolean
+        default: false
+      il2cpp_trace:
+        description: "[日志] IL2CPP_TRACE — forward il2cpp internal trace (implies log)"
+        type: boolean
+        default: false
+      # ── 功能相关 / Feature ──────────────────────────────────────
+      enable_gplay:
+        description: "[功能] BD_ENABLE_GPLAY — Google Play Game Services stubs"
+        type: boolean
+        default: false
+      enable_opensles:
+        description: "[功能] BD_ENABLE_OPENSLES_SHIM — OpenSL ES → SDL bridge"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   unityloader:
-    name: unityloader ${{ matrix.id }}
+    name: unityloader
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: full
-            cmake_extra: -DBOGO_QUIET=ON -DBD_ENABLE_GPLAY=ON
-            asset: unityloader-aarch64-glibc2.31
-          - id: slim
-            cmake_extra: -DBOGO_QUIET=ON
-            asset: unityloader-aarch64-glibc2.31-slim
 
     steps:
       - uses: actions/checkout@v4
@@ -42,18 +59,66 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Cross-compile unityloader (${{ matrix.id }})
+      # Default (release event, or dispatch with nothing ticked) = slim:
+      # only BOGO_QUIET=ON, every optional component off. Tick a box in the
+      # "Run workflow" dialog to fold that component into a custom build.
+      - name: Resolve build flags
+        id: flags
+        env:
+          ENABLE_LOG: ${{ inputs.enable_log }}
+          ENABLE_TRACE: ${{ inputs.enable_trace }}
+          ENABLE_VERBOSE: ${{ inputs.enable_verbose }}
+          IL2CPP_TRACE: ${{ inputs.il2cpp_trace }}
+          ENABLE_GPLAY: ${{ inputs.enable_gplay }}
+          ENABLE_OPENSLES: ${{ inputs.enable_opensles }}
+        run: |
+          set -euo pipefail
+          extra="-DBOGO_QUIET=ON"
+          suffix="slim"
+
+          # Sub-switches require the BD_ENABLE_LOG master; auto-imply it so a
+          # tick on TRACE/VERBOSE/IL2CPP_TRACE alone doesn't FATAL_ERROR.
+          log="$ENABLE_LOG"
+          if [ "$ENABLE_TRACE" = "true" ] || [ "$ENABLE_VERBOSE" = "true" ] || [ "$IL2CPP_TRACE" = "true" ]; then
+            log="true"
+          fi
+
+          if [ "$log" = "true" ]; then
+            extra="$extra -DBD_ENABLE_LOG=ON";   suffix="$suffix+log"
+          fi
+          if [ "$ENABLE_TRACE" = "true" ]; then
+            extra="$extra -DBD_ENABLE_TRACE=ON"; suffix="$suffix+trace"
+          fi
+          if [ "$ENABLE_VERBOSE" = "true" ]; then
+            extra="$extra -DBD_ENABLE_VERBOSE=ON"; suffix="$suffix+verbose"
+          fi
+          if [ "$IL2CPP_TRACE" = "true" ]; then
+            extra="$extra -DIL2CPP_TRACE=ON"; suffix="$suffix+il2cpp"
+          fi
+          if [ "$ENABLE_GPLAY" = "true" ]; then
+            extra="$extra -DBD_ENABLE_GPLAY=ON"; suffix="$suffix+gplay"
+          fi
+          if [ "$ENABLE_OPENSLES" = "true" ]; then
+            extra="$extra -DBD_ENABLE_OPENSLES_SHIM=ON"; suffix="$suffix+opensles"
+          fi
+
+          echo "cmake_extra=$extra" >> "$GITHUB_OUTPUT"
+          echo "asset=unityloader-aarch64-glibc2.31-$suffix" >> "$GITHUB_OUTPUT"
+          echo "Build flags: $extra"
+          echo "Asset name:  unityloader-aarch64-glibc2.31-$suffix"
+
+      - name: Cross-compile unityloader
         run: |
           docker run --rm -v "$PWD":/work -w /work bogo-builder:ci bash -c '
             cmake -B build -G Ninja \
               -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake \
               -DCMAKE_BUILD_TYPE=Release \
-              ${{ matrix.cmake_extra }}
+              ${{ steps.flags.outputs.cmake_extra }}
             cmake --build build -j
           '
 
       - name: Stage artifact
-        run: cp build/unityloader '${{ matrix.asset }}'
+        run: cp build/unityloader '${{ steps.flags.outputs.asset }}'
 
       - name: Upload to Release
         if: github.event_name == 'release'
@@ -61,12 +126,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            '${{ matrix.asset }}' --clobber
+            '${{ steps.flags.outputs.asset }}' --clobber
 
       - name: Upload workflow artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: ${{ steps.flags.outputs.asset }}
+          path: ${{ steps.flags.outputs.asset }}
           retention-days: 7
