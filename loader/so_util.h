@@ -113,6 +113,16 @@ typedef struct {
 } DynLibHooks;
 
 void hook_address(so_module *mod, uintptr_t addr, uintptr_t dst);
+
+// Inline-hook that preserves the original: redirects addr -> dst and writes a
+// callable trampoline to *orig_out running the original (the clobbered entry
+// instruction is relocated, then control resumes at addr+4). Lets a hook call
+// through to scale the original's args/return. Unlike hook_address (replace-only)
+// it is runtime-safe (W^X re-protect + i-cache flush). On failure (an entry
+// instruction the single-instruction relocator can't handle) *orig_out = 0 and
+// no redirect is installed.
+void hook_address_detour(so_module *mod, uintptr_t addr, uintptr_t dst, uintptr_t *orig_out);
+
 void hook_symbol(so_module *mod, const char *symbol, uintptr_t dst, int is_optional);
 void hook_symbols(so_module *mod, DynLibHooks *hooks);
 

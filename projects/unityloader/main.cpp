@@ -142,6 +142,154 @@ static int ends_with(const char* str, const char* suffix)
 
 extern "C" void bd_flush_prefs_impl();
 
+// Generic config-driven IL2CPP value patcher. Reads [[il2cpp_patch]] from the
+// game toml; after il2cpp_init, resolves each (class, method) by name via the
+// exported il2cpp_* API and detours it to scale a float field of a pointer arg.
+// No game-specific names here — targets live in config. mult==1.0 installs no
+// hook. See IL2CPP_VALUE_PATCH_DESIGN.md.
+//
+// Limitation: the C pass-through forwards x0-x7 and an int/ptr return only;
+// methods taking/returning floats in d0-d7 would need an asm trampoline.
+namespace il2cpp_patch {
+    typedef void* (*p_domain_get)();
+    typedef void** (*p_domain_get_assemblies)(void* domain, size_t* size);
+    typedef void* (*p_assembly_get_image)(void* assembly);
+    typedef const char* (*p_image_get_name)(void* image);
+    typedef void* (*p_class_from_name)(void* image, const char* ns, const char* name);
+    typedef void* (*p_class_get_method_from_name)(void* klass, const char* name, int argc);
+
+    static p_domain_get                 il2cpp_domain_get;
+    static p_domain_get_assemblies      il2cpp_domain_get_assemblies;
+    static p_assembly_get_image         il2cpp_assembly_get_image;
+    static p_image_get_name             il2cpp_image_get_name;
+    static p_class_from_name            il2cpp_class_from_name;
+    static p_class_get_method_from_name il2cpp_class_get_method_from_name;
+
+    typedef void* (*p_il2cpp_init)(const char*);
+
+    struct Patch {
+        std::string cls, method;
+        int   argc  = 0;   // param count (excludes hidden this/MethodInfo*)
+        int   arg   = 0;   // which param holds the pointer (0-based)
+        int   field = -1;  // float field offset inside that pointer
+        float mult  = 1.0f;
+        uintptr_t orig = 0;
+    };
+
+    static const int MAXP = 8;
+    static Patch        g_p[MAXP];
+    static int          g_n = 0;
+    static so_module*   g_mod = nullptr;
+    static p_il2cpp_init g_orig_init = nullptr;
+    static bool         g_installed = false;
+
+    typedef uintptr_t (*orig8_t)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                 uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+
+    // One hook per slot, statically bound to g_p[K]. Scales the configured float
+    // field of the configured arg, then tail-calls the original with all 8 int
+    // regs (extra ones are harmless; a void/int/ptr return is forwarded via x0).
+    #define IL2CPP_HOOK(K) \
+    static uintptr_t hook##K(uintptr_t x0,uintptr_t x1,uintptr_t x2,uintptr_t x3, \
+                             uintptr_t x4,uintptr_t x5,uintptr_t x6,uintptr_t x7){ \
+        Patch* p = &g_p[K]; \
+        uintptr_t* a[8] = {&x0,&x1,&x2,&x3,&x4,&x5,&x6,&x7}; \
+        uintptr_t obj = *a[1 + p->arg]; \
+        if (p->field >= 0 && obj) { \
+            float* f = (float*)(obj + p->field); \
+            *f = *f * p->mult; \
+        } \
+        return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+    }
+    IL2CPP_HOOK(0) IL2CPP_HOOK(1) IL2CPP_HOOK(2) IL2CPP_HOOK(3)
+    IL2CPP_HOOK(4) IL2CPP_HOOK(5) IL2CPP_HOOK(6) IL2CPP_HOOK(7)
+    static void* g_hookfn[MAXP] = { (void*)hook0,(void*)hook1,(void*)hook2,(void*)hook3,
+                                    (void*)hook4,(void*)hook5,(void*)hook6,(void*)hook7 };
+
+    static void* find_image(const char* want) {
+        void* dom = il2cpp_domain_get();
+        size_t n = 0;
+        void** as = il2cpp_domain_get_assemblies(dom, &n);
+        for (size_t i = 0; i < n; i++) {
+            void* img = il2cpp_assembly_get_image(as[i]);
+            const char* nm = il2cpp_image_get_name(img);
+            if (nm && strstr(nm, want)) return img;
+        }
+        return nullptr;
+    }
+
+    static void install_once() {
+        if (g_installed) return;
+        g_installed = true;
+        void* img = find_image("Assembly-CSharp");
+        if (!img) { BD_LOG("DMG", "Assembly-CSharp image not found"); return; }
+        for (int i = 0; i < g_n; i++) {
+            Patch* p = &g_p[i];
+            void* klass = il2cpp_class_from_name(img, "", p->cls.c_str());
+            if (!klass) { BD_LOG("DMG", "class %s not found", p->cls.c_str()); continue; }
+            void* m = il2cpp_class_get_method_from_name(klass, p->method.c_str(), p->argc);
+            if (!m) { BD_LOG("DMG", "method %s.%s(%d) not found", p->cls.c_str(), p->method.c_str(), p->argc); continue; }
+            uintptr_t ptr = *(uintptr_t*)m;       // MethodInfo.methodPointer @ offset 0
+            uintptr_t orig = 0;
+            hook_address_detour(g_mod, ptr, (uintptr_t)g_hookfn[i], &orig);
+            if (!orig) { BD_LOG("DMG", "detour FAILED for %s.%s", p->cls.c_str(), p->method.c_str()); continue; }
+            p->orig = orig;
+            BD_LOG("DMG", "patch ACTIVE: %s.%s arg%d+0x%x x%.2f @ %p",
+                   p->cls.c_str(), p->method.c_str(), p->arg, p->field, (double)p->mult, (void*)ptr);
+        }
+    }
+
+    static void* il2cpp_init_hook(const char* name) {
+        void* dom = g_orig_init(name);          // runtime now initialized
+        install_once();
+        return dom;
+    }
+
+    // Parse [[il2cpp_patch]] from config. Skips entries with mult==1.0 (no-op).
+    static void load_config() {
+        auto arr = config["il2cpp_patch"].as_array();
+        if (!arr) return;
+        for (auto&& node : *arr) {
+            auto t = node.as_table();
+            if (!t) continue;
+            Patch p;
+            p.cls    = (*t)["class"].value<std::string>().value_or("");
+            p.method = (*t)["method"].value<std::string>().value_or("");
+            p.argc   = (int)(*t)["argc"].value<int64_t>().value_or(0);
+            p.arg    = (int)(*t)["arg"].value<int64_t>().value_or(0);
+            p.field  = (int)(*t)["field"].value<int64_t>().value_or(-1);
+            p.mult   = (float)(*t)["mult"].value<double>().value_or(1.0);
+            if (p.cls.empty() || p.method.empty() || p.field < 0) continue;
+            if (p.mult == 1.0f) continue;        // "正常" = no change, don't hook
+            if (g_n < MAXP) g_p[g_n++] = p;
+        }
+    }
+
+    // Call right after libil2cpp.so is loaded (before il2cpp_init runs).
+    static void init(so_module* lil2cpp) {
+        g_mod = lil2cpp;
+        load_config();
+        if (g_n == 0) return;                    // nothing to patch → fully inert
+        il2cpp_domain_get                 = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
+        il2cpp_domain_get_assemblies      = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
+        il2cpp_assembly_get_image         = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
+        il2cpp_image_get_name             = (p_image_get_name)so_symbol(lil2cpp, "il2cpp_image_get_name");
+        il2cpp_class_from_name            = (p_class_from_name)so_symbol(lil2cpp, "il2cpp_class_from_name");
+        il2cpp_class_get_method_from_name = (p_class_get_method_from_name)so_symbol(lil2cpp, "il2cpp_class_get_method_from_name");
+        if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
+            BD_LOG("DMG", "missing il2cpp API exports, patches disabled");
+            return;
+        }
+        uintptr_t init_addr = so_symbol(lil2cpp, "il2cpp_init");
+        if (!init_addr) { BD_LOG("DMG", "il2cpp_init not found"); return; }
+        uintptr_t orig = 0;
+        hook_address_detour(lil2cpp, init_addr, (uintptr_t)&il2cpp_init_hook, &orig);
+        if (!orig) { BD_LOG("DMG", "failed to hook il2cpp_init"); return; }
+        g_orig_init = (p_il2cpp_init)orig;
+        BD_LOG("DMG", "%d patch(es) armed; resolving on runtime init", g_n);
+    }
+}
+
 int main(int argc, char* argv[])
 {
     // Unbuffered stderr — glibc full-buffers (4KB) when stderr is a file,
@@ -312,6 +460,10 @@ int main(int argc, char* argv[])
     }
     loaded_modules[module_count++] = &lil2cpp;
     BD_TIME("after loading libil2cpp.so");
+
+    // Arm the generic il2cpp value-patch framework (reads [[il2cpp_patch]] from
+    // config; resolves + hooks once il2cpp_init runs). Inert if no patches.
+    il2cpp_patch::init(&lil2cpp);
 
 #ifdef IL2CPP_TRACE
     if(config["debug"]["log_il2cpp"].value_or<bool>(false))
