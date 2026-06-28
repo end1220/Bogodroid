@@ -167,12 +167,23 @@ namespace il2cpp_patch {
 
     typedef void* (*p_il2cpp_init)(const char*);
 
+    // mode 0 = SCALE (existing): pre-orig, *(arg+field) *= mult. f32 only.
+    // mode 1 = FREEZE: post-orig, *(obj+field) = src_field>=0 ? *(obj+src_field)
+    //                  : setval. Used for "infinite resource" — hook the value's
+    //                  setter, let it run, then force the field back (curr=max or
+    //                  a constant). Robust: the orig's float-arg (d0) may be
+    //                  clobbered by this int-only thunk, but we overwrite the
+    //                  result field anyway, so the final value is always exact.
     struct Patch {
         std::string cls, method;
         int   argc  = 0;   // param count (excludes hidden this/MethodInfo*)
-        int   arg   = 0;   // which param holds the pointer (0-based)
-        int   field = -1;  // float field offset inside that pointer
+        int   arg   = 0;   // which param holds the obj pointer (0-based); -1 = `this`
+        int   field = -1;  // field offset inside that pointer
         float mult  = 1.0f;
+        int   mode  = 0;   // 0=scale, 1=freeze
+        int   src_field = -1;   // freeze: copy from this offset; <0 => use setval
+        int   type  = 0;   // 0=f32, 1=i32 (field/src width)
+        float setval = 0;  // freeze constant when src_field<0
         uintptr_t orig = 0;
     };
 
@@ -182,24 +193,51 @@ namespace il2cpp_patch {
     static so_module*   g_mod = nullptr;
     static p_il2cpp_init g_orig_init = nullptr;
     static bool         g_installed = false;
+    // post-init callback (e.g. ui_layout) — we own the single il2cpp_init detour
+    static void (*g_post_init_cb)() = nullptr;
+    static void register_post_init(void (*cb)()) { g_post_init_cb = cb; }
 
     typedef uintptr_t (*orig8_t)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                  uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
-    // One hook per slot, statically bound to g_p[K]. Scales the configured float
-    // field of the configured arg, then tail-calls the original with all 8 int
-    // regs (extra ones are harmless; a void/int/ptr return is forwarded via x0).
+    // One hook per slot, statically bound to g_p[K]. Hot path is a couple of
+    // loads/stores around a single original call — only fires when the game
+    // itself invokes the hooked method (a damage event or a value setter), never
+    // per-frame. obj = `this` (x0) when arg<0, else the arg-th pointer param.
+    //   SCALE  (mode 0): scale obj.field by mult, then call original.
+    //   FREEZE (mode 1): call original, then force obj.field (= obj.src_field, or
+    //                    setval). f32/i32 per `type`. See Patch comment.
+    //   FORCE_RETURN (mode 2): call original (side effects preserved), then return
+    //                    a constant (int)setval instead of its real return. Used to
+    //                    pin a bool/int gate true (e.g. "skill ready" → no cooldown).
     #define IL2CPP_HOOK(K) \
     static uintptr_t hook##K(uintptr_t x0,uintptr_t x1,uintptr_t x2,uintptr_t x3, \
                              uintptr_t x4,uintptr_t x5,uintptr_t x6,uintptr_t x7){ \
         Patch* p = &g_p[K]; \
         uintptr_t* a[8] = {&x0,&x1,&x2,&x3,&x4,&x5,&x6,&x7}; \
-        uintptr_t obj = *a[1 + p->arg]; \
-        if (p->field >= 0 && obj) { \
-            float* f = (float*)(obj + p->field); \
-            *f = *f * p->mult; \
+        uintptr_t obj = (p->arg < 0) ? x0 : *a[1 + p->arg]; \
+        if (p->mode == 0) { \
+            if (p->field >= 0 && obj) { \
+                float* f = (float*)(obj + p->field); \
+                *f = *f * p->mult; \
+            } \
+            return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
         } \
-        return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+        if (p->mode == 2) { \
+            ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+            return (uintptr_t)(int)p->setval; \
+        } \
+        uintptr_t ret = ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+        if (p->field >= 0 && obj) { \
+            if (p->type == 1) { \
+                int* d = (int*)(obj + p->field); \
+                *d = (p->src_field >= 0) ? *(int*)(obj + p->src_field) : (int)p->setval; \
+            } else { \
+                float* d = (float*)(obj + p->field); \
+                *d = (p->src_field >= 0) ? *(float*)(obj + p->src_field) : p->setval; \
+            } \
+        } \
+        return ret; \
     }
     IL2CPP_HOOK(0) IL2CPP_HOOK(1) IL2CPP_HOOK(2) IL2CPP_HOOK(3)
     IL2CPP_HOOK(4) IL2CPP_HOOK(5) IL2CPP_HOOK(6) IL2CPP_HOOK(7)
@@ -234,18 +272,30 @@ namespace il2cpp_patch {
             hook_address_detour(g_mod, ptr, (uintptr_t)g_hookfn[i], &orig);
             if (!orig) { BD_LOG("DMG", "detour FAILED for %s.%s", p->cls.c_str(), p->method.c_str()); continue; }
             p->orig = orig;
-            BD_LOG("DMG", "patch ACTIVE: %s.%s arg%d+0x%x x%.2f @ %p",
-                   p->cls.c_str(), p->method.c_str(), p->arg, p->field, (double)p->mult, (void*)ptr);
+            if (p->mode == 2)
+                BD_LOG("DMG", "patch ACTIVE [force_return]: %s.%s = %d @ %p",
+                       p->cls.c_str(), p->method.c_str(), (int)p->setval, (void*)ptr);
+            else if (p->mode == 1)
+                BD_LOG("DMG", "patch ACTIVE [freeze]: %s.%s arg%d field0x%x = %s @ %p",
+                       p->cls.c_str(), p->method.c_str(), p->arg, p->field,
+                       p->src_field >= 0 ? "src" : "setval", (void*)ptr);
+            else
+                BD_LOG("DMG", "patch ACTIVE [scale]: %s.%s arg%d+0x%x x%.2f @ %p",
+                       p->cls.c_str(), p->method.c_str(), p->arg, p->field, (double)p->mult, (void*)ptr);
         }
     }
 
     static void* il2cpp_init_hook(const char* name) {
         void* dom = g_orig_init(name);          // runtime now initialized
         install_once();
+        if (g_post_init_cb) g_post_init_cb();   // ui_layout etc.
         return dom;
     }
 
-    // Parse [[il2cpp_patch]] from config. Skips entries with mult==1.0 (no-op).
+    // Parse [[il2cpp_patch]] from config.
+    //   scale (default): class/method/argc/arg/field/mult. mult==1.0 => no-op, skipped.
+    //   freeze:          mode="freeze", field + (src_field | setval), type="f32"|"i32".
+    //                    arg=-1 targets `this`. enabled=false => skipped.
     static void load_config() {
         auto arr = config["il2cpp_patch"].as_array();
         if (!arr) return;
@@ -259,8 +309,16 @@ namespace il2cpp_patch {
             p.arg    = (int)(*t)["arg"].value<int64_t>().value_or(0);
             p.field  = (int)(*t)["field"].value<int64_t>().value_or(-1);
             p.mult   = (float)(*t)["mult"].value<double>().value_or(1.0);
-            if (p.cls.empty() || p.method.empty() || p.field < 0) continue;
-            if (p.mult == 1.0f) continue;        // "正常" = no change, don't hook
+            std::string mode = (*t)["mode"].value<std::string>().value_or("scale");
+            p.mode      = (mode == "freeze") ? 1 : (mode == "force_return") ? 2 : 0;
+            p.src_field = (int)(*t)["src_field"].value<int64_t>().value_or(-1);
+            p.setval    = (float)(*t)["setval"].value<double>().value_or(0.0);
+            p.type      = ((*t)["type"].value<std::string>().value_or("f32") == "i32") ? 1 : 0;
+            bool enabled = (*t)["enabled"].value<bool>().value_or(true);
+            if (p.cls.empty() || p.method.empty()) continue;
+            if (p.mode != 2 && p.field < 0) continue;      // scale/freeze need a field; force_return doesn't
+            if (!enabled) continue;
+            if (p.mode == 0 && p.mult == 1.0f) continue;   // scale "正常" = no change
             if (g_n < MAXP) g_p[g_n++] = p;
         }
     }
@@ -269,7 +327,7 @@ namespace il2cpp_patch {
     static void init(so_module* lil2cpp) {
         g_mod = lil2cpp;
         load_config();
-        if (g_n == 0) return;                    // nothing to patch → fully inert
+        if (g_n == 0 && !g_post_init_cb) return;  // no patches and no post-init hook → fully inert
         il2cpp_domain_get                 = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
         il2cpp_domain_get_assemblies      = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
         il2cpp_assembly_get_image         = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
@@ -287,6 +345,202 @@ namespace il2cpp_patch {
         if (!orig) { BD_LOG("DMG", "failed to hook il2cpp_init"); return; }
         g_orig_init = (p_il2cpp_init)orig;
         BD_LOG("DMG", "%d patch(es) armed; resolving on runtime init", g_n);
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ui_layout: one-shot HUD surgery. Reads [ui_layout], hooks <class>::<method>
+// (the HUD builder, e.g. UI_InGame_Main::Start) and after it runs: hide[] each
+// listed control, and optionally move move_to onto move_from. Calls UnityEngine
+// methods (resolved + cached once). methodPointer takes a trailing MethodInfo*;
+// Vector2/3 are arm64 HFAs (s0/s1[/s2]) — the typedefs set up registers.
+namespace ui_layout {
+    struct Vector2 { float x, y; };
+    struct Vector3 { float x, y, z; };
+
+    typedef void* (*p_domain_get)();
+    typedef void** (*p_domain_get_assemblies)(void*, size_t*);
+    typedef void* (*p_assembly_get_image)(void*);
+    typedef const char* (*p_image_get_name)(void*);
+    typedef void* (*p_class_from_name)(void*, const char*, const char*);
+    typedef void* (*p_get_method)(void*, const char*, int);
+    typedef uintptr_t (*orig8_t)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                 uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+
+    static p_domain_get            f_domain_get;
+    static p_domain_get_assemblies f_domain_assemblies;
+    static p_assembly_get_image    f_assembly_image;
+    static p_image_get_name        f_image_name;
+    static p_class_from_name       f_class_from_name;
+    static p_get_method            f_get_method;
+
+    // engine method thunks (methodPointer, MethodInfo*), resolved once post-init
+    typedef void*   (*go_of_t)(void* comp, void* mi);            // Component.get_gameObject
+    typedef void    (*setactive_t)(void* go, bool on, void* mi); // GameObject.SetActive(bool)
+    typedef void*   (*tf_of_t)(void* comp, void* mi);            // Component.get_transform
+    typedef Vector2 (*get_v2_t)(void* rt, void* mi);            // RectTransform Vector2 getter (pivot)
+    typedef void    (*set_v2_t)(void* rt, Vector2 v, void* mi); // RectTransform Vector2 setter
+    typedef Vector3 (*get_v3_t)(void* tf, void* mi);           // Transform.get_position (world)
+    typedef void    (*set_v3_t)(void* tf, Vector3 v, void* mi); // Transform.set_position / set_localScale
+    typedef int     (*get_i_t)(void* mi);                      // static int getter, e.g. Screen.get_width
+
+    static go_of_t     m_get_go;    static void* mi_get_go;
+    static setactive_t m_setactive; static void* mi_setactive;
+    static tf_of_t     m_get_tf;    static void* mi_get_tf;
+    static get_v2_t    m_get_piv;   static void* mi_get_piv;    // pivot
+    static set_v2_t    m_set_piv;   static void* mi_set_piv;
+    static get_v3_t    m_get_pos;   static void* mi_get_pos;    // world position (move)
+    static set_v3_t    m_set_pos;   static void* mi_set_pos;
+    static set_v3_t    m_set_scale; static void* mi_set_scale;  // localScale (hide backstop)
+    static get_i_t     m_screen_w;  static void* mi_screen_w;   // Screen.width
+
+    static const int MAXH = 16;
+    static std::string g_cls, g_method;
+    static int  g_hide[MAXH]; static int g_hide_n = 0;
+    static int  g_move_from = -1, g_move_to = -1;
+    static int  g_move_dx = 0, g_move_dy = 0;     // extra world-px offset after the move
+    static int  g_right_margin = -1;              // >=0: pin x = Screen.width - margin (dynamic, 跨分辨率)
+    static so_module* g_mod = nullptr;
+    static uintptr_t  g_start_orig = 0;
+    static bool       g_have_config = false;
+
+    static void* find_image(const char* want) {
+        void* dom = f_domain_get(); size_t n = 0;
+        void** as = f_domain_assemblies(dom, &n);
+        for (size_t i = 0; i < n; i++) {
+            void* img = f_assembly_image(as[i]);
+            const char* nm = f_image_name(img);
+            if (nm && strstr(nm, want)) return img;
+        }
+        return nullptr;
+    }
+
+    // resolve a method to (methodPointer @ MethodInfo offset 0, MethodInfo*)
+    static bool resolve(void* img, const char* ns, const char* cls,
+                        const char* method, int argc, void** out_ptr, void** out_mi) {
+        void* k = f_class_from_name(img, ns, cls);
+        if (!k) { BD_LOG("UI", "class %s.%s not found", ns, cls); return false; }
+        void* m = f_get_method(k, method, argc);
+        if (!m) { BD_LOG("UI", "method %s.%s(%d) not found", cls, method, argc); return false; }
+        *out_ptr = *(void**)m;
+        *out_mi  = m;
+        return *out_ptr != nullptr;
+    }
+
+    static void do_layout(void* self) {
+        // move: match pivot + copy world position (parent-independent)
+        if (g_move_from >= 0 && g_move_to >= 0) {
+            void* from = *(void**)((uintptr_t)self + g_move_from);
+            void* to   = *(void**)((uintptr_t)self + g_move_to);
+            if (from && to) {
+                void* rf = m_get_tf(from, mi_get_tf);
+                void* rt = m_get_tf(to,   mi_get_tf);
+                if (rf && rt) {
+                    m_set_piv(rt, m_get_piv(rf, mi_get_piv), mi_set_piv);
+                    Vector3 wp = m_get_pos(rf, mi_get_pos);   // 重击位 (y = 按钮行高度)
+                    // 横向: right_margin 优先 (动态贴右, 跨分辨率), 否则固定 dx
+                    if (g_right_margin >= 0) wp.x = (float)(m_screen_w(mi_screen_w) - g_right_margin);
+                    else                     wp.x += (float)g_move_dx;
+                    wp.y += (float)g_move_dy;
+                    m_set_pos(rt, wp, mi_set_pos);
+                    BD_LOG("UI", "move -> world(%.0f,%.0f) margin=%d dx=%d dy=%d", (double)wp.x, (double)wp.y, g_right_margin, g_move_dx, g_move_dy);
+                }
+            }
+        }
+        // hide: SetActive(false) + localScale=0 backstop (some buttons get
+        // SetActive(true)'d again by game state; scale=0 keeps them invisible)
+        Vector3 zero = {0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < g_hide_n; i++) {
+            void* comp = *(void**)((uintptr_t)self + g_hide[i]);
+            if (!comp) continue;
+            void* go = m_get_go(comp, mi_get_go);
+            if (go) m_setactive(go, false, mi_setactive);
+            void* tf = m_get_tf(comp, mi_get_tf);
+            if (tf) m_set_scale(tf, zero, mi_set_scale);
+        }
+        BD_LOG("UI", "applied: hid %d, move %#x->%#x", g_hide_n, g_move_from, g_move_to);
+    }
+
+    static uintptr_t start_hook(uintptr_t x0,uintptr_t x1,uintptr_t x2,uintptr_t x3,
+                                uintptr_t x4,uintptr_t x5,uintptr_t x6,uintptr_t x7) {
+        uintptr_t ret = ((orig8_t)g_start_orig)(x0,x1,x2,x3,x4,x5,x6,x7);
+        // guard: do_layout calls into il2cpp/JNI, a stray throw must not kill the game
+        if (x0) try { do_layout((void*)x0); } catch (...) { BD_LOG("UI", "do_layout threw, skipped"); }
+        return ret;
+    }
+
+    // post-init: resolve engine thunks + HUD class, detour the HUD builder
+    static void install() {
+        if (!g_have_config) return;
+        void* asmImg  = find_image("Assembly-CSharp");
+        void* coreImg = find_image("UnityEngine.CoreModule");
+        if (!asmImg || !coreImg) { BD_LOG("UI", "image missing asm=%p core=%p", asmImg, coreImg); return; }
+
+        bool ok = true;
+        ok &= resolve(coreImg, "UnityEngine", "Component",     "get_gameObject",       0, (void**)&m_get_go,    &mi_get_go);
+        ok &= resolve(coreImg, "UnityEngine", "GameObject",    "SetActive",            1, (void**)&m_setactive, &mi_setactive);
+        ok &= resolve(coreImg, "UnityEngine", "Component",     "get_transform",        0, (void**)&m_get_tf,    &mi_get_tf);
+        ok &= resolve(coreImg, "UnityEngine", "RectTransform", "get_pivot",      0, (void**)&m_get_piv,   &mi_get_piv);
+        ok &= resolve(coreImg, "UnityEngine", "RectTransform", "set_pivot",      1, (void**)&m_set_piv,   &mi_set_piv);
+        ok &= resolve(coreImg, "UnityEngine", "Transform",     "get_position",   0, (void**)&m_get_pos,   &mi_get_pos);
+        ok &= resolve(coreImg, "UnityEngine", "Transform",     "set_position",   1, (void**)&m_set_pos,   &mi_set_pos);
+        ok &= resolve(coreImg, "UnityEngine", "Transform",     "set_localScale", 1, (void**)&m_set_scale, &mi_set_scale);
+        ok &= resolve(coreImg, "UnityEngine", "Screen",        "get_width",      0, (void**)&m_screen_w, &mi_screen_w);
+        if (!ok) { BD_LOG("UI", "engine thunk resolve failed; ui_layout disabled"); return; }
+
+        void* k = f_class_from_name(asmImg, "", g_cls.c_str());
+        if (!k) { BD_LOG("UI", "HUD class %s not found", g_cls.c_str()); return; }
+        void* m = f_get_method(k, g_method.c_str(), 0);
+        if (!m) { BD_LOG("UI", "%s.%s() not found", g_cls.c_str(), g_method.c_str()); return; }
+        uintptr_t ptr = *(uintptr_t*)m;
+        uintptr_t orig = 0;
+        hook_address_detour(g_mod, ptr, (uintptr_t)&start_hook, &orig);
+        if (!orig) { BD_LOG("UI", "detour %s.%s FAILED", g_cls.c_str(), g_method.c_str()); return; }
+        g_start_orig = orig;
+        BD_LOG("UI", "armed on %s.%s: hide=%d move=%#x->%#x @ %p",
+               g_cls.c_str(), g_method.c_str(), g_hide_n, g_move_from, g_move_to, (void*)ptr);
+    }
+
+    static void load_config() {
+        auto t = config["ui_layout"].as_table();
+        if (!t) return;
+        g_cls    = (*t)["class"].value<std::string>().value_or("");
+        g_method = (*t)["method"].value<std::string>().value_or("Start");
+        if (g_cls.empty()) return;
+        if (auto arr = (*t)["hide"].as_array()) {
+            for (auto&& n : *arr) {
+                if (g_hide_n >= MAXH) break;
+                auto v = n.value<int64_t>();
+                if (v) g_hide[g_hide_n++] = (int)*v;
+            }
+        }
+        g_move_from = (int)(*t)["move_from"].value<int64_t>().value_or(-1);
+        g_move_to   = (int)(*t)["move_to"].value<int64_t>().value_or(-1);
+        g_move_dx   = (int)(*t)["move_dx"].value<int64_t>().value_or(0);
+        g_move_dy   = (int)(*t)["move_dy"].value<int64_t>().value_or(0);
+        g_right_margin = (int)(*t)["right_margin"].value<int64_t>().value_or(-1);
+        if (g_hide_n == 0 && (g_move_from < 0 || g_move_to < 0)) return;  // nothing to do
+        g_have_config = true;
+    }
+
+    // call BEFORE il2cpp_patch::init so the post-init callback is registered first
+    static void init(so_module* lil2cpp) {
+        g_mod = lil2cpp;
+        load_config();
+        if (!g_have_config) return;
+        f_domain_get        = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
+        f_domain_assemblies = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
+        f_assembly_image    = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
+        f_image_name        = (p_image_get_name)so_symbol(lil2cpp, "il2cpp_image_get_name");
+        f_class_from_name   = (p_class_from_name)so_symbol(lil2cpp, "il2cpp_class_from_name");
+        f_get_method        = (p_get_method)so_symbol(lil2cpp, "il2cpp_class_get_method_from_name");
+        if (!f_domain_get || !f_class_from_name || !f_get_method) {
+            BD_LOG("UI", "missing il2cpp exports; ui_layout disabled");
+            g_have_config = false; return;
+        }
+        il2cpp_patch::register_post_init(&install);
+        BD_LOG("UI", "config loaded (%d hide, move %#x->%#x); install after runtime init",
+               g_hide_n, g_move_from, g_move_to);
     }
 }
 
@@ -460,6 +714,9 @@ int main(int argc, char* argv[])
     }
     loaded_modules[module_count++] = &lil2cpp;
     BD_TIME("after loading libil2cpp.so");
+
+    // HUD surgery (reads [ui_layout]). MUST precede il2cpp_patch::init. Inert if absent.
+    ui_layout::init(&lil2cpp);
 
     // Arm the generic il2cpp value-patch framework (reads [[il2cpp_patch]] from
     // config; resolves + hooks once il2cpp_init runs). Inert if no patches.
