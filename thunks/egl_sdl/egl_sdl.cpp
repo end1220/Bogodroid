@@ -304,9 +304,35 @@ EGLBoolean eglMakeCurrent_impl(EGLDisplay display,
     EGLSurface read,
     EGLContext context)
 {
-    static auto cached_eglMakeCurrent = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext))getProc("eglMakeCurrent");
     verbose("EGL_SDL", "eglMakeCurrent\n");
-    return cached_eglMakeCurrent(display, draw, read, context);
+    static auto cached_eglMakeCurrent = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext))getProc("eglMakeCurrent");
+    static auto p_glGetString = (const unsigned char* (*)(unsigned int))getProc("glGetString");
+
+    // Forward the game's raw EGL handles. On WAYLAND this binds the SDL-owned
+    // context on Unity's render thread and renders fine — unchanged path.
+    EGLBoolean r = cached_eglMakeCurrent(display, draw, read, context);
+
+    // KMSDRM/Mali repair. Unity does its GL (shader compile, draw) on a separate
+    // render thread, which calls eglMakeCurrent to take the context. The forward
+    // above passes the surface captured at init (eglCreateWindowSurface_impl
+    // returns egl_surface). On KMSDRM that surface is NOT config-compatible with
+    // the context on a 2nd thread → eglMakeCurrent fails with EGL_BAD_MATCH
+    // (0x300d) → the render thread ends up with no live GL context → every
+    // glCreateShader returns 0 → black screen. (eglGetError_impl always returns
+    // SUCCESS, so Unity never notices the failure.) SDL owns its own self-
+    // consistent surface+context pair that always binds, so on detecting "still
+    // no live context after the forward" force a clean rebind through SDL (clear
+    // SDL's thread-local current first so the second call really executes).
+    // Guard: on wayland the forward already produced a live context, so glGetString
+    // is non-null and this block never runs there — zero behaviour change on
+    // working devices; only the broken KMSDRM render thread is repaired.
+    if (context != (EGLContext)0 && p_glGetString && p_glGetString(0x1F02 /*GL_VERSION*/) == NULL) {
+        SDL_GL_MakeCurrent(sdl_win, NULL);
+        SDL_GL_MakeCurrent(sdl_win, sdl_ctx);
+        if (p_glGetString(0x1F02) != NULL)
+            return EGL_TRUE;
+    }
+    return r;
 }
 
 EGLint eglGetError_impl()
