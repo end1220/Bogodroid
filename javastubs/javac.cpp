@@ -11,6 +11,49 @@ extern toml::table config;
 
 ///// Long
 
+jnivm::java::lang::reflect::Constructor::Constructor()
+{
+}
+
+jnivm::java::lang::reflect::Constructor::Constructor(
+    std::shared_ptr<jnivm::Class> clazz,
+    std::shared_ptr<FakeJni::JString> constructorSignature)
+    : targetClass(clazz)
+{
+    const char* sig = constructorSignature ? constructorSignature->c_str() : "()V";
+    auto resolved = clazz ? static_cast<jnivm::Method*>(clazz->getMethod(sig, "<init>")) : nullptr;
+    if (resolved) {
+        name = resolved->name;
+        signature = resolved->signature;
+        _static = resolved->_static;
+        native = resolved->native;
+        nativehandle = resolved->nativehandle;
+    } else {
+        name = "<init>";
+        signature = sig;
+    }
+}
+
+std::shared_ptr<jnivm::Object>
+jnivm::java::lang::reflect::Constructor::newInstance(std::shared_ptr<jnivm::Array<jnivm::Object>> args)
+{
+    if (!targetClass)
+        return nullptr;
+
+    FakeJni::LocalFrame frame(vm);
+    auto env = &frame.getJniEnv();
+    const jsize argCount = args ? args->getSize() : 0;
+    std::vector<jvalue> values(argCount);
+    for (jsize i = 0; i < argCount; ++i) {
+        auto arg = args->Get(i, jnivm::impl::array_type_t<jnivm::Object>{});
+        values[i].l = jnivm::JNITypes<std::shared_ptr<jnivm::Object>>::ToJNIType(jnivm::ENV::FromJNIEnv(env), arg);
+    }
+
+    auto cls = jnivm::JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(jnivm::ENV::FromJNIEnv(env), targetClass);
+    auto obj = env->NewObjectA(cls, reinterpret_cast<jmethodID>(this), values.empty() ? nullptr : values.data());
+    return jnivm::JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(jnivm::ENV::FromJNIEnv(env), obj);
+}
+
 long jnivm::java::lang::Long::longValue()
 {
     return this->value;
@@ -123,6 +166,8 @@ int jnivm::java::io::InputStream::read(
 }
 
 ///// File
+static constexpr jlong BD_FILE_MOCK_FREE_BYTES = 32LL * 1024LL * 1024LL * 1024LL;
+static constexpr jlong BD_FILE_MOCK_TOTAL_BYTES = 64LL * 1024LL * 1024LL * 1024LL;
 
 jnivm::java::io::File::File(std::shared_ptr<FakeJni::JString> path)
 {
@@ -137,6 +182,21 @@ std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getPath()
 std::shared_ptr<FakeJni::JString> jnivm::java::io::File::toString()
 {
     return getPath();
+}
+
+jlong jnivm::java::io::File::getFreeSpace()
+{
+    return BD_FILE_MOCK_FREE_BYTES;
+}
+
+jlong jnivm::java::io::File::getUsableSpace()
+{
+    return BD_FILE_MOCK_FREE_BYTES;
+}
+
+jlong jnivm::java::io::File::getTotalSpace()
+{
+    return BD_FILE_MOCK_TOTAL_BYTES;
 }
 
 
@@ -431,6 +491,8 @@ std::shared_ptr<FakeJni::JString> jnivm::java::util::Scanner::nextLine()
 // Descriptors
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::reflect::Constructor) { FakeJni::Constructor<Constructor> {} },
+    { FakeJni::Constructor<Constructor, std::shared_ptr<jnivm::Class>, std::shared_ptr<FakeJni::JString>> {} },
+    { FakeJni::Function<&Constructor::newInstance> {}, "newInstance", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jlong> {} },
@@ -455,6 +517,9 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::io::File) { FakeJni::Constructor<File, std::shared_ptr<FakeJni::JString>> {} },
     { FakeJni::Function<&File::getPath> {}, "getPath", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getFreeSpace> {}, "getFreeSpace", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getUsableSpace> {}, "getUsableSpace", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getTotalSpace> {}, "getTotalSpace", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::io::FileDescriptor) { FakeJni::Constructor<FileDescriptor> {} },

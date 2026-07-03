@@ -683,6 +683,21 @@ namespace android {
             static bool isExternalStorageManager();
         };
 
+        class StatFs : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/os/StatFs")
+
+            StatFs(std::shared_ptr<FakeJni::JString> path);
+            void restat(std::shared_ptr<FakeJni::JString> path);
+            jlong getAvailableBlocksLong();
+            jlong getBlockSizeLong();
+            jlong getAvailableBytes();
+            jlong getFreeBytes();
+            jlong getTotalBytes();
+            jlong getBlockCountLong();
+            jlong getFreeBlocksLong();
+        };
+
         class PowerManager : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/os/PowerManager")

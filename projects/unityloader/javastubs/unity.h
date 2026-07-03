@@ -7,6 +7,8 @@ namespace jnivm {
 namespace com {
     namespace unity3d {
         namespace player {
+            class UnityPlayer;
+
             class PlayAssetDeliveryUnityWrapper : public FakeJni::JObject {
             public:
                 DEFINE_CLASS_NAME("com/unity3d/player/PlayAssetDeliveryUnityWrapper")
@@ -17,6 +19,11 @@ namespace com {
             class UnityPlayerActivity : public jnivm::android::app::Activity {
             public:
                 DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerActivity", jnivm::android::app::Activity)
+                std::shared_ptr<UnityPlayer> mUnityPlayer;
+                FakeJni::JInt MouseMode = -1;
+                FakeJni::JBoolean MouseInside = JNI_TRUE;
+                std::shared_ptr<FakeJni::JBooleanArray> PressedStates = std::make_shared<FakeJni::JBooleanArray>(330);
+
                 bool injectEvent(std::shared_ptr<android::view::InputEvent> event);
             };
 
@@ -26,8 +33,18 @@ namespace com {
 
                 bool initializeGoogleAr();
                 std::shared_ptr<FakeJni::JString> getLaunchURL();
+                void hideSoftInput();
+                void showSoftInput(std::shared_ptr<FakeJni::JString> text, FakeJni::JInt keyboardType,
+                                   FakeJni::JBoolean autocorrection, FakeJni::JBoolean multiline,
+                                   FakeJni::JBoolean secure, FakeJni::JBoolean alert,
+                                   std::shared_ptr<FakeJni::JString> placeholder,
+                                   FakeJni::JInt characterLimit, FakeJni::JBoolean reuseKeyboard,
+                                   FakeJni::JBoolean hideInput);
+                void setSoftInputStr(std::shared_ptr<FakeJni::JString> text);
+                void setSoftInputStrWithAction(std::shared_ptr<FakeJni::JString> text, FakeJni::JInt action);
+                FakeJni::JInt getKeyboardLayout();
 
-                static std::shared_ptr<jnivm::android::app::Activity> currentActivity;
+                static std::shared_ptr<UnityPlayerActivity> currentActivity;
     
             };
 

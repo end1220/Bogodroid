@@ -2,6 +2,7 @@
 #define __JAVAC_H__
 
 #include "baron/baron.h"
+#include <jnivm/method.h>
 #include <fstream>
 #include <thread>
 
@@ -16,9 +17,14 @@ namespace jnivm {
 namespace java {
     namespace lang {
         namespace reflect {
-            class Constructor : public FakeJni::JObject {
+            class Constructor : public jnivm::Method {
                 public:
                    DEFINE_CLASS_NAME("java/lang/reflect/Constructor")
+                   std::shared_ptr<jnivm::Class> targetClass;
+
+                   Constructor();
+                   Constructor(std::shared_ptr<jnivm::Class> clazz, std::shared_ptr<FakeJni::JString> signature);
+                   std::shared_ptr<jnivm::Object> newInstance(std::shared_ptr<jnivm::Array<jnivm::Object>> args);
             };
         }
 
@@ -203,6 +209,9 @@ namespace java {
             File(std::shared_ptr<FakeJni::JString> path);
             std::shared_ptr<FakeJni::JString> getPath();
             std::shared_ptr<FakeJni::JString> toString();
+            jlong getFreeSpace();
+            jlong getUsableSpace();
+            jlong getTotalSpace();
         };
 
         // Factory-stubbed. See android_descriptors.cpp.

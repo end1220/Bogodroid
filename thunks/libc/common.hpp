@@ -76,6 +76,7 @@
 #include <sys/sendfile.h>
 #include <sys/signalfd.h>
 #include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/sysinfo.h>
 #include <sys/syslog.h>
 #include <sys/timerfd.h>
@@ -113,4 +114,3 @@
 // #include <bsd/vis.h>
 #include <bsd/wchar.h>
 #include <search.h>
-

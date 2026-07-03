@@ -67,11 +67,16 @@ void InitJNIBinding(FakeJni::Jvm* vm)
 
     // libjnivm does not have an implementation of Field.getDeclaringClass, and adding one is not trivial. So we hardcode a couple of classes here. Bad hack, but eh.
     auto fieldClass = vm->findClass("java/lang/reflect/Field");
-    fieldClass->HookInstanceFunction(&frame.getJniEnv(), "getDeclaringClass", [](jnivm::ENV* env, jnivm::Object* self) -> std::shared_ptr<jnivm::java::lang::Class> {
+    fieldClass->HookInstanceFunction(&frame.getJniEnv(), "getDeclaringClass", [vm](jnivm::ENV* env, jnivm::Object* self) -> std::shared_ptr<jnivm::java::lang::Class> {
         if (self == nullptr)
             return nullptr;
         auto selfField = dynamic_cast<jnivm::java::lang::reflect::Field*>(self);
         verbose("getDeclaringClass","%s - %s", selfField->name.c_str(), selfField->type.c_str());
-        return nullptr; // TODO: Implement this beyond just logging. Unity looks for it, but doesn't actually call it.
+        if (selfField->name == "currentActivity")
+            return vm->findClass("com/unity3d/player/UnityPlayer");
+        if (selfField->name == "PressedStates" || selfField->name == "mUnityPlayer" ||
+            selfField->name == "MouseMode" || selfField->name == "MouseInside")
+            return vm->findClass("com/unity3d/player/UnityPlayerActivity");
+        return nullptr; // TODO: Implement this generally once Field tracks its owner class.
     });
 }

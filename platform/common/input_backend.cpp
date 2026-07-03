@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <cctype>
+#include <unistd.h>
 
 #include "toml++/toml.hpp"
 extern toml::table config;
@@ -39,6 +40,20 @@ static constexpr float BD_AXIS_RELEASE_THR = 0.30f;
 // Unity InputSystem's NavigationModel sticky-latch race on quick taps.
 // true  → AOSP-standard (HAT + KEYCODE), but exposes the race.
 static bool input_dpad_synthesize_hat = true;
+static bool input_start_select_exit = true;
+static bool g_exit_hotkey_start_down = false;
+static bool g_exit_hotkey_select_down = false;
+
+static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, const char* source)
+{
+    if (!input_start_select_exit || (!is_start && !is_select)) return;
+    if (is_start) g_exit_hotkey_start_down = down;
+    if (is_select) g_exit_hotkey_select_down = down;
+    if (g_exit_hotkey_start_down && g_exit_hotkey_select_down) {
+        BD_LOG("EXIT", "Start+Select exit hotkey (%s)", source ? source : "input");
+        _exit(0);
+    }
+}
 
 // (deviceId, keyCode) -> last ACTION_DOWN eventTime, so getDownTime() reads
 // the press start (Android contract: hold time = eventTime - downTime).
@@ -194,6 +209,7 @@ InputBackend::InputBackend()
     input_mouse_touch_mode = config["input"]["touch_mode"].value_or<bool>(false);
     input_mouse_accurate_mode = config["input"]["accurate_mode"].value_or<bool>(false);
     input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
+    input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
     if (!input_dpad_synthesize_hat) {
         BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = false (D-pad → KeyEvent only, no HAT axis)");
     }
@@ -327,6 +343,10 @@ void InputBackend::runEventLoop()
                     break;
                 int action = (e.type == SDL_KEYDOWN) ? jnivm::android::view::KeyEvent::ACTION_DOWN : jnivm::android::view::KeyEvent::ACTION_UP;
                 int keyCode = InputBackend::toAndroidKeycode(e.key.keysym.scancode);
+                bd_exit_hotkey_update(e.key.keysym.scancode == SDL_SCANCODE_RETURN,
+                                      e.key.keysym.scancode == SDL_SCANCODE_ESCAPE,
+                                      action == jnivm::android::view::KeyEvent::ACTION_DOWN,
+                                      "keyboard");
                 if (e.type == SDL_KEYDOWN) {
                     BD_DEBUG("INPUT", "KEYDOWN scancode=%d -> KEYCODE=%d",
                             e.key.keysym.scancode, keyCode);
@@ -574,6 +594,10 @@ void InputBackend::runEventLoop()
                               ? jnivm::android::view::KeyEvent::ACTION_DOWN
                               : jnivm::android::view::KeyEvent::ACTION_UP;
                 int keyCode = toAndroidKeycode(e.cbutton);
+                bd_exit_hotkey_update(e.cbutton.button == SDL_CONTROLLER_BUTTON_START,
+                                      e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK,
+                                      action == jnivm::android::view::KeyEvent::ACTION_DOWN,
+                                      "controller");
                 bool is_dpad = (e.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
                                 e.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
                 if (e.type == SDL_CONTROLLERBUTTONDOWN) {

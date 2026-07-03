@@ -70,7 +70,6 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
         fatal_error("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         // return -1;
     }
-
     // Fullscreen at native LCD resolution.
     sdl_win = SDL_CreateWindow("Teapot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP);

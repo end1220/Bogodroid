@@ -62,6 +62,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::os::Handler::Callback>();
     vm->registerClass<jnivm::android::os::HandlerThread>();
     vm->registerClass<jnivm::android::os::Environment>();
+    vm->registerClass<jnivm::android::os::StatFs>();
     vm->registerClass<jnivm::android::os::PowerManager>();
     vm->registerClass<jnivm::android::os::ParcelFileDescriptor>();
 

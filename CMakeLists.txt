@@ -79,6 +79,9 @@ add_subdirectory(libjnivm ${CMAKE_CURRENT_BINARY_DIR}/libjnivm_build)
 
 set(PROJ_SOURCE_DIR ${CMAKE_SOURCE_DIR}/projects/${CMAKE_PROJECT_NAME})
 file(GLOB_RECURSE PROJ_SOURCES ${PROJ_SOURCE_DIR}/*.c ${PROJ_SOURCE_DIR}/*.cc ${PROJ_SOURCE_DIR}/*.cpp)
+if(CMAKE_PROJECT_NAME STREQUAL "unityloader")
+    list(FILTER PROJ_SOURCES EXCLUDE REGEX "/plugins/")
+endif()
 
 add_executable(${CMAKE_PROJECT_NAME} 
     ${PROJ_SOURCES}
@@ -176,6 +179,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+if(CMAKE_PROJECT_NAME STREQUAL "unityloader")
+    add_subdirectory(projects/unityloader/plugins EXCLUDE_FROM_ALL)
+endif()
 
 # Get all libc thunk files to exclude from PCH
 file(GLOB LIBC_THUNK_FILES "thunks/libc/*.cpp")

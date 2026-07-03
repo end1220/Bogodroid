@@ -300,7 +300,9 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
 #ifdef JNI_TRACE
             env->ExceptionDescribe();
 #endif
-            return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
+            return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+                cl ? cl->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig);
         }
     } else {
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
@@ -376,7 +378,9 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
 #ifdef JNI_TRACE
             env->ExceptionDescribe();
 #endif
-            return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
+            return defaultValForMethod<T>(ENV::FromJNIEnv(env),
+                clz ? clz->nativeprefix.data() : nullptr,
+                orig_name.data(), orig_sig);
         }
     } else {
         auto clz = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);

@@ -33,7 +33,9 @@ jclass FindClass(JNIEnv *env, const char *name) {
 	return InternalFindClass(env, name, returnZero, true);
 };
 jmethodID FromReflectedMethod(JNIEnv *env, jobject obj) {
-	if(obj && env->functions->IsSameObject(env, env->functions->GetObjectClass(env, obj), FindClass(env, "java/lang/reflect/Method"))) {
+	if(obj &&
+		(env->functions->IsSameObject(env, env->functions->GetObjectClass(env, obj), FindClass(env, "java/lang/reflect/Method")) ||
+		 env->functions->IsSameObject(env, env->functions->GetObjectClass(env, obj), FindClass(env, "java/lang/reflect/Constructor")))) {
 		return (jmethodID) obj;
 	} else {
 		return nullptr;

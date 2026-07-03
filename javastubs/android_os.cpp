@@ -388,7 +388,7 @@ bool jnivm::android::os::HandlerThread::quit()
 std::shared_ptr<FakeJni::JString>
 jnivm::android::os::Environment::getExternalStorageState()
 {
-    return std::make_shared<FakeJni::JString>("MEDIA_REMOVED");
+    return std::make_shared<FakeJni::JString>("MEDIA_MOUNTED");
 }
 
 std::shared_ptr<jnivm::java::io::File> jnivm::android::os::Environment::getExternalStorageDirectory()
@@ -399,6 +399,55 @@ std::shared_ptr<jnivm::java::io::File> jnivm::android::os::Environment::getExter
 bool jnivm::android::os::Environment::isExternalStorageManager()
 {
     return true;
+}
+
+///// StatFs
+
+static constexpr jlong BD_STATFS_BLOCK_SIZE = 4096;
+static constexpr jlong BD_STATFS_MIN_FREE_BYTES = 32LL * 1024LL * 1024LL * 1024LL;
+static constexpr jlong BD_STATFS_TOTAL_BYTES = 32LL * 1024LL * 1024LL * 1024LL;
+
+jnivm::android::os::StatFs::StatFs(std::shared_ptr<FakeJni::JString>)
+{
+}
+
+void jnivm::android::os::StatFs::restat(std::shared_ptr<FakeJni::JString>)
+{
+}
+
+jlong jnivm::android::os::StatFs::getAvailableBlocksLong()
+{
+    return BD_STATFS_MIN_FREE_BYTES / BD_STATFS_BLOCK_SIZE;
+}
+
+jlong jnivm::android::os::StatFs::getBlockSizeLong()
+{
+    return BD_STATFS_BLOCK_SIZE;
+}
+
+jlong jnivm::android::os::StatFs::getAvailableBytes()
+{
+    return BD_STATFS_MIN_FREE_BYTES;
+}
+
+jlong jnivm::android::os::StatFs::getFreeBytes()
+{
+    return getAvailableBytes();
+}
+
+jlong jnivm::android::os::StatFs::getTotalBytes()
+{
+    return BD_STATFS_TOTAL_BYTES;
+}
+
+jlong jnivm::android::os::StatFs::getBlockCountLong()
+{
+    return BD_STATFS_TOTAL_BYTES / BD_STATFS_BLOCK_SIZE;
+}
+
+jlong jnivm::android::os::StatFs::getFreeBlocksLong()
+{
+    return getAvailableBlocksLong();
 }
 
 ///// PowerManager
@@ -473,6 +522,17 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
     { FakeJni::Function<&Environment::getExternalStorageState> {}, "getExternalStorageState", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&Environment::getExternalStorageDirectory> {}, "getExternalStorageDirectory", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&Environment::isExternalStorageManager> {}, "isExternalStorageManager", FakeJni::JMethodID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::StatFs) { FakeJni::Constructor<StatFs, std::shared_ptr<FakeJni::JString>> {} },
+    { FakeJni::Function<&StatFs::restat> {}, "restat", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getAvailableBlocksLong> {}, "getAvailableBlocksLong", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getBlockSizeLong> {}, "getBlockSizeLong", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getAvailableBytes> {}, "getAvailableBytes", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getFreeBytes> {}, "getFreeBytes", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getTotalBytes> {}, "getTotalBytes", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getBlockCountLong> {}, "getBlockCountLong", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StatFs::getFreeBlocksLong> {}, "getFreeBlocksLong", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::PowerManager) { FakeJni::Constructor<PowerManager> {} },

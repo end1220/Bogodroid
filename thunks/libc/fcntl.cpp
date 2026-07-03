@@ -17,7 +17,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <cerrno>
+#include <cinttypes>
 
 char* clean_jar_path(const char* path) {
     if (!path) return NULL;
@@ -175,6 +178,164 @@ static const char* bd_kill_analytics(const char* path)
 extern "C" const char* bd_kill_analytics_check(const char* path)
 {
     return bd_kill_analytics(path);
+}
+
+static constexpr unsigned long long BD_MIN_FREE_BYTES = 32ULL * 1024ULL * 1024ULL * 1024ULL;
+static constexpr unsigned long long BD_TOTAL_BYTES = 64ULL * 1024ULL * 1024ULL * 1024ULL;
+static constexpr unsigned long BD_SPACE_BLOCK_SIZE = 4096;
+
+template <typename StatT>
+static unsigned long long bd_min_blocks(unsigned long long block_size)
+{
+    return (BD_MIN_FREE_BYTES + block_size - 1) / block_size;
+}
+
+static unsigned long long bd_total_blocks(unsigned long long block_size)
+{
+    return (BD_TOTAL_BYTES + block_size - 1) / block_size;
+}
+
+template <typename StatT>
+static unsigned long long bd_statvfs_block_size(const StatT* st)
+{
+    unsigned long long block_size = st->f_frsize ? st->f_frsize : st->f_bsize;
+    return block_size ? block_size : BD_SPACE_BLOCK_SIZE;
+}
+
+template <typename StatT>
+static unsigned long long bd_statfs_block_size(const StatT* st)
+{
+    return st->f_bsize ? st->f_bsize : BD_SPACE_BLOCK_SIZE;
+}
+
+template <typename StatT>
+static void bd_clamp_statvfs(StatT* st)
+{
+    unsigned long long block_size = bd_statvfs_block_size(st);
+    st->f_bsize = block_size;
+    st->f_frsize = block_size;
+    if (st->f_bavail < bd_min_blocks<StatT>(block_size)) st->f_bavail = bd_min_blocks<StatT>(block_size);
+    if (st->f_bfree < bd_min_blocks<StatT>(block_size)) st->f_bfree = bd_min_blocks<StatT>(block_size);
+    if (st->f_blocks < bd_total_blocks(block_size)) st->f_blocks = bd_total_blocks(block_size);
+}
+
+template <typename StatT>
+static void bd_clamp_statfs(StatT* st)
+{
+    unsigned long long block_size = bd_statfs_block_size(st);
+    st->f_bsize = block_size;
+    if (st->f_bavail < bd_min_blocks<StatT>(block_size)) st->f_bavail = bd_min_blocks<StatT>(block_size);
+    if (st->f_bfree < bd_min_blocks<StatT>(block_size)) st->f_bfree = bd_min_blocks<StatT>(block_size);
+    if (st->f_blocks < bd_total_blocks(block_size)) st->f_blocks = bd_total_blocks(block_size);
+}
+
+template <typename StatT>
+static void bd_fill_mock_statvfs(StatT* st)
+{
+    memset(st, 0, sizeof(*st));
+    st->f_bsize = BD_SPACE_BLOCK_SIZE;
+    st->f_frsize = BD_SPACE_BLOCK_SIZE;
+    st->f_bavail = bd_min_blocks<StatT>(BD_SPACE_BLOCK_SIZE);
+    st->f_bfree = bd_min_blocks<StatT>(BD_SPACE_BLOCK_SIZE);
+    st->f_blocks = bd_total_blocks(BD_SPACE_BLOCK_SIZE);
+    st->f_namemax = 255;
+}
+
+template <typename StatT>
+static void bd_fill_mock_statfs(StatT* st)
+{
+    memset(st, 0, sizeof(*st));
+    st->f_bsize = BD_SPACE_BLOCK_SIZE;
+    st->f_bavail = bd_min_blocks<StatT>(BD_SPACE_BLOCK_SIZE);
+    st->f_bfree = bd_min_blocks<StatT>(BD_SPACE_BLOCK_SIZE);
+    st->f_blocks = bd_total_blocks(BD_SPACE_BLOCK_SIZE);
+    st->f_namelen = 255;
+}
+
+template <typename StatT, typename StatFn, typename FillFn, typename ClampFn>
+static int bd_space_path_impl(const char* path, StatT* buf,
+                              StatFn stat_fn, FillFn fill_fn, ClampFn clamp_fn)
+{
+    const char* query = path ? path : ".";
+    int ret = stat_fn(query, buf);
+    if (ret != 0) {
+        ret = stat_fn(".", buf);
+    }
+    if (ret != 0) {
+        fill_fn(buf);
+        return 0;
+    }
+    clamp_fn(buf);
+    return 0;
+}
+
+template <typename StatT, typename StatFn, typename FillFn, typename ClampFn>
+static int bd_space_fd_impl(int fd, StatT* buf,
+                            StatFn stat_fn, FillFn fill_fn, ClampFn clamp_fn)
+{
+    int ret = stat_fn(fd, buf);
+    if (ret != 0) {
+        fill_fn(buf);
+        return 0;
+    }
+    clamp_fn(buf);
+    return 0;
+}
+
+extern "C" ABI_ATTR int statvfs_impl(const char* path, struct statvfs* buf)
+{
+    return bd_space_path_impl(path, buf, statvfs,
+                              bd_fill_mock_statvfs<struct statvfs>,
+                              bd_clamp_statvfs<struct statvfs>);
+}
+
+extern "C" ABI_ATTR int statvfs64_impl(const char* path, struct statvfs64* buf)
+{
+    return bd_space_path_impl(path, buf, statvfs64,
+                              bd_fill_mock_statvfs<struct statvfs64>,
+                              bd_clamp_statvfs<struct statvfs64>);
+}
+
+extern "C" ABI_ATTR int fstatvfs_impl(int fd, struct statvfs* buf)
+{
+    return bd_space_fd_impl(fd, buf, fstatvfs,
+                            bd_fill_mock_statvfs<struct statvfs>,
+                            bd_clamp_statvfs<struct statvfs>);
+}
+
+extern "C" ABI_ATTR int fstatvfs64_impl(int fd, struct statvfs64* buf)
+{
+    return bd_space_fd_impl(fd, buf, fstatvfs64,
+                            bd_fill_mock_statvfs<struct statvfs64>,
+                            bd_clamp_statvfs<struct statvfs64>);
+}
+
+extern "C" ABI_ATTR int statfs_impl(const char* path, struct statfs* buf)
+{
+    return bd_space_path_impl(path, buf, statfs,
+                              bd_fill_mock_statfs<struct statfs>,
+                              bd_clamp_statfs<struct statfs>);
+}
+
+extern "C" ABI_ATTR int statfs64_impl(const char* path, struct statfs64* buf)
+{
+    return bd_space_path_impl(path, buf, statfs64,
+                              bd_fill_mock_statfs<struct statfs64>,
+                              bd_clamp_statfs<struct statfs64>);
+}
+
+extern "C" ABI_ATTR int fstatfs_impl(int fd, struct statfs* buf)
+{
+    return bd_space_fd_impl(fd, buf, fstatfs,
+                            bd_fill_mock_statfs<struct statfs>,
+                            bd_clamp_statfs<struct statfs>);
+}
+
+extern "C" ABI_ATTR int fstatfs64_impl(int fd, struct statfs64* buf)
+{
+    return bd_space_fd_impl(fd, buf, fstatfs64,
+                            bd_fill_mock_statfs<struct statfs64>,
+                            bd_clamp_statfs<struct statfs64>);
 }
 
 ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode)

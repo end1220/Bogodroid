@@ -22,6 +22,7 @@ toml::table config;
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <vector>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -36,12 +37,16 @@ toml::table config;
 #include "glad_egl.h"
 #include "gles2.h"
 #include "input_backend.h"
+#include "plugin_api.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
+#include <cstdarg>
 #include <cstring>
 #include <dirent.h>
 #include <ctime>
 #include <cstdio>
+#include <cinttypes>
+#include <glob.h>
 
 static struct timespec g_bd_start_ts;
 static int g_bd_start_inited = 0;
@@ -193,9 +198,25 @@ namespace il2cpp_patch {
     static so_module*   g_mod = nullptr;
     static p_il2cpp_init g_orig_init = nullptr;
     static bool         g_installed = false;
-    // post-init callback (e.g. ui_layout) — we own the single il2cpp_init detour
-    static void (*g_post_init_cb)() = nullptr;
-    static void register_post_init(void (*cb)()) { g_post_init_cb = cb; }
+    static const int MAX_POST_INIT = 16;
+    struct PostInitCallback {
+        void (*cb)(void*) = nullptr;
+        void* userdata = nullptr;
+    };
+    static PostInitCallback g_post_init_cb[MAX_POST_INIT] = {};
+    static int g_post_init_n = 0;
+    static int register_post_init(void (*cb)(void*), void* userdata) {
+        if (!cb || g_post_init_n >= MAX_POST_INIT) return 0;
+        g_post_init_cb[g_post_init_n++] = { cb, userdata };
+        return 1;
+    }
+    static void post_init_compat(void* userdata) {
+        void (*cb)() = (void (*)())userdata;
+        if (cb) cb();
+    }
+    static void register_post_init(void (*cb)()) {
+        register_post_init(&post_init_compat, (void*)cb);
+    }
 
     typedef uintptr_t (*orig8_t)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                  uintptr_t,uintptr_t,uintptr_t,uintptr_t);
@@ -288,7 +309,9 @@ namespace il2cpp_patch {
     static void* il2cpp_init_hook(const char* name) {
         void* dom = g_orig_init(name);          // runtime now initialized
         install_once();
-        if (g_post_init_cb) g_post_init_cb();   // ui_layout etc.
+        for (int i = 0; i < g_post_init_n; i++) {
+            if (g_post_init_cb[i].cb) g_post_init_cb[i].cb(g_post_init_cb[i].userdata);
+        }
         return dom;
     }
 
@@ -327,7 +350,7 @@ namespace il2cpp_patch {
     static void init(so_module* lil2cpp) {
         g_mod = lil2cpp;
         load_config();
-        if (g_n == 0 && !g_post_init_cb) return;  // no patches and no post-init hook → fully inert
+        if (g_n == 0 && g_post_init_n == 0) return;  // no patches and no post-init hook -> fully inert
         il2cpp_domain_get                 = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
         il2cpp_domain_get_assemblies      = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
         il2cpp_assembly_get_image         = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
@@ -345,6 +368,144 @@ namespace il2cpp_patch {
         if (!orig) { BD_LOG("DMG", "failed to hook il2cpp_init"); return; }
         g_orig_init = (p_il2cpp_init)orig;
         BD_LOG("DMG", "%d patch(es) armed; resolving on runtime init", g_n);
+    }
+}
+
+namespace plugin_host {
+    static std::vector<void*> g_handles;
+    static std::string g_config_path;
+    static so_module* g_il2cpp = nullptr;
+    static BogoPluginApi g_api = {};
+
+    static const toml::node* config_node(const char* dotted_key) {
+        if (!dotted_key || !*dotted_key) return nullptr;
+        const toml::node* node = &config;
+        const char* p = dotted_key;
+        while (*p) {
+            const char* dot = strchr(p, '.');
+            std::string part = dot ? std::string(p, dot - p) : std::string(p);
+            auto table = node ? node->as_table() : nullptr;
+            if (!table) return nullptr;
+            node = table->get(part);
+            if (!node) return nullptr;
+            if (!dot) break;
+            p = dot + 1;
+        }
+        return node;
+    }
+
+    static const char* api_getenv(const char* name) {
+        return name ? getenv(name) : nullptr;
+    }
+
+    static const char* api_config_get_string(const char* dotted_key, const char* fallback) {
+        thread_local std::string value;
+        const toml::node* node = config_node(dotted_key);
+        value = node ? node->value<std::string>().value_or(fallback ? fallback : "") : (fallback ? fallback : "");
+        return value.c_str();
+    }
+
+    static int api_config_get_bool(const char* dotted_key, int fallback) {
+        const toml::node* node = config_node(dotted_key);
+        return node ? (node->value<bool>().value_or(fallback != 0) ? 1 : 0) : fallback;
+    }
+
+    static int64_t api_config_get_i64(const char* dotted_key, int64_t fallback) {
+        const toml::node* node = config_node(dotted_key);
+        return node ? node->value<int64_t>().value_or(fallback) : fallback;
+    }
+
+    static uintptr_t api_so_symbol(BogoSoModule* mod, const char* name) {
+        return mod && name ? so_symbol((so_module*)mod, name) : 0;
+    }
+
+    static void api_hook_address_detour(BogoSoModule* mod, uintptr_t addr, uintptr_t dst, uintptr_t* orig_out) {
+        if (!mod || !addr || !dst) {
+            if (orig_out) *orig_out = 0;
+            return;
+        }
+        hook_address_detour((so_module*)mod, addr, dst, orig_out);
+    }
+
+    static int api_register_il2cpp_post_init(BogoIl2cppPostInitCallback cb, void* userdata) {
+        return il2cpp_patch::register_post_init(cb, userdata);
+    }
+
+    static void api_log(const char* tag, const char* fmt, ...) {
+        char buf[1024];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt ? fmt : "", ap);
+        va_end(ap);
+        fprintf(stderr, "[BD-%s] %s\n", tag ? tag : "PLUGIN", buf);
+    }
+
+    static BogoPluginApi make_api() {
+        BogoPluginApi api = {};
+        api.abi_version = BOGODROID_PLUGIN_ABI_VERSION;
+        api.struct_size = sizeof(api);
+        api.config_path = g_config_path.c_str();
+        api.il2cpp = (BogoSoModule*)g_il2cpp;
+        api.getenv = &api_getenv;
+        api.config_get_string = &api_config_get_string;
+        api.config_get_bool = &api_config_get_bool;
+        api.config_get_i64 = &api_config_get_i64;
+        api.so_symbol = &api_so_symbol;
+        api.hook_address_detour = &api_hook_address_detour;
+        api.register_il2cpp_post_init = &api_register_il2cpp_post_init;
+        api.log = &api_log;
+        return api;
+    }
+
+    static void load_one(const char* path, const BogoPluginApi& api) {
+        void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!handle) {
+            BD_LOG("PLUGIN", "dlopen failed: %s: %s", path, dlerror());
+            return;
+        }
+        auto init = (BogoPluginInit)dlsym(handle, "bogodroid_plugin_init");
+        if (!init) {
+            BD_LOG("PLUGIN", "missing bogodroid_plugin_init: %s", path);
+            dlclose(handle);
+            return;
+        }
+        int rc = init(&api);
+        if (rc != 0) {
+            BD_LOG("PLUGIN", "init failed rc=%d: %s", rc, path);
+            dlclose(handle);
+            return;
+        }
+        g_handles.push_back(handle);
+    }
+
+    static void load(so_module* lil2cpp, const char* config_path) {
+        g_il2cpp = lil2cpp;
+        g_config_path = config_path ? config_path : "";
+        g_api = make_api();
+
+        std::string plugin_glob = "unityloader.d/*.so";
+        if (!g_config_path.empty()) {
+            std::filesystem::path cfg(g_config_path);
+            auto dir = cfg.parent_path();
+            if (!dir.empty())
+                plugin_glob = (dir / "unityloader.d" / "*.so").string();
+        }
+
+        glob_t gl = {};
+        int gr = glob(plugin_glob.c_str(), 0, nullptr, &gl);
+        if (gr == GLOB_NOMATCH) {
+            globfree(&gl);
+            return;
+        }
+        if (gr != 0) {
+            BD_LOG("PLUGIN", "glob failed for %s rc=%d", plugin_glob.c_str(), gr);
+            globfree(&gl);
+            return;
+        }
+        for (size_t i = 0; i < gl.gl_pathc; i++) {
+            load_one(gl.gl_pathv[i], g_api);
+        }
+        globfree(&gl);
     }
 }
 
@@ -714,6 +875,8 @@ int main(int argc, char* argv[])
     }
     loaded_modules[module_count++] = &lil2cpp;
     BD_TIME("after loading libil2cpp.so");
+
+    plugin_host::load(&lil2cpp, argv[1]);
 
     // HUD surgery (reads [ui_layout]). MUST precede il2cpp_patch::init. Inert if absent.
     ui_layout::init(&lil2cpp);
