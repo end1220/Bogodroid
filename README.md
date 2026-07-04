@@ -43,6 +43,38 @@ Bogodroid 使用 **GNU GPL v3** 协议（见 [LICENSE.md](./LICENSE.md)）。GPL
 
 如果你基于 Bogodroid 做了有趣的东西，欢迎 PR、提 issue、或者直接告诉我们。这就是让项目持续前进的真正贡献。
 
+# Commit Message Convention
+
+All new commits in this repository must use English subjects and the existing
+`scope: summary` format:
+
+```text
+<scope>: <imperative summary>
+```
+
+Rules:
+
+- Use a lowercase scope that names the affected component or workflow.
+- Write the summary in English, imperative mood, with no trailing period.
+- Keep the subject line to 72 characters when practical; put extra context in
+  the commit body.
+- Do not mix Chinese and English in the subject line. If Chinese context is
+  necessary, put it in the commit body instead.
+- Prefer one logical change per commit.
+
+Common scopes include `build`, `ci`, `cmake`, `docs`, `tools`, `logging`,
+`unityloader`, `jnivm`, `javastubs`, `graphics`, `audio`, `input`,
+`thunks/libc`, `thunks/zlib`, and `thunks/egl_sdl`. Add a new scope only when it
+matches a real component, tool, or workflow in the tree.
+
+Examples:
+
+```text
+unityloader: add plugin host and Android compatibility stubs
+build: ignore generated build directories
+tools/unity_astc: validate audio resource metadata
+```
+
 # How to Build
 
 ### 1. Install Prerequisites
@@ -199,5 +231,4 @@ handled and which (particle systems, custom shaders) may need `--skip`.
 | Vampire Survivors                 | -             | Not attempted |                                                                                                                    |
 | Scourgebringer                    | -             | Not attempted |                                                                                                                    |
 | Haak                              | -             | Not attempted |                                                                                                                    |
-
 
