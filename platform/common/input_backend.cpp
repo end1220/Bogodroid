@@ -12,6 +12,8 @@
 #include "toml++/toml.hpp"
 extern toml::table config;
 
+extern "C" void bd_flush_prefs_impl();
+
 static bool input_enable_controller = false;
 static bool input_mouse_touch_mode = false;
 static bool input_mouse_accurate_mode = false;
@@ -23,6 +25,11 @@ static std::map<int, int> g_button_remap;
 // Some handhelds route D-pad / Select / Start through the keyboard scancode
 // path instead of the joystick path; mirror the same remap there.
 static std::map<int, int> g_scancode_remap;
+
+// Physical D-pad direction -> logical D-pad direction. This is for rotated
+// handheld layouts only; it never maps analog sticks to D-pad.
+static std::map<int, int> g_dpad_button_remap;
+static std::map<int, int> g_dpad_scancode_remap;
 
 enum BD_AxisDir : int {
     BD_LSTICK_LEFT = 0, BD_LSTICK_RIGHT, BD_LSTICK_UP, BD_LSTICK_DOWN,
@@ -51,6 +58,7 @@ static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, cons
     if (is_select) g_exit_hotkey_select_down = down;
     if (g_exit_hotkey_start_down && g_exit_hotkey_select_down) {
         BD_LOG("EXIT", "Start+Select exit hotkey (%s)", source ? source : "input");
+        bd_flush_prefs_impl();
         _exit(0);
     }
 }
@@ -72,6 +80,10 @@ static long bd_stamp_keyevent_downtime(int deviceId, int keyCode, int action, lo
 static void bd_axis_synth(BD_AxisDir dir, float value, int sign,
                           const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
                           std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey);
+static void bd_axis_synth_pair(BD_AxisDir negativeDir, BD_AxisDir positiveDir, float value,
+                               const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
+                               std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey);
+static int bd_remap_dpad_button(int button);
 
 // "E" / "TAB" / "DPAD_UP" / "KEYCODE_M" -> KeyEvent::KEYCODE_*; -1 if unknown.
 static int parse_keycode_name(std::string s)
@@ -112,6 +124,45 @@ static int parse_keycode_name(std::string s)
     return -1;
 }
 
+static int parse_dpad_button_name(std::string s)
+{
+    if (s.empty()) return -1;
+    for (auto& c : s) c = (char)std::toupper((unsigned char)c);
+    if (s.rfind("KEYCODE_", 0) == 0) s = s.substr(8);
+    if (s.rfind("DPAD_", 0) == 0) s = s.substr(5);
+
+    if (s == "UP")    return SDL_CONTROLLER_BUTTON_DPAD_UP;
+    if (s == "DOWN")  return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+    if (s == "LEFT")  return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+    if (s == "RIGHT") return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+    return -1;
+}
+
+static int keycode_for_dpad_button(int button)
+{
+    using K = jnivm::android::view::KeyEvent;
+    switch (button) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:    return K::KEYCODE_DPAD_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return K::KEYCODE_DPAD_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return K::KEYCODE_DPAD_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return K::KEYCODE_DPAD_RIGHT;
+    default: return K::KEYCODE_UNKNOWN;
+    }
+}
+
+static bool is_dpad_button(int button)
+{
+    return button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
+           button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+}
+
+static int bd_remap_dpad_button(int button)
+{
+    if (!is_dpad_button(button)) return button;
+    auto it = g_dpad_button_remap.find(button);
+    return (it != g_dpad_button_remap.end()) ? it->second : button;
+}
+
 static void load_input_remap()
 {
     static bool loaded = false;
@@ -124,10 +175,10 @@ static void load_input_remap()
     g_axis_remap[BD_R2] = jnivm::android::view::KeyEvent::KEYCODE_BUTTON_R2;
 
     auto remap = config["input"]["remap"];
-    if (!remap.is_table()) return;
-    auto* tbl = remap.as_table();
+    auto* tbl = remap.is_table() ? remap.as_table() : nullptr;
 
     auto bind = [&](const char* cfg_key, int sdl_button) {
+        if (!tbl) return;
         auto v = (*tbl)[cfg_key].value<std::string>();
         if (!v) return;
         int kc = parse_keycode_name(*v);
@@ -155,8 +206,33 @@ static void load_input_remap()
     bind("dpleft",  SDL_CONTROLLER_BUTTON_DPAD_LEFT);
     bind("dpright", SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
 
+    // D-pad rotation is independent from [input.remap]. It describes the
+    // physical handheld layout, while [input.remap] describes logical buttons.
+    auto dpad_remap = config["input"]["dpad_remap"];
+    if (dpad_remap.is_table()) {
+        auto* dpad_tbl = dpad_remap.as_table();
+        auto bind_dpad = [&](const char* cfg_key, int physical_button, SDL_Scancode physical_scancode) {
+            auto v = (*dpad_tbl)[cfg_key].value<std::string>();
+            if (!v) return;
+            int logical_button = parse_dpad_button_name(*v);
+            if (logical_button < 0) {
+                BD_LOG("INPUT-REMAP", "ignore input.dpad_remap.%s = %s (expected up/down/left/right)",
+                        cfg_key, v->c_str());
+                return;
+            }
+            g_dpad_button_remap[physical_button] = logical_button;
+            g_dpad_scancode_remap[physical_scancode] = keycode_for_dpad_button(logical_button);
+            BD_LOG("INPUT-REMAP", "dpad %s -> %s", cfg_key, v->c_str());
+        };
+        bind_dpad("up",    SDL_CONTROLLER_BUTTON_DPAD_UP,    SDL_SCANCODE_UP);
+        bind_dpad("down",  SDL_CONTROLLER_BUTTON_DPAD_DOWN,  SDL_SCANCODE_DOWN);
+        bind_dpad("left",  SDL_CONTROLLER_BUTTON_DPAD_LEFT,  SDL_SCANCODE_LEFT);
+        bind_dpad("right", SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_SCANCODE_RIGHT);
+    }
+
     // Stick / trigger -> keycode (synthesized on threshold cross alongside MotionEvent).
     auto bind_axis = [&](const char* cfg_key, BD_AxisDir dir) {
+        if (!tbl) return;
         auto v = (*tbl)[cfg_key].value<std::string>();
         if (!v) return;
         int kc = parse_keycode_name(*v);
@@ -179,6 +255,7 @@ static void load_input_remap()
 
     // Mirror remap on the scancode path (some handhelds route here, not joystick).
     auto bind_scancode = [&](const char* cfg_key, SDL_Scancode sc) {
+        if (!tbl) return;
         auto v = (*tbl)[cfg_key].value<std::string>();
         if (!v) return;
         int kc = parse_keycode_name(*v);
@@ -323,6 +400,101 @@ std::shared_ptr<FakeJni::JArray<FakeJni::JInt>> InputBackend::getDeviceIds()
         (*ids)[i++] = kv.first;
     }
     return ids;
+}
+
+void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue)
+{
+    if (!input_enable_controller || !onMotion) return;
+
+    int axis  = -1;
+    int axis2 = -1;
+    float value = 0.0f;
+    bool isTrigger = false;
+
+    switch (sdlAxis) {
+    case SDL_CONTROLLER_AXIS_LEFTX:
+        axis = jnivm::android::view::MotionEvent::AXIS_X;
+        break;
+    case SDL_CONTROLLER_AXIS_LEFTY:
+        axis = jnivm::android::view::MotionEvent::AXIS_Y;
+        break;
+    case SDL_CONTROLLER_AXIS_RIGHTX:
+        axis = jnivm::android::view::MotionEvent::AXIS_Z;
+        break;
+    case SDL_CONTROLLER_AXIS_RIGHTY:
+        axis = jnivm::android::view::MotionEvent::AXIS_RZ;
+        break;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
+        axis  = jnivm::android::view::MotionEvent::AXIS_LTRIGGER;
+        axis2 = jnivm::android::view::MotionEvent::AXIS_BRAKE;
+        isTrigger = true;
+        break;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
+        axis  = jnivm::android::view::MotionEvent::AXIS_RTRIGGER;
+        axis2 = jnivm::android::view::MotionEvent::AXIS_GAS;
+        isTrigger = true;
+        break;
+    }
+
+    if (axis == -1) return;
+
+    if (isTrigger) {
+        value = rawAxisValue / 32767.0f;
+    } else {
+        value = rawAxisValue < 0 ? rawAxisValue / 32768.0f : rawAxisValue / 32767.0f;
+    }
+    float rawValue = value;
+
+    // MotionEvent should carry the normalized physical axis. The InputDevice
+    // MotionRange advertises flat=0.12, and Unity is expected to apply its own
+    // stick deadzone. The filtered value below is only for optional axis->KeyEvent
+    // synthesis.
+    if (!isTrigger) {
+        constexpr float kFlat = 0.12f;
+        if (value > -kFlat && value < kFlat) {
+            value = 0.0f;
+        } else if (value > 0.0f) {
+            value = (value - kFlat) / (1.0f - kFlat);
+        } else {
+            value = (value + kFlat) / (1.0f - kFlat);
+        }
+    }
+    float synthValue = value;
+    float motionValue = rawValue;
+
+    if (axis2 != -1) {
+        mControllerAxisState[axis2] = motionValue;
+    }
+
+    mControllerAxisState[axis] = motionValue;
+
+    auto dev = devices[INPUT_ID_XBOX];
+    auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
+        dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
+    motionEvent->axisValues = mControllerAxisState;
+    onMotion(motionEvent);
+
+    auto keyDev = devices[INPUT_ID_XBOX];
+    switch (sdlAxis) {
+    case SDL_CONTROLLER_AXIS_LEFTX:
+        bd_axis_synth_pair(BD_LSTICK_LEFT, BD_LSTICK_RIGHT, synthValue, keyDev, onKey);
+        break;
+    case SDL_CONTROLLER_AXIS_LEFTY:
+        bd_axis_synth_pair(BD_LSTICK_UP, BD_LSTICK_DOWN, synthValue, keyDev, onKey);
+        break;
+    case SDL_CONTROLLER_AXIS_RIGHTX:
+        bd_axis_synth_pair(BD_RSTICK_LEFT, BD_RSTICK_RIGHT, synthValue, keyDev, onKey);
+        break;
+    case SDL_CONTROLLER_AXIS_RIGHTY:
+        bd_axis_synth_pair(BD_RSTICK_UP, BD_RSTICK_DOWN, synthValue, keyDev, onKey);
+        break;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
+        bd_axis_synth(BD_L2, synthValue, +1, keyDev, onKey);
+        break;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
+        bd_axis_synth(BD_R2, synthValue, +1, keyDev, onKey);
+        break;
+    }
 }
 
 // ---- Event Loop ----
@@ -478,109 +650,7 @@ void InputBackend::runEventLoop()
             }
 
             case SDL_CONTROLLERAXISMOTION: {
-                if (!input_enable_controller)
-                    break;
-                if (!onMotion)
-                    break;
-
-                // Trigger published on both LTRIGGER/BRAKE (or RTRIGGER/GAS)
-                // — AOSP fan-out (Android 4.3+).
-                int axis  = -1;
-                int axis2 = -1;
-                float value = 0.0f;
-                bool isTrigger = false;
-
-                switch (e.caxis.axis) {
-                case SDL_CONTROLLER_AXIS_LEFTX:
-                    axis = jnivm::android::view::MotionEvent::AXIS_X;
-                    break;
-                case SDL_CONTROLLER_AXIS_LEFTY:
-                    axis = jnivm::android::view::MotionEvent::AXIS_Y;
-                    break;
-                case SDL_CONTROLLER_AXIS_RIGHTX:
-                    axis = jnivm::android::view::MotionEvent::AXIS_Z;
-                    break;
-                case SDL_CONTROLLER_AXIS_RIGHTY:
-                    axis = jnivm::android::view::MotionEvent::AXIS_RZ;
-                    break;
-                case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-                    axis  = jnivm::android::view::MotionEvent::AXIS_LTRIGGER;
-                    axis2 = jnivm::android::view::MotionEvent::AXIS_BRAKE;
-                    isTrigger = true;
-                    break;
-                case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-                    axis  = jnivm::android::view::MotionEvent::AXIS_RTRIGGER;
-                    axis2 = jnivm::android::view::MotionEvent::AXIS_GAS;
-                    isTrigger = true;
-                    break;
-                }
-
-                if (axis == -1)
-                    break; // Not an axis we are mapping.
-
-                // Normalize the value
-                if (isTrigger) {
-                    value = e.caxis.value / 32767.0f;
-                } else {
-                    value = e.caxis.value < 0 ? e.caxis.value / 32768.0f : e.caxis.value / 32767.0f;
-                }
-
-                // AOSP dead-zone rescale. Skipping this leaks stick drift into
-                // every D-pad MotionEvent (we ship the whole axisValues map).
-                if (!isTrigger) {
-                    constexpr float kFlat = 0.12f;
-                    if (value > -kFlat && value < kFlat) {
-                        value = 0.0f;
-                    } else if (value > 0.0f) {
-                        value = (value - kFlat) / (1.0f - kFlat);
-                    } else {
-                        value = (value + kFlat) / (1.0f - kFlat);
-                    }
-                }
-
-                if (axis2 != -1) {
-                    mControllerAxisState[axis2] = value;
-                }
-
-                // Update the single value in our state map
-                mControllerAxisState[axis] = value;
-
-                auto dev = devices[INPUT_ID_XBOX];
-                auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
-                    dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
-
-                motionEvent->axisValues = mControllerAxisState;
-
-                onMotion(motionEvent);
-
-                // Axis -> synthetic key (only fires for bound directions).
-                {
-                    auto dev = devices[INPUT_ID_XBOX];
-                    switch (e.caxis.axis) {
-                    case SDL_CONTROLLER_AXIS_LEFTX:
-                        bd_axis_synth(BD_LSTICK_LEFT,  value, -1, dev, onKey);
-                        bd_axis_synth(BD_LSTICK_RIGHT, value, +1, dev, onKey);
-                        break;
-                    case SDL_CONTROLLER_AXIS_LEFTY:
-                        bd_axis_synth(BD_LSTICK_UP,    value, -1, dev, onKey);
-                        bd_axis_synth(BD_LSTICK_DOWN,  value, +1, dev, onKey);
-                        break;
-                    case SDL_CONTROLLER_AXIS_RIGHTX:
-                        bd_axis_synth(BD_RSTICK_LEFT,  value, -1, dev, onKey);
-                        bd_axis_synth(BD_RSTICK_RIGHT, value, +1, dev, onKey);
-                        break;
-                    case SDL_CONTROLLER_AXIS_RIGHTY:
-                        bd_axis_synth(BD_RSTICK_UP,    value, -1, dev, onKey);
-                        bd_axis_synth(BD_RSTICK_DOWN,  value, +1, dev, onKey);
-                        break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-                        bd_axis_synth(BD_L2,           value, +1, dev, onKey);
-                        break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-                        bd_axis_synth(BD_R2,           value, +1, dev, onKey);
-                        break;
-                    }
-                }
+                dispatchControllerAxisMotion(e.caxis.axis, e.caxis.value);
                 break;
             }
 
@@ -593,16 +663,17 @@ void InputBackend::runEventLoop()
                 int action  = (e.type == SDL_CONTROLLERBUTTONDOWN)
                               ? jnivm::android::view::KeyEvent::ACTION_DOWN
                               : jnivm::android::view::KeyEvent::ACTION_UP;
+                uint8_t physicalButton = e.cbutton.button;
+                int logicalButton = bd_remap_dpad_button(physicalButton);
                 int keyCode = toAndroidKeycode(e.cbutton);
-                bd_exit_hotkey_update(e.cbutton.button == SDL_CONTROLLER_BUTTON_START,
-                                      e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK,
+                bd_exit_hotkey_update(physicalButton == SDL_CONTROLLER_BUTTON_START,
+                                      physicalButton == SDL_CONTROLLER_BUTTON_BACK,
                                       action == jnivm::android::view::KeyEvent::ACTION_DOWN,
                                       "controller");
-                bool is_dpad = (e.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
-                                e.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+                bool is_dpad = is_dpad_button(physicalButton);
                 if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-                    BD_DEBUG("INPUT", "CONTROLLER button=%d -> KEYCODE=%d",
-                            e.cbutton.button, keyCode);
+                    BD_DEBUG("INPUT", "CONTROLLER button=%d logical=%d -> KEYCODE=%d",
+                            physicalButton, logicalButton, keyCode);
                 }
                 auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(
                     devices[INPUT_ID_XBOX], action, keyCode, 0);
@@ -617,7 +688,7 @@ void InputBackend::runEventLoop()
                     bool down = (action == jnivm::android::view::KeyEvent::ACTION_DOWN);
                     int   axis = -1;
                     float signedV = 0.0f;
-                    switch (e.cbutton.button) {
+                    switch (logicalButton) {
                         case SDL_CONTROLLER_BUTTON_DPAD_UP:
                             axis = jnivm::android::view::MotionEvent::AXIS_HAT_Y;
                             signedV = down ? -1.0f : 0.0f; break;
@@ -682,9 +753,25 @@ static void bd_axis_synth(BD_AxisDir dir, float value, int sign,
     }
 }
 
+static void bd_axis_synth_pair(BD_AxisDir negativeDir, BD_AxisDir positiveDir, float value,
+                               const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
+                               std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey)
+{
+    if (value < 0.0f) {
+        bd_axis_synth(positiveDir, value, +1, dev, onKey);
+        bd_axis_synth(negativeDir, value, -1, dev, onKey);
+    } else if (value > 0.0f) {
+        bd_axis_synth(negativeDir, value, -1, dev, onKey);
+        bd_axis_synth(positiveDir, value, +1, dev, onKey);
+    } else {
+        bd_axis_synth(negativeDir, value, -1, dev, onKey);
+        bd_axis_synth(positiveDir, value, +1, dev, onKey);
+    }
+}
+
 int InputBackend::toAndroidKeycode(SDL_ControllerButtonEvent sdl_button)
 {
-    uint8_t button = sdl_button.button;
+    int button = bd_remap_dpad_button(sdl_button.button);
     auto it = g_button_remap.find(button);
     if (it != g_button_remap.end()) {
         return it->second;
@@ -727,6 +814,10 @@ int InputBackend::toAndroidKeycode(SDL_ControllerButtonEvent sdl_button)
 
 int InputBackend::toAndroidKeycode(SDL_Scancode sdl_scancode)
 {
+    auto dpad_it = g_dpad_scancode_remap.find(sdl_scancode);
+    if (dpad_it != g_dpad_scancode_remap.end()) {
+        return dpad_it->second;
+    }
     auto it = g_scancode_remap.find(sdl_scancode);
     if (it != g_scancode_remap.end()) {
         return it->second;

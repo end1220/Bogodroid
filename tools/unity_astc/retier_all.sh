@@ -18,7 +18,8 @@
 # It only flips long AudioClips to Streaming — no re-encode, so it adds
 # roughly one bundle load+repack of time. Clips whose data lives inside the
 # bundle (archive:) are skipped loudly; --min-secs/--skip tuning needs a
-# manual audio_stream_patch.py run.
+# manual audio_stream_patch.py run. After patching, external AudioClip
+# sidecar offsets are validated against the original .resource directory.
 #
 # Defaults: --include-raw --compact --packer original
 #   - block size is NOT forced; astc_retier.py's own default (8x8) wins unless
@@ -38,6 +39,7 @@ Processes every *.bundle and data.unity3d under <dir> (recursive) with:
     --include-raw --compact --packer original
 (block size defaults to astc_retier.py's own default — 8x8 — unless overridden.)
 --audio additionally runs audio_stream_patch.py on each result (no re-encode).
+It then validates external AudioClip .resource offsets.
 Outputs land in ./output/<original filename> (astc_retier.py's default).
 Pass any extra astc_retier.py flags after <dir> to override or add.
 
@@ -53,6 +55,7 @@ DIR="$1"; shift
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RETIER="$SCRIPT_DIR/astc_retier.py"
 AUDIO="$SCRIPT_DIR/audio_stream_patch.py"
+AUDIO_VALIDATE="$SCRIPT_DIR/audio_resource_validate.py"
 
 if [[ ! -d "$DIR" ]]; then
     echo "error: not a directory: $DIR" >&2
@@ -60,6 +63,10 @@ if [[ ! -d "$DIR" ]]; then
 fi
 if [[ ! -f "$RETIER" ]]; then
     echo "error: astc_retier.py not found at $RETIER" >&2
+    exit 1
+fi
+if [[ ! -f "$AUDIO_VALIDATE" ]]; then
+    echo "error: audio_resource_validate.py not found at $AUDIO_VALIDATE" >&2
     exit 1
 fi
 DIR="$(cd "$DIR" && pwd)"
@@ -148,6 +155,9 @@ for f in "${targets[@]}"; do
             if [[ $dry -eq 1 ]]; then
                 if ! python3 "$AUDIO" "$a_in" --dry-run | tee "$tmp_log"; then
                     echo "  !! audio step FAILED on $f" >&2
+                    n_fail=$((n_fail + 1))
+                    echo
+                    continue
                 fi
             else
                 if python3 "$AUDIO" "$a_in" -o "$out.tmp" --packer original \
@@ -156,12 +166,25 @@ for f in "${targets[@]}"; do
                 else
                     echo "  !! audio step FAILED on $f (texture output kept)" >&2
                     rm -f "$out.tmp"
+                    n_fail=$((n_fail + 1))
+                    echo
+                    continue
                 fi
             fi
             a_line=$(grep -E 'Est\. RAM freed' "$tmp_log" | tail -1 || true)
             if [[ -n "$a_line" && "$a_line" =~ $audio_re ]]; then
                 audio_freed_total=$(echo "$audio_freed_total + ${BASH_REMATCH[1]}" | bc)
                 n_audio=$((n_audio + 1))
+            fi
+
+            validate_in="$a_in"
+            if [[ -f "$out" ]]; then validate_in="$out"; fi
+            if ! python3 "$AUDIO_VALIDATE" "$validate_in" \
+                    --resource-dir "$(dirname "$f")" -q | tee "$tmp_log"; then
+                echo "  !! audio resource validation FAILED on $f" >&2
+                n_fail=$((n_fail + 1))
+                echo
+                continue
             fi
         fi
         if [[ -f "$out" ]]; then

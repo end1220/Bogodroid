@@ -26,6 +26,7 @@ private:
     std::unordered_map<int, float> mControllerAxisState;
 
     InputBackend(); // Private constructor for singleton
+    void dispatchControllerAxisMotion(int sdlAxis, Sint16 rawValue);
 
 public:
     // Singleton access

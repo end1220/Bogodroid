@@ -115,6 +115,46 @@ big enough that 8×8 block artifacts vanish into the texel density.
 ./tools/unity_astc/retier_all.sh "$GAME_DIR" --audio --keep-cap 768 --block 6x6
 ```
 
+### Audio → Re-encode FSB5 (lossy, for 1 GB targets)
+
+Use this only when Streaming is not enough. It rewrites external FSB5
+AudioClip sidecars to mono/downsampled Vorbis, rebuilds touched
+`.resource` files, and patches the bundle offsets. Always validate before
+deploying.
+
+One-time host setup:
+
+```bash
+brew install ffmpeg vorbis-tools libvorbis
+python3 -m pip install --user UnityPy fsb5
+./tools/unity_astc/build_oggvorbis2fsb5.sh
+```
+
+Single bundle flow:
+
+```bash
+BUNDLE=/path/to/data.unity3d
+DATA_DIR="$(dirname "$BUNDLE")"
+
+python3 tools/unity_astc/audio_reencode_fsb.py "$BUNDLE" \
+    --out-dir "$DATA_DIR/audio_reencoded" \
+    --fsb5-remuxer tools/unity_astc/bin/oggvorbis2fsb5 \
+    --quality 2 --max-rate 32000 --packer original
+
+python3 tools/unity_astc/audio_stream_patch.py \
+    "$DATA_DIR/audio_reencoded/$(basename "$BUNDLE")" \
+    -o "$DATA_DIR/final/$(basename "$BUNDLE")" --packer original
+
+# Validate against original resources plus rewritten resources.
+mkdir -p "$DATA_DIR/merged_for_validate"
+find "$DATA_DIR" -maxdepth 1 -type f -name '*.resource' \
+    -exec ln -sf {} "$DATA_DIR/merged_for_validate" \;
+cp "$DATA_DIR/audio_reencoded"/*.resource "$DATA_DIR/merged_for_validate"/
+python3 tools/unity_astc/audio_resource_validate.py \
+    "$DATA_DIR/final/$(basename "$BUNDLE")" \
+    --resource-dir "$DATA_DIR/merged_for_validate" -q
+```
+
 ### Video re-encode (only if game ships >720p cutscenes)
 
 ```bash
@@ -189,8 +229,52 @@ Every script also prints this via `--help`. **Bold = default.**
 | `--packer` | **`lz4hc`** | same semantics as astc_retier |
 | `--dry-run` / `-q` | — | same semantics as astc_retier |
 
-Tool never re-encodes audio by design — streaming alone frees most of
-the RAM, and re-encoding for the last ~10 MB isn't worth the FSB5 rebuild.
+Tool never re-encodes audio by design. Use `audio_reencode_fsb.py` when
+you explicitly need lossy FSB5 sidecar compression, then run this tool
+afterward to flip long clips to Streaming.
+
+Use `audio_resource_validate.py` after any external audio resource rewrite,
+or let `retier_all.sh --audio` run it automatically for Streaming-only runs.
+
+### `audio_reencode_fsb.py` (lossy FSB5 sidecar re-encode)
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--out-dir DIR` | `<bundle_dir>/audio_reencoded` | output bundle + rewritten `.resource` files |
+| `--quality N` | **`2`** | `oggenc` Vorbis quality (`-1..10`) |
+| `--max-rate N` | **`32000`** | cap sample rate; `0` preserves original |
+| `--keep-stereo` | off | keep original channel count instead of forcing mono |
+| `--min-secs N` | **`0`** | only re-encode clips at least N seconds |
+| `--skip NAME` | — | clips to leave untouched |
+| `--limit N` | all | process at most N clips (QA) |
+| `--ffmpeg` / `--oggenc` / `--fsb5-remuxer` | PATH lookup | external tools |
+| `--packer` / `--dry-run` / `-q` | **`lz4hc`** | same semantics as astc_retier |
+
+The tool preserves unrelated chunks and gap bytes in each `.resource` and
+patches offsets for every later AudioClip/VideoClip/Texture2D chunk in the
+same sidecar. If an FSB5 Vorbis header is not understood, that clip is
+reported and left original instead of being corrupted.
+
+`oggvorbis2fsb5` is a local build artifact. Build it with:
+
+```bash
+./tools/unity_astc/build_oggvorbis2fsb5.sh
+```
+
+Do not commit `tools/unity_astc/bin/` or `.cache/`; both are ignored.
+
+### `audio_resource_validate.py` (audio sidecar guardrail)
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--resource-dir DIR` | bundle directory | where sidecar `.resource` files live |
+| `--max-errors N` | **`25`** | stop printing after N invalid references (`0` = all) |
+| `-q / --quiet` | — | summary only |
+
+Validates that every external AudioClip offset/size is in bounds and points
+at a known audio stream header (`FSB5`, `OggS`, `RIFF`, `fLaC`). It catches
+metadata-only audio outputs where `data.unity3d` expects re-packed resource
+files but the deployed `.resource` files are still from another build.
 
 ### `video_reencode.py` (cutscenes; needs ffmpeg)
 
@@ -209,7 +293,7 @@ the RAM, and re-encoding for the last ~10 MB isn't worth the FSB5 rebuild.
 | Flag | Effect |
 |---|---|
 | `<dir>` | recurse for `*.bundle` + `data.unity3d` |
-| `--audio` | chain `audio_stream_patch.py` (defaults) after the texture step |
+| `--audio` | chain `audio_stream_patch.py` after the texture step, then validate external AudioClip sidecars |
 | anything else | passed through to `astc_retier.py` |
 
 **Forced per-bundle defaults**: `--include-raw --compact --packer original`.

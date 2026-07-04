@@ -15,6 +15,8 @@ libjnivm/build/
 il2cpp/
 projects/unityloader/monocompat/il2cpp_log_shim.cpp
 __pycache__/
+tools/unity_astc/.cache/
+tools/unity_astc/bin/
 pocs/
 build-local/
 output/
