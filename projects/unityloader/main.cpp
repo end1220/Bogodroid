@@ -432,12 +432,17 @@ namespace plugin_host {
     }
 
     static void api_log(const char* tag, const char* fmt, ...) {
+#ifdef BD_ENABLE_LOG
         char buf[1024];
         va_list ap;
         va_start(ap, fmt);
         vsnprintf(buf, sizeof(buf), fmt ? fmt : "", ap);
         va_end(ap);
         fprintf(stderr, "[BD-%s] %s\n", tag ? tag : "PLUGIN", buf);
+#else
+        (void)tag;
+        (void)fmt;
+#endif
     }
 
     static BogoPluginApi make_api() {
@@ -722,8 +727,10 @@ int main(int argc, char* argv[])
         return -1;
     }
 
+    std::string config_path_abs = std::filesystem::absolute(argv[1]).lexically_normal().string();
+
     // Init config, GLES pointers, JNI VN and bindings
-    init_config(argv[1]);
+    init_config(config_path_abs.c_str());
     // sdl_initialize_gles();
     InitJNIBinding(&vm);
 
@@ -876,7 +883,7 @@ int main(int argc, char* argv[])
     loaded_modules[module_count++] = &lil2cpp;
     BD_TIME("after loading libil2cpp.so");
 
-    plugin_host::load(&lil2cpp, argv[1]);
+    plugin_host::load(&lil2cpp, config_path_abs.c_str());
 
     // HUD surgery (reads [ui_layout]). MUST precede il2cpp_patch::init. Inert if absent.
     ui_layout::init(&lil2cpp);

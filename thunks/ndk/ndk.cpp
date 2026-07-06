@@ -111,12 +111,24 @@ ABI_ATTR ANativeWindow* ANativeWindow_fromSurface(void*, void*)
 
 ABI_ATTR int32_t ANativeWindow_getWidth(ANativeWindow *window)
 {
-    return config["device"]["displayWidth"].value_or<int>(640);
+    int32_t width = config["device"]["displayWidth"].value_or<int>(640);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        BD_LOG("NDK", "ANativeWindow_getWidth(%p) -> %d", (void*)window, width);
+    }
+    return width;
 }
 
 ABI_ATTR int32_t ANativeWindow_getHeight(ANativeWindow *window)
 {
-    return config["device"]["displayHeight"].value_or<int>(480);
+    int32_t height = config["device"]["displayHeight"].value_or<int>(480);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        BD_LOG("NDK", "ANativeWindow_getHeight(%p) -> %d", (void*)window, height);
+    }
+    return height;
 }
 
 ABI_ATTR void __assert2(const char* __file, int __line, const char* __function, const char* __msg)
@@ -166,6 +178,5 @@ NO_THUNK("AAsset_getLength",(uintptr_t)&AAsset_getLength),
 NO_THUNK("AAsset_close",(uintptr_t)&AAsset_close),
 NO_THUNK("AAsset_read", (uintptr_t)&AAsset_read),
     {NULL, (uintptr_t)NULL}};
-
 
 

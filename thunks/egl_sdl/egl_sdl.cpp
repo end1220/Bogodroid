@@ -19,6 +19,18 @@ EGLDisplay egl_display;
 EGLContext egl_context;
 EGLSurface egl_surface;
 
+static void bd_log_sdl_display_mode(const char* label, int display_index)
+{
+    SDL_DisplayMode mode = {};
+    if (SDL_GetCurrentDisplayMode(display_index, &mode) == 0) {
+        BD_LOG("EGL_SDL", "%s display=%d current_mode=%dx%d@%d fmt=0x%x",
+               label, display_index, mode.w, mode.h, mode.refresh_rate, mode.format);
+    } else {
+        BD_LOG("EGL_SDL", "%s display=%d current_mode unavailable: %s",
+               label, display_index, SDL_GetError());
+    }
+}
+
 namespace jnivm::android::view {
 class Choreographer;
 
@@ -70,13 +82,32 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
         fatal_error("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         // return -1;
     }
-    // Fullscreen at native LCD resolution.
+    int requested_w = config["device"]["displayWidth"].value_or<int>(640);
+    int requested_h = config["device"]["displayHeight"].value_or<int>(480);
+    if (requested_w <= 0) requested_w = 640;
+    if (requested_h <= 0) requested_h = 480;
+
+    const char* video_driver = SDL_GetCurrentVideoDriver();
+    BD_LOG("EGL_SDL", "SDL video_driver=%s requested=%dx%d",
+           video_driver ? video_driver : "(null)", requested_w, requested_h);
+    bd_log_sdl_display_mode("before window", 0);
+
+    // Request the configured render size. Desktop-fullscreen mode always uses
+    // the current display mode, so changing displayWidth/Height only affected
+    // Unity's queries, not the real backbuffer.
     sdl_win = SDL_CreateWindow("Teapot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                               0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP);
+                               requested_w, requested_h, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
     if (sdl_win == NULL) {
         fatal_error("Failed to create SDL Window: %s\n", SDL_GetError());
         // return -1;
     }
+    int window_w = 0, window_h = 0;
+    SDL_GetWindowSize(sdl_win, &window_w, &window_h);
+    int display_index = SDL_GetWindowDisplayIndex(sdl_win);
+    if (display_index < 0) display_index = 0;
+    bd_log_sdl_display_mode("after window", display_index);
+    BD_LOG("EGL_SDL", "SDL window requested=%dx%d window=%dx%d flags=0x%x",
+           requested_w, requested_h, window_w, window_h, SDL_GetWindowFlags(sdl_win));
 
     // Basic OpenGL ES 2.x setup
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -94,6 +125,10 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
         // return -1;
     }
     SDL_GL_MakeCurrent(sdl_win, sdl_ctx);
+    int drawable_w = 0, drawable_h = 0;
+    SDL_GL_GetDrawableSize(sdl_win, &drawable_w, &drawable_h);
+    BD_LOG("EGL_SDL", "SDL drawable=%dx%d logical=%dx%d",
+           drawable_w, drawable_h, requested_w, requested_h);
 
     //
 
@@ -258,10 +293,20 @@ EGLBoolean eglQuerySurface_impl(EGLDisplay display, EGLSurface surface, EGLint a
     // Return logical [device] size, not physical — fixes 16:9-on-4:3 stretch.
     if (attribute == EGL_WIDTH) {
         *value = config["device"]["displayWidth"].value_or<int>(640);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            BD_LOG("EGL_SDL", "eglQuerySurface(EGL_WIDTH) -> %d", *value);
+        }
         return EGL_TRUE;
     }
     if (attribute == EGL_HEIGHT) {
         *value = config["device"]["displayHeight"].value_or<int>(480);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            BD_LOG("EGL_SDL", "eglQuerySurface(EGL_HEIGHT) -> %d", *value);
+        }
         return EGL_TRUE;
     }
 #ifdef FAKE_EGL
