@@ -24,4 +24,12 @@ displayHeight=480
 displayRotation=0
 
 
+[audio]
+# auto | sysfs | software | passthrough
+backend = "auto"
+# sysfs_path = "/sys/class/power_supply/axp2202-battery/openbor_volume"
+# sysfs_max = 10
+# intercept_volume_keys = "auto"
+
+
 

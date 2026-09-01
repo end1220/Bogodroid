@@ -160,10 +160,15 @@ NO_THUNK("ASensorManager_getInstanceForPackage", (uintptr_t)&ret0), //AWFUL
 NO_THUNK("ASensorManager_getInstance", (uintptr_t)&ret0), //AWFUL
 NO_THUNK("ASensorManager_getDefaultSensor", (uintptr_t)&ret0), //AWFUL
 NO_THUNK("ASensorManager_createEventQueue", (uintptr_t)&ret0), //AWFUL
-NO_THUNK("ALooper_prepare", (uintptr_t)&ALooper_prepare),
-NO_THUNK("ALooper_addFd", (uintptr_t)&ALooper_addFd),
-NO_THUNK("ALooper_pollAll", (uintptr_t)&ALooper_pollAll),
-NO_THUNK("ALooper_pollOnce", (uintptr_t)&ALooper_pollOnce), //AWFUL
+    NO_THUNK("ALooper_prepare", (uintptr_t)&ALooper_prepare),
+    NO_THUNK("ALooper_forThread", (uintptr_t)&ALooper_forThread),
+    NO_THUNK("ALooper_acquire", (uintptr_t)&ALooper_acquire),
+    NO_THUNK("ALooper_release", (uintptr_t)&ALooper_release),
+    NO_THUNK("ALooper_addFd", (uintptr_t)&ALooper_addFd),
+    NO_THUNK("ALooper_removeFd", (uintptr_t)&ALooper_removeFd),
+    NO_THUNK("ALooper_wake", (uintptr_t)&ALooper_wake),
+    NO_THUNK("ALooper_pollAll", (uintptr_t)&ALooper_pollAll),
+    NO_THUNK("ALooper_pollOnce", (uintptr_t)&ALooper_pollOnce),
 NO_THUNK("ANativeWindow_fromSurface", (uintptr_t)&ANativeWindow_fromSurface), //AWFUL
 NO_THUNK("ANativeWindow_acquire", (uintptr_t)&ret0), //AWFUL
 NO_THUNK("ANativeWindow_release", (uintptr_t)&ret0), //AWFUL

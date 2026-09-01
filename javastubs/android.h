@@ -118,6 +118,7 @@ namespace android {
             int getSource() { return source; }
             float getMin() { return min; }
             float getMax() { return max; }
+            float getRange() { return max - min; }
             float getFlat() { return flat; }
             float getFuzz() { return fuzz; }
         };
@@ -148,6 +149,7 @@ namespace android {
             std::shared_ptr<FakeJni::JString> getDescriptorString(); // Actually getDescriptor() but that's already taken
             bool isVirtual();
             std::shared_ptr<java::util::List> getMotionRanges();
+            std::shared_ptr<MotionRange> getMotionRange(int axis);
             static std::shared_ptr<jnivm::android::view::InputDevice> getDevice(int device);
             static std::shared_ptr<FakeJni::JArray<int>> getDeviceIds();
 

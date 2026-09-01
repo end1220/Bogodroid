@@ -2,10 +2,14 @@
 #include "../globals.h" 
 #include "android.h"
 #include "logging.h"
+#include "sys_volume.h"
 #include <SDL2/SDL.h>
 #include <cmath> 
-#include <algorithm> 
+#include <algorithm>
+#include <cstdint>
 #include <jnivm/bytebuffer.h>
+#include <thread>
+#include <chrono>
 
 using namespace jnivm::org::fmod;
 
@@ -90,13 +94,25 @@ void FMODAudioDevice::runAudio() {
         verbose("FMODAudioDevice", "SDL_OpenAudioDevice failed: %s", SDL_GetError());
         return;
     }
-    verbose("FMODAudioDevice", "SDL Audio device opened. Rate: %d, Channels: %d", have.freq, have.channels);
-    
+    bd_sys_volume_poll();
+    BD_LOG("AUDIO", "SDL Audio device opened. Rate: %d, Channels: %d, sysvol=%d%% (%s)",
+           have.freq, have.channels, bd_sys_volume_percent(), bd_sys_volume_backend_name());
+
     SDL_PauseAudioDevice(mAudioDevice, 0);
-    
+
+    int poll_n = 0;
     while (mRunning.load()) {
-        while(SDL_GetQueuedAudioSize(mAudioDevice) < 4096){
+        while (SDL_GetQueuedAudioSize(mAudioDevice) < 4096) {
             local_fmodProcess();
+            if ((++poll_n % 16) == 0)
+                bd_sys_volume_poll();
+            int pct = bd_sys_volume_percent();
+            if (pct < 100 && !mAudioBuffer.empty()) {
+                auto* s = reinterpret_cast<int16_t*>(mAudioBuffer.data());
+                size_t n = mAudioBuffer.size() / sizeof(int16_t);
+                for (size_t i = 0; i < n; i++)
+                    s[i] = static_cast<int16_t>(static_cast<int>(s[i]) * pct / 100);
+            }
             SDL_QueueAudio(mAudioDevice, mAudioBuffer.data(), mAudioBuffer.size());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

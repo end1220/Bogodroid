@@ -10,8 +10,56 @@
 #include <inttypes.h>
 #include <memory>
 #include <dlfcn.h>
+#include <string.h>
 #include <toml++/toml.hpp>
 extern toml::table config;
+
+// Opaque EGL objects must be distinct, aligned, and readable. 0xDEAD collided
+// with dlopen_impl's fake handle and is unmapped (first page), so Unity treating
+// a display/context as a pointer SIGSEGVs. Offset 0x10 is a common field load.
+struct FakeEglObject {
+    FakeEglObject* self;
+    FakeEglObject* p08;
+    FakeEglObject* p10;
+    uintptr_t pad[13];
+};
+
+static FakeEglObject g_fake_display;
+static FakeEglObject g_fake_context;
+static FakeEglObject g_fake_window_surface;
+static FakeEglObject g_fake_pbuffer_surface;
+static FakeEglObject g_fake_config;
+
+static FakeEglObject* fake_egl_touch(FakeEglObject* o)
+{
+    if (!o->self) {
+        o->self = o;
+        o->p08 = o;
+        o->p10 = o;
+    }
+    return o;
+}
+
+static EGLDisplay fake_egl_display()
+{
+    return (EGLDisplay)fake_egl_touch(&g_fake_display);
+}
+static EGLContext fake_egl_context()
+{
+    return (EGLContext)fake_egl_touch(&g_fake_context);
+}
+static EGLSurface fake_egl_window_surface()
+{
+    return (EGLSurface)fake_egl_touch(&g_fake_window_surface);
+}
+static EGLSurface fake_egl_pbuffer_surface()
+{
+    return (EGLSurface)fake_egl_touch(&g_fake_pbuffer_surface);
+}
+static EGLConfig fake_egl_config()
+{
+    return (EGLConfig)fake_egl_touch(&g_fake_config);
+}
 
 SDL_Window* sdl_win;
 SDL_GLContext sdl_ctx;
@@ -41,31 +89,140 @@ public:
 };
 }
 
+static int egl_ext_blocked(const char* sym)
+{
+    // Mali / SDL 2.0.10 没有这些；转发给真 libEGL 会在 Anbernic 上崩。
+    static const char* blocked[] = {
+        "eglQueryDevicesEXT",
+        "eglQueryDeviceStringEXT",
+        "eglQueryDeviceAttribEXT",
+        "eglQueryDisplayAttribEXT",
+        "eglQueryDeviceBinaryEXT",
+        "eglQueryDmaBufFormatsEXT",
+        "eglQueryDmaBufModifiersEXT",
+        "eglGetPlatformDisplayEXT",
+        "eglGetPlatformDisplay",
+        NULL,
+    };
+    for (int i = 0; blocked[i]; i++) {
+        if (strcmp(sym, blocked[i]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static SDL_Window* bd_create_sdl_window(int w, int h)
+{
+    struct Attempt {
+        Uint32 flags;
+        const char* label;
+    };
+    static const Attempt attempts[] = {
+        { (Uint32)(SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN), "FULLSCREEN" },
+        { (Uint32)(SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP), "FULLSCREEN_DESKTOP" },
+        { (Uint32)SDL_WINDOW_OPENGL, "windowed" },
+    };
+    for (size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]); i++) {
+        SDL_Window* win = SDL_CreateWindow("Teapot",
+            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            w, h, attempts[i].flags);
+        if (win) {
+            BD_LOG("EGL_SDL", "SDL_CreateWindow %s ok flags=0x%x",
+                   attempts[i].label, attempts[i].flags);
+            return win;
+        }
+        BD_LOG("EGL_SDL", "SDL_CreateWindow %s failed: %s",
+               attempts[i].label, SDL_GetError());
+    }
+    return NULL;
+}
+
+// mali-fbdev + SDL 2.0.12: if the GLES context is already current on another
+// thread (Unity gfx-job / render thread) or SDL's TLS is stale, the first
+// SDL_GL_MakeCurrent returns EGL_BAD_ACCESS. Clearing this thread's binding
+// forces the second call to actually run. Same idea as the non-FAKE_EGL
+// KMSDRM repair below.
+static int bd_sdl_gl_make_current(SDL_GLContext ctx)
+{
+    if (!sdl_win)
+        return -1;
+    if (SDL_GL_MakeCurrent(sdl_win, ctx) == 0)
+        return 0;
+    BD_LOG("EGL_SDL", "SDL_GL_MakeCurrent failed: %s (tid=%lu) — unbind+retry",
+           SDL_GetError(), (unsigned long)SDL_ThreadID());
+    SDL_GL_MakeCurrent(sdl_win, NULL);
+    if (SDL_GL_MakeCurrent(sdl_win, ctx) == 0) {
+        BD_LOG("EGL_SDL", "SDL_GL_MakeCurrent rebound ok tid=%lu",
+               (unsigned long)SDL_ThreadID());
+        return 0;
+    }
+    BD_LOG("EGL_SDL", "SDL_GL_MakeCurrent retry failed: %s tid=%lu",
+           SDL_GetError(), (unsigned long)SDL_ThreadID());
+    return -1;
+}
+
+static SDL_GLContext bd_create_gles_context(SDL_Window* win)
+{
+    // Anbernic Mali-G31 已验证 GLES 3.2。只允许 3.2 / 3.1，禁止落到 GLES2，
+    // 否则 Unity 会按 ES2 选 renderer，和真机能力、包体设定都不一致。
+    static const int versions[][2] = { { 3, 2 }, { 3, 1 } };
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    for (size_t i = 0; i < sizeof(versions) / sizeof(versions[0]); i++) {
+        int maj = versions[i][0];
+        int min = versions[i][1];
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, maj);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, min);
+        SDL_GLContext ctx = SDL_GL_CreateContext(win);
+        if (ctx) {
+            BD_LOG("EGL_SDL", "GLES context %d.%d ok", maj, min);
+            return ctx;
+        }
+        BD_LOG("EGL_SDL", "GLES %d.%d failed: %s", maj, min, SDL_GetError());
+    }
+    return NULL;
+}
+
 void* getProc(const char* sym)
 {
-    // First try SDL
-    void* proc=SDL_GL_GetProcAddress(sym);
-    if(proc)
-        return proc;
-    
-    // Some platforms don't expose EGL over SDL, so try dynamic linking
-    static void* libEGL_handle=dlopen("libEGL.so", RTLD_NOW);
-    proc=dlsym(libEGL_handle, sym);
-    if(proc)
-       return proc;
+    if (!sym)
+        return NULL;
+    if (egl_ext_blocked(sym)) {
+        BD_LOG("EGL_SDL", "getProc block %s (Mali/SDL 2.0.10)", sym);
+        return NULL;
+    }
 
+    void* proc = SDL_GL_GetProcAddress(sym);
+    if (proc)
+        return proc;
+
+#ifdef FAKE_EGL
+    // 窗口已由系统 SDL 创建。不要再 dlopen 真 libEGL 去服务 Unity 的 Android display。
     return NULL;
+#else
+    static void* libEGL_handle = dlopen("libEGL.so", RTLD_NOW);
+    if (!libEGL_handle)
+        return NULL;
+    return dlsym(libEGL_handle, sym);
+#endif
 }
 
 EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     EGLSurface surface)
 {
-    SDL_GL_MakeCurrent(sdl_win, sdl_ctx);
+    static uint64_t swap_n = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    bd_sdl_gl_make_current(sdl_ctx);
     SDL_GL_SwapWindow(sdl_win);
+    auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    swap_n++;
+    if (swap_n <= 8 || (swap_n % 60) == 0 || dt > 50) {
+        BD_LOG("EGL_SDL", "eglSwapBuffers #%llu dt=%lld ms",
+               (unsigned long long)swap_n, (long long)dt);
+    }
 
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {
-        // choreographer->dispatchFrameCallbacks(true);
         choreographer->signalVSync();
     }
     return EGL_TRUE;
@@ -92,14 +249,14 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
            video_driver ? video_driver : "(null)", requested_w, requested_h);
     bd_log_sdl_display_mode("before window", 0);
 
-    // Request the configured render size. Desktop-fullscreen mode always uses
-    // the current display mode, so changing displayWidth/Height only affected
-    // Unity's queries, not the real backbuffer.
-    sdl_win = SDL_CreateWindow("Teapot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                               requested_w, requested_h, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+    // Request GLES before CreateWindow; retry versions at CreateContext.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+
+    sdl_win = bd_create_sdl_window(requested_w, requested_h);
     if (sdl_win == NULL) {
         fatal_error("Failed to create SDL Window: %s\n", SDL_GetError());
-        // return -1;
     }
     int window_w = 0, window_h = 0;
     SDL_GetWindowSize(sdl_win, &window_w, &window_h);
@@ -109,22 +266,17 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     BD_LOG("EGL_SDL", "SDL window requested=%dx%d window=%dx%d flags=0x%x",
            requested_w, requested_h, window_w, window_h, SDL_GetWindowFlags(sdl_win));
 
-    // Basic OpenGL ES 2.x setup
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-
-    sdl_ctx = SDL_GL_CreateContext(sdl_win);
+    sdl_ctx = bd_create_gles_context(sdl_win);
     if (sdl_ctx == NULL) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-        sdl_ctx = SDL_GL_CreateContext(sdl_win);
-        if (sdl_ctx == NULL) {
-            fatal_error("Failed to create OpenGL Context: %s\n", SDL_GetError());
-        }
-        // return -1;
+        fatal_error("Failed to create OpenGL Context: %s\n", SDL_GetError());
     }
     SDL_GL_MakeCurrent(sdl_win, sdl_ctx);
+    // mali-fbdev + SDL 2.0.12: interval 1 can block forever on later swaps.
+    if (SDL_GL_SetSwapInterval(0) != 0) {
+        BD_LOG("EGL_SDL", "SDL_GL_SetSwapInterval(0) failed: %s", SDL_GetError());
+    } else {
+        BD_LOG("EGL_SDL", "SDL_GL_SetSwapInterval(0) ok (no vsync wait)");
+    }
     int drawable_w = 0, drawable_h = 0;
     SDL_GL_GetDrawableSize(sdl_win, &drawable_w, &drawable_h);
     BD_LOG("EGL_SDL", "SDL drawable=%dx%d logical=%dx%d",
@@ -132,12 +284,20 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
 
     //
 
+#ifdef FAKE_EGL
+    // FAKE 下 getProc("eglGetCurrentDisplay") 会是 NULL。SDL 已持有真实 context。
+    egl_display = fake_egl_display();
+    egl_context = fake_egl_context();
+    egl_surface = fake_egl_window_surface();
+    load_gles2_funcs();
+#else
     egl_display = ((EGLDisplay (*)())getProc("eglGetCurrentDisplay"))();
     egl_context = ((EGLDisplay (*)())getProc("eglGetCurrentContext"))();
     egl_surface = ((EGLSurface (*)(EGLint))getProc("eglGetCurrentSurface"))(EGL_DRAW);
 
     load_egl_funcs();
     load_gles2_funcs();
+#endif
 
     // Print OpenGL information
     const char* glVersion = (const char*)glad_glGetString(GL_VERSION);
@@ -220,8 +380,10 @@ EGLBoolean eglChooseConfig_impl(EGLDisplay display, const EGLint* attribList, EG
 {
     verbose("EGL_SDL", "eglChooseConfig\n");
 #ifdef FAKE_EGL
-    *configs = malloc(1 * sizeof(EGLConfig));
-    *numConfigs = 1;
+    if (numConfigs)
+        *numConfigs = 1;
+    if (configs && configSize > 0)
+        configs[0] = fake_egl_config();
     return EGL_TRUE;
 #endif
 
@@ -282,7 +444,7 @@ EGLSurface eglCreateWindowSurface_impl(EGLDisplay display, EGLConfig config, Nat
 {
     verbose("EGL_SDL", "eglCreateWindowSurface\n");
 #ifdef FAKE_EGL
-    return (EGLSurface)0xDEAD;
+    return fake_egl_window_surface();
 #endif
     return egl_surface;
 }
@@ -326,7 +488,7 @@ EGLContext eglCreateContext_impl(EGLDisplay display,
 {
     verbose("EGL_SDL", "eglCreateContext\n");
 #ifdef FAKE_EGL
-    return (EGLContext)0xDEAD;
+    return fake_egl_context();
 #endif
     return egl_context;
 }
@@ -349,6 +511,20 @@ EGLBoolean eglMakeCurrent_impl(EGLDisplay display,
     EGLContext context)
 {
     verbose("EGL_SDL", "eglMakeCurrent\n");
+#ifdef FAKE_EGL
+    if (!sdl_win || !sdl_ctx) {
+        BD_LOG("EGL_SDL", "eglMakeCurrent: no SDL window/context");
+        return EGL_FALSE;
+    }
+    if (context == (EGLContext)0) {
+        if (bd_sdl_gl_make_current(NULL) != 0)
+            BD_LOG("EGL_SDL", "eglMakeCurrent unbind failed");
+        return EGL_TRUE;
+    }
+    if (bd_sdl_gl_make_current(sdl_ctx) != 0)
+        return EGL_FALSE;
+    return EGL_TRUE;
+#else
     static auto cached_eglMakeCurrent = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext))getProc("eglMakeCurrent");
     static auto p_glGetString = (const unsigned char* (*)(unsigned int))getProc("glGetString");
 
@@ -377,6 +553,7 @@ EGLBoolean eglMakeCurrent_impl(EGLDisplay display,
             return EGL_TRUE;
     }
     return r;
+#endif
 }
 
 EGLint eglGetError_impl()
@@ -389,14 +566,109 @@ EGLBoolean eglGetConfigAttrib_impl(EGLDisplay display,
     EGLint attribute,
     EGLint* value)
 {
+#ifdef FAKE_EGL
+    if (!value)
+        return EGL_FALSE;
+    switch (attribute) {
+    case EGL_BUFFER_SIZE:
+        *value = 32;
+        break;
+    case EGL_RED_SIZE:
+    case EGL_GREEN_SIZE:
+    case EGL_BLUE_SIZE:
+    case EGL_ALPHA_SIZE:
+        *value = 8;
+        break;
+    case EGL_DEPTH_SIZE:
+        *value = 24;
+        break;
+    case EGL_STENCIL_SIZE:
+        *value = 8;
+        break;
+    case EGL_SURFACE_TYPE:
+        *value = EGL_WINDOW_BIT;
+        break;
+    case EGL_RENDERABLE_TYPE:
+    case EGL_CONFORMANT:
+        *value = EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT;
+        break;
+    case EGL_CONFIG_ID:
+        *value = 1;
+        break;
+    case EGL_NATIVE_VISUAL_ID:
+    case EGL_NATIVE_VISUAL_TYPE:
+    case EGL_SAMPLE_BUFFERS:
+    case EGL_SAMPLES:
+    case EGL_LEVEL:
+    case EGL_LUMINANCE_SIZE:
+    case EGL_ALPHA_MASK_SIZE:
+    case EGL_MIN_SWAP_INTERVAL:
+        *value = 0;
+        break;
+    case EGL_MAX_SWAP_INTERVAL:
+        *value = 1;
+        break;
+    case EGL_NATIVE_RENDERABLE:
+    case EGL_BIND_TO_TEXTURE_RGB:
+    case EGL_BIND_TO_TEXTURE_RGBA:
+        *value = EGL_FALSE;
+        break;
+    case EGL_COLOR_BUFFER_TYPE:
+        *value = EGL_RGB_BUFFER;
+        break;
+    case EGL_CONFIG_CAVEAT:
+    case EGL_TRANSPARENT_TYPE:
+        *value = EGL_NONE;
+        break;
+    case EGL_MAX_PBUFFER_WIDTH:
+    case EGL_MAX_PBUFFER_HEIGHT:
+        *value = 4096;
+        break;
+    case EGL_MAX_PBUFFER_PIXELS:
+        *value = 4096 * 4096;
+        break;
+    case EGL_COVERAGE_BUFFERS_NV:
+    case EGL_COVERAGE_SAMPLES_NV:
+    case EGL_DEPTH_ENCODING_NV:
+        *value = 0;
+        break;
+    case EGL_RECORDABLE_ANDROID:
+    case EGL_FRAMEBUFFER_TARGET_ANDROID:
+        *value = EGL_TRUE;
+        break;
+    default:
+        BD_LOG("EGL_SDL", "eglGetConfigAttrib unhandled 0x%x -> 0", attribute);
+        *value = 0;
+        break;
+    }
+    return EGL_TRUE;
+#else
     return ((EGLBoolean (*)(EGLDisplay, EGLConfig, EGLint, EGLint*))getProc("eglGetConfigAttrib"))(display, config, attribute, value);
+#endif
 }
 
 char const* eglQueryString_impl(EGLDisplay display,
     EGLint name)
 {
     verbose("EGL_SDL", "eglQueryString %d\n", name);
+#ifdef FAKE_EGL
+    switch (name) {
+    case EGL_VERSION:
+        return "1.4";
+    case EGL_VENDOR:
+        return "ARM";
+    case EGL_CLIENT_APIS:
+        return "OpenGL_ES";
+    case EGL_EXTENSIONS:
+        // Mali/GLES-safe short list. No device / platform-display enumeration.
+        return "EGL_KHR_image EGL_KHR_gl_texture_2D_image EGL_KHR_fence_sync";
+    default:
+        BD_LOG("EGL_SDL", "eglQueryString unhandled %d", name);
+        return "";
+    }
+#else
     return ((char const* (*)(EGLDisplay, EGLint))getProc("eglQueryString"))(display, name);
+#endif
 }
 
 EGLDisplay eglGetCurrentDisplay_impl()
@@ -417,7 +689,118 @@ EGLSurface eglGetCurrentSurface_impl()
 EGLBoolean eglSwapInterval_impl(EGLDisplay display,
     EGLint interval)
 {
-    return EGL_FALSE; // Generally can't set swap interval on these platforms.
+    BD_LOG("EGL_SDL", "eglSwapInterval requested=%d -> force 0 (mali-fbdev)", interval);
+    if (SDL_GL_SetSwapInterval(0) != 0) {
+        BD_LOG("EGL_SDL", "SDL_GL_SetSwapInterval(0) failed: %s", SDL_GetError());
+        return EGL_FALSE;
+    }
+    return EGL_TRUE;
+}
+
+EGLBoolean eglTerminate_impl(EGLDisplay display)
+{
+    verbose("EGL_SDL", "eglTerminate\n");
+    return EGL_TRUE;
+}
+
+EGLBoolean eglSurfaceAttrib_impl(EGLDisplay display,
+    EGLSurface surface,
+    EGLint attribute,
+    EGLint value)
+{
+    verbose("EGL_SDL", "eglSurfaceAttrib 0x%x=%d\n", attribute, value);
+    return EGL_TRUE;
+}
+
+EGLSurface eglCreatePbufferSurface_impl(EGLDisplay display,
+    EGLConfig config,
+    EGLint const* attrib_list)
+{
+    verbose("EGL_SDL", "eglCreatePbufferSurface\n");
+#ifdef FAKE_EGL
+    return fake_egl_pbuffer_surface();
+#else
+    return egl_surface;
+#endif
+}
+
+EGLBoolean eglQueryContext_impl(EGLDisplay display,
+    EGLContext context,
+    EGLint attribute,
+    EGLint* value)
+{
+#ifdef FAKE_EGL
+    if (!value)
+        return EGL_FALSE;
+    switch (attribute) {
+    case EGL_CONFIG_ID:
+        *value = 1;
+        break;
+    case EGL_CONTEXT_CLIENT_TYPE:
+        *value = EGL_OPENGL_ES_API;
+        break;
+    case EGL_CONTEXT_CLIENT_VERSION:
+        *value = 3;
+        break;
+    case EGL_RENDER_BUFFER:
+        *value = EGL_BACK_BUFFER;
+        break;
+    default:
+        BD_LOG("EGL_SDL", "eglQueryContext unhandled 0x%x", attribute);
+        *value = 0;
+        break;
+    }
+    return EGL_TRUE;
+#else
+    return ((EGLBoolean (*)(EGLDisplay, EGLContext, EGLint, EGLint*))getProc("eglQueryContext"))(display, context, attribute, value);
+#endif
+}
+
+EGLBoolean eglGetConfigs_impl(EGLDisplay display,
+    EGLConfig* configs,
+    EGLint config_size,
+    EGLint* num_config)
+{
+#ifdef FAKE_EGL
+    if (num_config)
+        *num_config = 1;
+    if (configs && config_size > 0)
+        configs[0] = fake_egl_config();
+    return EGL_TRUE;
+#else
+    return ((EGLBoolean (*)(EGLDisplay, EGLConfig*, EGLint, EGLint*))getProc("eglGetConfigs"))(display, configs, config_size, num_config);
+#endif
+}
+
+EGLBoolean eglBindAPI_impl(EGLenum api)
+{
+#ifdef FAKE_EGL
+    return (api == EGL_OPENGL_ES_API) ? EGL_TRUE : EGL_FALSE;
+#else
+    auto fn = (EGLBoolean (*)(EGLenum))getProc("eglBindAPI");
+    return fn ? fn(api) : EGL_TRUE;
+#endif
+}
+
+EGLBoolean eglReleaseThread_impl(void)
+{
+    return EGL_TRUE;
+}
+
+EGLBoolean eglWaitGL_impl(void)
+{
+    return EGL_TRUE;
+}
+
+EGLBoolean eglWaitNative_impl(EGLint engine)
+{
+    (void)engine;
+    return EGL_TRUE;
+}
+
+EGLBoolean eglWaitClient_impl(void)
+{
+    return EGL_TRUE;
 }
 
 // Actually implemented in egl.cpp
@@ -442,6 +825,16 @@ DynLibFunction symtable_egl_sdl[] = {
     NO_THUNK("eglGetCurrentSurface", (uintptr_t)&eglGetCurrentSurface_impl),
     NO_THUNK("eglSwapInterval", (uintptr_t)&eglSwapInterval_impl),
     NO_THUNK("eglGetProcAddress", (uintptr_t)&eglGetProcAddress_impl),
+    NO_THUNK("eglTerminate", (uintptr_t)&eglTerminate_impl),
+    NO_THUNK("eglSurfaceAttrib", (uintptr_t)&eglSurfaceAttrib_impl),
+    NO_THUNK("eglCreatePbufferSurface", (uintptr_t)&eglCreatePbufferSurface_impl),
+    NO_THUNK("eglQueryContext", (uintptr_t)&eglQueryContext_impl),
+    NO_THUNK("eglGetConfigs", (uintptr_t)&eglGetConfigs_impl),
+    NO_THUNK("eglBindAPI", (uintptr_t)&eglBindAPI_impl),
+    NO_THUNK("eglReleaseThread", (uintptr_t)&eglReleaseThread_impl),
+    NO_THUNK("eglWaitGL", (uintptr_t)&eglWaitGL_impl),
+    NO_THUNK("eglWaitNative", (uintptr_t)&eglWaitNative_impl),
+    NO_THUNK("eglWaitClient", (uintptr_t)&eglWaitClient_impl),
     { NULL, (uintptr_t)NULL }
 };
 
@@ -461,7 +854,7 @@ void sdl_initialize_gles()
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 
-    sdl_ctx = SDL_GL_CreateContext(sdl_win);
+    sdl_ctx = bd_create_gles_context(sdl_win);
     if (sdl_ctx == NULL) {
         fatal_error("Failed to create OpenGL Context: %s\n", SDL_GetError());
     }

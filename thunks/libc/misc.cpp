@@ -75,6 +75,24 @@ extern "C" ABI_ATTR void* dlopen_impl(const char* filename, int flags)
     if (filename == NULL)
         return NULL;
 
+    const char* base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+#ifdef FAKE_EGL
+    // Distinct from EGL display/context sentinels. Unity dlopens libEGL.so after
+    // we already created the SDL GLES context; handing back 0xDEAD collided with
+    // the old fake EGL handles.
+    if (strcmp(base, "libEGL.so") == 0) {
+        static char kFakeLibEGL;
+        BD_LOG("DLOPEN", "libEGL.so -> fake handle (do not load system EGL)");
+        return &kFakeLibEGL;
+    }
+    if (strcmp(base, "libGLESv2.so") == 0 || strcmp(base, "libGLESv3.so") == 0) {
+        static char kFakeLibGLES;
+        BD_LOG("DLOPEN", "%s -> fake handle", base);
+        return &kFakeLibGLES;
+    }
+#endif
+
     char resolved1[PATH_MAX];
     char resolved2[PATH_MAX];
     realpath(filename, resolved1);

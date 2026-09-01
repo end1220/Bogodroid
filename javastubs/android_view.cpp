@@ -119,6 +119,15 @@ std::shared_ptr<jnivm::java::util::List> jnivm::android::view::InputDevice::getM
     return list;
 }
 
+std::shared_ptr<jnivm::android::view::MotionRange> jnivm::android::view::InputDevice::getMotionRange(int axis)
+{
+    for (const auto& range : motionRanges) {
+        if (range && range->axis == axis)
+            return range;
+    }
+    return nullptr;
+}
+
 std::shared_ptr<jnivm::android::view::InputDevice> jnivm::android::view::InputDevice::getDevice(int device)
 {
     return InputBackend::instance().getDevice(device);
@@ -493,6 +502,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&InputDevice::getDescriptorString> {}, "getDescriptor", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputDevice::isVirtual> {}, "isVirtual", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputDevice::getMotionRanges> {}, "getMotionRanges", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&InputDevice::getMotionRange> {}, "getMotionRange", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputDevice::getDevice> {}, "getDevice", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&InputDevice::getDeviceIds> {}, "getDeviceIds", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
@@ -521,6 +531,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&MotionRange::getSource> {}, "getSource", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionRange::getMin> {}, "getMin", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionRange::getMax> {}, "getMax", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&MotionRange::getRange> {}, "getRange", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionRange::getFlat> {}, "getFlat", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionRange::getFuzz> {}, "getFuzz", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR

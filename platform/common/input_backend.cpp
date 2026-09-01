@@ -4,12 +4,15 @@
 #include "input_backend.h"
 #include "android.h"
 #include "logging.h"
+#include "sys_volume.h"
 #include <map>
 #include <string>
+#include <cstring>
 #include <cctype>
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
+#include <cstdlib>
 extern toml::table config;
 
 extern "C" void bd_flush_prefs_impl();
@@ -274,6 +277,47 @@ static void load_input_remap()
     bind_scancode("start",   SDL_SCANCODE_RETURN);
 }
 
+// doukutsu-rs 已验证的 Anbernic gpio-keys（js0 名 ANBERNIC-keys）。
+// 社区 community db 通常没有这条，不内置则 SDL 只出 JOYBUTTON/JOYHAT，
+// 当前事件循环吃的是 GameController 事件，按键会被丢掉。
+static const char* const kBuiltinControllerMaps[] = {
+    "19000000010000000100000000010000,ANBERNIC-keys,a:b0,b:b1,x:b3,y:b2,back:b6,start:b7,guide:b8,leftshoulder:b4,rightshoulder:b5,lefttrigger:b9,righttrigger:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftx:a0,lefty:a1,platform:Linux,",
+    "0300000008100000e501000001010000,Anbernic Gamepad,a:b1,b:b0,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a2,righty:a4,start:b11,x:b3,y:b4,platform:Linux,",
+};
+
+static void bd_load_gamecontroller_mappings()
+{
+    const char* db = getenv("SDL_GAMECONTROLLERCONFIG_FILE");
+    if (db && db[0]) {
+        int n = SDL_GameControllerAddMappingsFromFile(db);
+        BD_LOG("INPUT", "SDL_GameControllerAddMappingsFromFile(%s) = %d", db, n);
+    } else if (SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt") >= 0) {
+        BD_LOG("INPUT", "loaded ./gamecontrollerdb.txt");
+    }
+
+    for (const char* line : kBuiltinControllerMaps) {
+        int rc = SDL_GameControllerAddMapping(line);
+        const char* name = strchr(line, ',');
+        BD_LOG("INPUT", "builtin map %s rc=%d",
+               name ? name + 1 : line, rc);
+    }
+}
+
+static void bd_log_sdl_joysticks()
+{
+    int n = SDL_NumJoysticks();
+    BD_LOG("INPUT", "SDL_NumJoysticks=%d", n);
+    for (int i = 0; i < n; i++) {
+        SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(i);
+        char guid_str[33];
+        SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
+        const char* name = SDL_JoystickNameForIndex(i);
+        BD_LOG("INPUT", "joy[%d] name='%s' guid=%s gamecontroller=%s",
+               i, name ? name : "(null)", guid_str,
+               SDL_IsGameController(i) ? "yes" : "NO");
+    }
+}
+
 InputBackend& InputBackend::instance()
 {
     static InputBackend backend;
@@ -289,6 +333,8 @@ InputBackend::InputBackend()
     input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
     if (!input_dpad_synthesize_hat) {
         BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = false (D-pad → KeyEvent only, no HAT axis)");
+    } else {
+        BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = true (D-pad → KEYCODE + AXIS_HAT)");
     }
     load_input_remap();
 
@@ -308,6 +354,9 @@ InputBackend::InputBackend()
             BD_LOG("INPUT", "SDL_Init(JOYSTICK|GAMECONTROLLER) failed: %s", SDL_GetError());
             return;
         }
+
+        bd_load_gamecontroller_mappings();
+        bd_log_sdl_joysticks();
 
         // AOSP gamepad contract (AndroidGameControllerState.cs):
         //   stick L/R = AXIS_X/Y, AXIS_Z/RZ ; trigger L/R = AXIS_LTRIGGER/RTRIGGER
@@ -336,8 +385,11 @@ InputBackend::InputBackend()
         // Open game controllers
         for (int i = 0; i < SDL_NumJoysticks(); ++i) {
             if (SDL_IsGameController(i)) {
-                SDL_GameControllerOpen(i);
-                verbose("InputBackend", "Opened Game Controller: %s", SDL_GameControllerNameForIndex(i));
+                SDL_GameController* gc = SDL_GameControllerOpen(i);
+                BD_LOG("INPUT", "Opened GameController[%d] %s ptr=%p",
+                       i, SDL_GameControllerNameForIndex(i), (void*)gc);
+            } else {
+                BD_LOG("INPUT", "skip joy[%d] (not a GameController)", i);
             }
         }
 
@@ -511,6 +563,16 @@ void InputBackend::runEventLoop()
 
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
+                if (e.key.keysym.scancode == SDL_SCANCODE_VOLUMEUP ||
+                    e.key.keysym.scancode == SDL_SCANCODE_VOLUMEDOWN) {
+                    if (bd_sys_volume_owns_keys()) {
+                        if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+                            bd_sys_volume_adjust(
+                                e.key.keysym.scancode == SDL_SCANCODE_VOLUMEUP ? +1 : -1);
+                        }
+                        break;
+                    }
+                }
                 if (!onKey)
                     break;
                 int action = (e.type == SDL_KEYDOWN) ? jnivm::android::view::KeyEvent::ACTION_DOWN : jnivm::android::view::KeyEvent::ACTION_UP;
@@ -672,7 +734,7 @@ void InputBackend::runEventLoop()
                                       "controller");
                 bool is_dpad = is_dpad_button(physicalButton);
                 if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-                    BD_DEBUG("INPUT", "CONTROLLER button=%d logical=%d -> KEYCODE=%d",
+                    BD_LOG("INPUT", "CONTROLLER button=%d logical=%d -> KEYCODE=%d",
                             physicalButton, logicalButton, keyCode);
                 }
                 auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(

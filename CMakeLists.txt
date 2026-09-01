@@ -37,7 +37,8 @@ if(USE_LLD)
     endif()
 endif()
 
-option(USE_MOLD "Use mold linker" ON)
+# GlES_Dev / Ubuntu 20.04 GCC 9 没有 mold；Anbernic 构建不依赖它。
+option(USE_MOLD "Use mold linker" OFF)
 if(USE_MOLD)
     find_program(MOLD_EXECUTABLE mold)
     if(MOLD_EXECUTABLE)
@@ -74,6 +75,13 @@ if(USE_MOLD)
     endif()
 endif()
 
+# 系统 SDL2（pkg-config），对齐 Anbernic / nostalgic_faraday 的 libsdl2-dev 2.0.10。
+# 不要 bundled/static SDL：那会走 eglQueryDevicesEXT，Mali 上初始化失败。
+# 不要把 ${SDL2_INCLUDE_DIRS} 加进 include path：源码写 #include "SDL2/SDL.h"。
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED sdl2)
+message(STATUS "SDL2 ${SDL2_VERSION} libs=${SDL2_LIBRARIES} inc=${SDL2_INCLUDE_DIRS}")
+
 # Add the libjnivm directory as a subproject
 add_subdirectory(libjnivm ${CMAKE_CURRENT_BINARY_DIR}/libjnivm_build)
 
@@ -96,6 +104,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     platform/common/debug_utils.cpp
     platform/common/config.cpp
     platform/common/input_backend.cpp
+    platform/common/sys_volume.cpp
 
     loader/so_util.cpp
     loader/so_util_arm64.cpp
@@ -168,7 +177,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     fake-jni
     baron
     jnivm
-    SDL2
+    ${SDL2_LIBRARIES}
     dl
     pthread
     -Wl,-Bstatic
@@ -177,6 +186,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     -Wl,-Bdynamic
     z
 )
+if(SDL2_LIBRARY_DIRS)
+    target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE ${SDL2_LIBRARY_DIRS})
+endif()
+if(SDL2_CFLAGS_OTHER)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${SDL2_CFLAGS_OTHER})
+endif()
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
@@ -244,6 +259,14 @@ if(BD_ENABLE_GPLAY)
     message(STATUS "BD_ENABLE_GPLAY on -> compiling Google Play stubs")
     target_sources(${CMAKE_PROJECT_NAME} PRIVATE javastubs/gplay.cpp)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_GPLAY)
+endif()
+
+# Anbernic / Mali：Unity 的 eglInitialize/eglQueryString 带的是 Android
+# display 句柄，不能转发给真 libEGL（eglQueryDevicesEXT 会炸）。窗口只走系统 SDL。
+option(BD_FAKE_EGL "Stub Unity EGL after SDL has created the GLES context (Anbernic Mali)" ON)
+if(BD_FAKE_EGL)
+    message(STATUS "BD_FAKE_EGL on -> do not forward Unity EGL to system libEGL")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE FAKE_EGL BD_FAKE_EGL)
 endif()
 
 option(BD_ENABLE_LOG "Master switch for non-error logs (off by default; required by all sub-switches)" OFF)

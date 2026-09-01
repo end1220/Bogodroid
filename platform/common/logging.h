@@ -2,6 +2,7 @@
 #define __LOGGING_H__
 
 #include <cstdio>
+#include <cstdlib>
 
 // BogoDroid logging — single source of truth.
 //
@@ -17,11 +18,18 @@
 //      -DIL2CPP_TRACE=ON               →   + il2cpp internal trace
 
 #define fatal_error(msg, ...) \
-    do { fprintf(stderr, "%s:%d: " msg, __FILE__, __LINE__, ##__VA_ARGS__); } while(0)
+    do { \
+        fprintf(stderr, "%s:%d: " msg, __FILE__, __LINE__, ##__VA_ARGS__); \
+        fflush(stderr); \
+        abort(); \
+    } while(0)
 
 #ifdef BD_ENABLE_LOG
     #define BD_LOG(cat, fmt, ...) \
-        fprintf(stderr, "[BD-" cat "] " fmt "\n", ##__VA_ARGS__)
+        do { \
+            fprintf(stderr, "[BD-" cat "] " fmt "\n", ##__VA_ARGS__); \
+            fflush(stderr); \
+        } while (0)
 #else
     #define BD_LOG(cat, fmt, ...) ((void)0)
 #endif

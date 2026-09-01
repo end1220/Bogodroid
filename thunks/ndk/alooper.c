@@ -63,12 +63,14 @@ ALooper* ALooper_forThread() {
 }
 
 void ALooper_acquire(ALooper* looper) {
+    if (!looper) return;
     pthread_mutex_lock(&looper->mutex);
     looper->refcount++;
     pthread_mutex_unlock(&looper->mutex);
 }
 
 void ALooper_release(ALooper* looper) {
+    if (!looper) return;
     pthread_mutex_lock(&looper->mutex);
     if (--looper->refcount == 0) {
         close(looper->epoll_fd);
@@ -164,6 +166,7 @@ int ALooper_removeFd(ALooper* looper, int fd) {
 }
 
 void ALooper_wake(ALooper* looper) {
+    if (!looper) return;
     uint64_t value = 1;
     (void)! write(looper->wake_fd, &value, sizeof(value));
 }
@@ -230,11 +233,12 @@ int ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outDa
 int ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
     ALooper* looper = ALooper_forThread();
     if (!looper) return ALOOPER_POLL_ERROR;
-    
-    while (1) {
-        int result = process_events(looper, timeoutMillis, outFd, outEvents, outData);
-        if (result != ALOOPER_POLL_CALLBACK && result != ALOOPER_POLL_WAKE) {
-            return result;
-        }
-    }
+
+    // Match AOSP: skip CALLBACK only. WAKE must be returned so Unity's
+    // vsync / Choreographer wait can unblock instead of spinning in epoll.
+    int result;
+    do {
+        result = process_events(looper, timeoutMillis, outFd, outEvents, outData);
+    } while (result == ALOOPER_POLL_CALLBACK);
+    return result;
 }

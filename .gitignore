@@ -20,3 +20,8 @@ tools/unity_astc/bin/
 pocs/
 build-local/
 output/
+/unityloader
+log.txt
+unity_player.log
+tmp/
+/hollow_knight_viewport.so
