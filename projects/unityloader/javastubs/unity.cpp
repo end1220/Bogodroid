@@ -35,12 +35,30 @@ bool jnivm::com::unity3d::player::UnityPlayerActivity::injectEvent(std::shared_p
         return false;
     }
 
-    // Find the static native method
-    auto method = unityPlayerClass->getMethod("(Landroid/view/InputEvent;)Z", "nativeInjectEvent");
-    if (!method) {
-        verbose("UnityPlayerActivity", "Could not find native method nativeInjectEvent");
-        return false;
+    // Unity 2021: nativeInjectEvent(InputEvent)Z
+    // Unity 2022.3: nativeInjectEvent(InputEvent, int)Z  (extra deviceId; loaders pass 0)
+    static int inject_nargs = -1;
+    static jnivm::MethodProxy inject_method(nullptr, nullptr, nullptr);
+    if (inject_nargs < 0) {
+        auto m2022 = unityPlayerClass->getMethod("(Landroid/view/InputEvent;I)Z", "nativeInjectEvent");
+        if (m2022) {
+            inject_method = m2022;
+            inject_nargs = 2;
+            BD_LOG("INPUT", "nativeInjectEvent (Landroid/view/InputEvent;I)Z");
+        } else {
+            auto m2021 = unityPlayerClass->getMethod("(Landroid/view/InputEvent;)Z", "nativeInjectEvent");
+            if (m2021) {
+                inject_method = m2021;
+                inject_nargs = 1;
+                BD_LOG("INPUT", "nativeInjectEvent (Landroid/view/InputEvent;)Z");
+            } else {
+                inject_nargs = 0;
+                verbose("UnityPlayerActivity", "Could not find native method nativeInjectEvent");
+            }
+        }
     }
+    if (inject_nargs <= 0)
+        return false;
 
     auto key = std::dynamic_pointer_cast<jnivm::android::view::KeyEvent>(event);
     if (g_soft_input_active && key) {
@@ -59,8 +77,11 @@ bool jnivm::com::unity3d::player::UnityPlayerActivity::injectEvent(std::shared_p
         return true;
     }
 
-    // Call the static native method, passing the event object.
-    auto result = method.invoke(frame.getJniEnv(), unityPlayerClass, event).z;
+    jboolean result = JNI_FALSE;
+    if (inject_nargs == 2)
+        result = inject_method.invoke(frame.getJniEnv(), unityPlayerClass, event, (FakeJni::JInt)0).z;
+    else
+        result = inject_method.invoke(frame.getJniEnv(), unityPlayerClass, event).z;
     verbose("UnityPlayerActivity", "Result: %d", result);
     return result == JNI_TRUE;
 }
@@ -375,6 +396,15 @@ FakeJni::JInt jnivm::com::unity3d::player::UnityPlayer::getKeyboardLayout()
     return 0;
 }
 
+void jnivm::com::unity3d::player::UnityPlayer::startActivityIndicator(FakeJni::JInt unused)
+{
+    (void)unused;
+}
+
+void jnivm::com::unity3d::player::UnityPlayer::stopActivityIndicator()
+{
+}
+
 
 
 ///// ReflectionHelper
@@ -501,6 +531,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapp
     { FakeJni::Field<&UnityPlayerActivity::MouseMode> {}, "MouseMode", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&UnityPlayerActivity::MouseInside> {}, "MouseInside", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&UnityPlayerActivity::PressedStates> {}, "PressedStates", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Function<&jnivm::android::app::Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayer) { FakeJni::Constructor<UnityPlayer> {} },
@@ -514,6 +545,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapp
     { FakeJni::Function<&UnityPlayer::setSoftInputStr> {}, "setSoftInputStr", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::setSoftInputStrWithAction> {}, "setSoftInputStr", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::getKeyboardLayout> {}, "getKeyboardLayout", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::startActivityIndicator> {}, "startActivityIndicator", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::stopActivityIndicator> {}, "stopActivityIndicator", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::ReflectionHelper) { FakeJni::Constructor<ReflectionHelper> {} },

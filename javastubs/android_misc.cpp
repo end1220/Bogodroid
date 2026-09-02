@@ -104,6 +104,13 @@ std::shared_ptr<jnivm::android::view::Window> jnivm::android::app::Activity::get
     return std::make_shared<jnivm::android::view::Window>();
 }
 
+std::shared_ptr<jnivm::android::view::WindowManager>
+jnivm::android::app::Activity::getWindowManager()
+{
+    BD_LOG("JBRIDGE", "Activity.getWindowManager()");
+    return std::make_shared<jnivm::android::view::WindowManager>();
+}
+
 std::shared_ptr<jnivm::android::view::View> jnivm::android::app::Activity::findViewById(int id)
 {
     return std::make_shared<jnivm::android::view::SurfaceView>(); // Sure, lol
@@ -157,6 +164,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
     { FakeJni::Function<&Activity::setRequestedOrientation> {}, "setRequestedOrientation", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getResources> {}, "getResources", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getWindow> {}, "getWindow", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::findViewById> {}, "findViewById", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 

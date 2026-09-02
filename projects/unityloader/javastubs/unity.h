@@ -43,6 +43,8 @@ namespace com {
                 void setSoftInputStr(std::shared_ptr<FakeJni::JString> text);
                 void setSoftInputStrWithAction(std::shared_ptr<FakeJni::JString> text, FakeJni::JInt action);
                 FakeJni::JInt getKeyboardLayout();
+                void startActivityIndicator(FakeJni::JInt unused);
+                void stopActivityIndicator();
 
                 static std::shared_ptr<UnityPlayerActivity> currentActivity;
     

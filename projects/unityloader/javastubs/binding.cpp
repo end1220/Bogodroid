@@ -6,7 +6,15 @@
 #endif
 #include "javac.h"
 #include "jnibridge.h"
+#include "logging.h"
 #include "unity.h"
+
+static std::shared_ptr<jnivm::android::view::WindowManager>
+hook_getWindowManager(jnivm::ENV*, jnivm::Object*)
+{
+    BD_LOG("JBRIDGE", "hook Activity.getWindowManager()");
+    return std::make_shared<jnivm::android::view::WindowManager>();
+}
 
 void InitJNIBinding(FakeJni::Jvm* vm)
 {
@@ -64,6 +72,17 @@ void InitJNIBinding(FakeJni::Jvm* vm)
 
     FakeJni::LocalFrame frame(*vm);
     auto classClass = vm->findClass("java/lang/Class");
+
+    // Unity 2022 BlitType=Auto looks up Activity.getWindowManager() and
+    // dereferences the Display. Descriptor inheritance does not always
+    // expose Activity methods on the jobject Unity actually calls; hook
+    // the method on every class Unity might FindClass.
+    if (auto act = vm->findClass("android/app/Activity"))
+        act->HookInstanceFunction(&frame.getJniEnv(), "getWindowManager", &hook_getWindowManager);
+    if (auto upa = vm->findClass("com/unity3d/player/UnityPlayerActivity"))
+        upa->HookInstanceFunction(&frame.getJniEnv(), "getWindowManager", &hook_getWindowManager);
+    if (auto ctx = vm->findClass("android/content/Context"))
+        ctx->HookInstanceFunction(&frame.getJniEnv(), "getWindowManager", &hook_getWindowManager);
 
     // libjnivm does not have an implementation of Field.getDeclaringClass, and adding one is not trivial. So we hardcode a couple of classes here. Bad hack, but eh.
     auto fieldClass = vm->findClass("java/lang/reflect/Field");

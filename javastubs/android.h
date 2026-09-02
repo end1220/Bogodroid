@@ -65,6 +65,9 @@ namespace android {
             long getPresentationDeadlineNanos();
             void getRealMetrics(std::shared_ptr<jnivm::android::util::DisplayMetrics> metrics);
             std::shared_ptr<jnivm::Array<jnivm::android::view::DisplayMode>> getSupportedModes();
+            bool isWideColorGamut();
+            bool isHdr();
+            std::shared_ptr<FakeJni::JString> getName();
         };
         class Surface : public FakeJni::JObject {
         public:
@@ -95,6 +98,16 @@ namespace android {
             DEFINE_CLASS_NAME("android/view/Window")
             void setFlags(int flag1, int flag2);
             std::shared_ptr<jnivm::android::view::View> getDecorView();
+        };
+
+        // Unity 2022 queries Activity.getWindowManager().getDefaultDisplay()
+        // during the first nativeRender. A STUB-MISS here returns a phantom
+        // Invalid jobject; the next GetMethodID/CallObjectMethod on it is a
+        // null deref inside libunity.so.
+        class WindowManager : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/view/WindowManager")
+            std::shared_ptr<jnivm::android::view::Display> getDefaultDisplay();
         };
 
         class MotionRange : public FakeJni::JObject {
@@ -438,6 +451,7 @@ namespace android {
             float getAxisValue(int axis, int pointerIndex);
             float getX(int pointerIndex);
             float getY(int pointerIndex);
+            float getPressure(int pointerIndex);
 
             static std::shared_ptr<FakeJni::JString> axisToString(int axis);
             static std::shared_ptr<MotionEvent> obtain(std::shared_ptr<MotionEvent> other);
@@ -853,6 +867,7 @@ namespace android {
             inline static FakeJni::JString MEDIA_ROUTER_SERVICE = (FakeJni::JString) "media_router";
             inline static FakeJni::JString POWER_SERVICE = (FakeJni::JString) "power";
             inline static FakeJni::JString INPUT_SERVICE = (FakeJni::JString) "input";
+            inline static FakeJni::JString WINDOW_SERVICE = (FakeJni::JString) "window";
 
             inline static int MODE_PRIVATE = 0;
 
@@ -890,6 +905,7 @@ namespace android {
             void setRequestedOrientation(int orientation);
             std::shared_ptr<jnivm::android::content::res::Resources> getResources();
             std::shared_ptr<jnivm::android::view::Window> getWindow();
+            std::shared_ptr<jnivm::android::view::WindowManager> getWindowManager();
             std::shared_ptr<jnivm::android::view::View> findViewById(int id);
 
             // Input

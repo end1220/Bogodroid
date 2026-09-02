@@ -25,6 +25,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::view::Display>();
     vm->registerClass<jnivm::android::view::Surface>();
     vm->registerClass<jnivm::android::view::Window>();
+    vm->registerClass<jnivm::android::view::WindowManager>();
     vm->registerClass<jnivm::android::view::View>();
     vm->registerClass<jnivm::android::view::SurfaceView>();
     vm->registerClass<jnivm::android::view::Choreographer>();
@@ -123,6 +124,8 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerFactory<jnivm::android::content::pm::PackageInfo>("android/content/pm/PackageInfo");
     vm->registerFactory<jnivm::android::content::ContentResolver>("android/content/ContentResolver");
     vm->registerFactory<jnivm::android::view::Window>("android/view/Window");
+    vm->registerFactory<jnivm::android::view::WindowManager>("android/view/WindowManager");
+    vm->registerFactory<jnivm::android::view::Display>("android/view/Display");
     vm->registerFactory<jnivm::android::os::Bundle>("android/os/Bundle");
     vm->registerFactory<jnivm::java::util::Map>("java/util/Map");
 }

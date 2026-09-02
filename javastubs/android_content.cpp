@@ -537,6 +537,9 @@ jnivm::android::content::Context::getSystemService(std::shared_ptr<FakeJni::JStr
     if (*service == INPUT_SERVICE)
         return std::make_shared<jnivm::android::hardware::input::InputManager>();
 
+    if (*service == WINDOW_SERVICE)
+        return std::make_shared<jnivm::android::view::WindowManager>();
+
     verbose("JBRIDGE", "App requesting unknown system service %s", service.get()->c_str());
 
     return nullptr;
@@ -733,6 +736,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&Context::MEDIA_ROUTER_SERVICE> {}, "MEDIA_ROUTER_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::POWER_SERVICE> {}, "POWER_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::INPUT_SERVICE> {}, "INPUT_SERVICE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Context::WINDOW_SERVICE> {}, "WINDOW_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MODE_PRIVATE> {}, "MODE_PRIVATE", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&Context::getSystemService> {}, "getSystemService", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getApplicationInfo> {}, "getApplicationInfo", FakeJni::JMethodID::PUBLIC },

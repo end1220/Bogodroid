@@ -55,6 +55,30 @@ std::shared_ptr<jnivm::Array<jnivm::android::view::DisplayMode>> jnivm::android:
     return array;
 }
 
+bool jnivm::android::view::Display::isWideColorGamut()
+{
+    return false;
+}
+
+bool jnivm::android::view::Display::isHdr()
+{
+    return false;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::android::view::Display::getName()
+{
+    return std::make_shared<FakeJni::JString>("Built-in Screen");
+}
+
+///// WindowManager
+
+std::shared_ptr<jnivm::android::view::Display>
+jnivm::android::view::WindowManager::getDefaultDisplay()
+{
+    BD_LOG("JBRIDGE", "WindowManager.getDefaultDisplay()");
+    return std::make_shared<jnivm::android::view::Display>();
+}
+
 ///// Display$Mode
 
 int jnivm::android::view::DisplayMode::getPhysicalWidth()
@@ -240,6 +264,12 @@ float jnivm::android::view::MotionEvent::getX(int pointerIndex)
 float jnivm::android::view::MotionEvent::getY(int pointerIndex)
 {
     return this->y;
+}
+
+float jnivm::android::view::MotionEvent::getPressure(int pointerIndex)
+{
+    (void)pointerIndex;
+    return 1.0f;
 }
 
 long jnivm::android::view::MotionEvent::getEventTime()
@@ -482,6 +512,9 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&Display::getRefreshRate> {}, "getRefreshRate", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Display::getRealMetrics> {}, "getRealMetrics", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Display::getSupportedModes> {}, "getSupportedModes", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Display::isWideColorGamut> {}, "isWideColorGamut", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Display::isHdr> {}, "isHdr", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Display::getName> {}, "getName", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::DisplayMode) { FakeJni::Constructor<DisplayMode> {} },
@@ -547,6 +580,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&MotionEvent::getActionMasked> {}, "getActionMasked", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getX> {}, "getX", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getY> {}, "getY", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&MotionEvent::getPressure> {}, "getPressure", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::axisToString> {}, "axisToString", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&MotionEvent::obtain> {}, "obtain", FakeJni::JMethodID::STATIC },
 
@@ -560,6 +594,10 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Window) { FakeJni::Constructor<Window> {} },
     { FakeJni::Function<&Window::setFlags> {}, "setFlags", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Window::getDecorView> {}, "getDecorView", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::WindowManager) { FakeJni::Constructor<WindowManager> {} },
+    { FakeJni::Function<&WindowManager::getDefaultDisplay> {}, "getDefaultDisplay", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::View) { FakeJni::Constructor<View> {} },
