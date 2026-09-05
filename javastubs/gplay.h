@@ -11,6 +11,63 @@ namespace jnivm {
 namespace com {
     namespace google {
         namespace android {
+            namespace vending {
+                namespace licensing {
+                    class Obfuscator : public virtual FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/Obfuscator")
+                    };
+
+                    class AESObfuscator : public Obfuscator {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/AESObfuscator", Obfuscator)
+                        AESObfuscator(std::shared_ptr<FakeJni::JByteArray> salt,
+                                      std::shared_ptr<FakeJni::JString> packageName,
+                                      std::shared_ptr<FakeJni::JString> deviceId);
+                    };
+
+                    class Policy : public virtual FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/Policy")
+                        static constexpr jint LICENSED = 0x0100;
+                    };
+
+                    class ServerManagedPolicy : public Policy {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/ServerManagedPolicy", Policy)
+                        ServerManagedPolicy(std::shared_ptr<jnivm::android::content::Context> context,
+                                            std::shared_ptr<Obfuscator> obfuscator);
+                    };
+
+                    class APKExpansionPolicy : public Policy {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/APKExpansionPolicy", Policy)
+                        APKExpansionPolicy(std::shared_ptr<jnivm::android::content::Context> context,
+                                           std::shared_ptr<Obfuscator> obfuscator);
+                    };
+
+                    class LicenseCheckerCallback : public virtual FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/LicenseCheckerCallback")
+                        virtual void allow(jint reason) = 0;
+                        virtual void dontAllow(jint reason) = 0;
+                        virtual void applicationError(jint errorCode) = 0;
+                    };
+
+                    class LicenseChecker : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/google/android/vending/licensing/LicenseChecker")
+                        LicenseChecker(std::shared_ptr<jnivm::android::content::Context> context,
+                                       std::shared_ptr<Policy> policy,
+                                       std::shared_ptr<FakeJni::JString> publicKey);
+                        void checkAccess(std::shared_ptr<LicenseCheckerCallback> callback);
+                        void onDestroy();
+                    };
+                }
+            }
+        }
+
+        namespace android {
             namespace play {
                 namespace core {
                     namespace review {

@@ -313,8 +313,11 @@ struct is_shared_ptr<std::shared_ptr<T>> : std::true_type { };
 template <typename T>
 std::shared_ptr<jnivm::java::lang::Object> autobox(T value)
 {
-    // Path 1: Handle primitive long types
-    if constexpr (std::is_same_v<T, jlong> || std::is_same_v<T, long long> || std::is_same_v<T, long>) {
+    // Path 1: Box primitive integral types used by Java proxy callbacks.
+    if constexpr (std::is_same_v<T, jint> || std::is_same_v<T, int>) {
+        return std::make_shared<jnivm::java::lang::Integer>(value);
+    }
+    else if constexpr (std::is_same_v<T, jlong> || std::is_same_v<T, long long> || std::is_same_v<T, long>) {
         return std::make_shared<jnivm::java::lang::Long>(value);
     }
     // Path 2: Handle std::shared_ptr types

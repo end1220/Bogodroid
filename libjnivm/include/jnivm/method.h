@@ -3,6 +3,7 @@
 #include "object.h"
 #include <string>
 #include <stdexcept>
+#include <functional>
 #include <jni.h>
 
 #include "methodhandlebase.h"
@@ -22,6 +23,7 @@ namespace jnivm {
         bool _static = false;
         void* native = nullptr;
         std::shared_ptr<MethodHandle> nativehandle;
+        std::function<jvalue(JNIEnv*, jobject, jclass, const jvalue*)> dynamic;
 
 #ifdef JNI_DEBUG
         std::string GenerateHeader(const std::string &cname);

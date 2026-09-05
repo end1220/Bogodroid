@@ -41,6 +41,7 @@ toml::table config;
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
 #include <cstdarg>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <dirent.h>
@@ -48,6 +49,9 @@ toml::table config;
 #include <cstdio>
 #include <cinttypes>
 #include <glob.h>
+#include <memory>
+#include <mutex>
+#include <set>
 
 static struct timespec g_bd_start_ts;
 static int g_bd_start_inited = 0;
@@ -373,9 +377,13 @@ namespace il2cpp_patch {
 }
 
 namespace plugin_host {
+    struct JniInitEntry { BogoJniInitCallback cb; void* userdata; };
+    static std::vector<JniInitEntry> g_jni_init_callbacks;
+    static std::set<std::string> g_loaded_paths;
     static std::vector<void*> g_handles;
     static std::string g_config_path;
     static so_module* g_il2cpp = nullptr;
+    static FakeJni::Jvm* g_jvm = nullptr;
     static BogoPluginApi g_api = {};
 
     static const toml::node* config_node(const char* dotted_key) {
@@ -417,7 +425,7 @@ namespace plugin_host {
     }
 
     static uintptr_t api_so_symbol(BogoSoModule* mod, const char* name) {
-        return mod && name ? so_symbol((so_module*)mod, name) : 0;
+        return name ? so_symbol((so_module*)mod, name) : 0;
     }
 
     static void api_hook_address_detour(BogoSoModule* mod, uintptr_t addr, uintptr_t dst, uintptr_t* orig_out) {
@@ -431,6 +439,111 @@ namespace plugin_host {
     static int api_register_il2cpp_post_init(BogoIl2cppPostInitCallback cb, void* userdata) {
         return il2cpp_patch::register_post_init(cb, userdata);
     }
+
+    static int api_register_jni_init(BogoJniInitCallback cb, void* userdata) {
+        if (!cb || !g_jvm) return 0;
+        g_jni_init_callbacks.push_back({cb, userdata});
+        return 1;
+    }
+
+    static uint32_t jni_argument_count(const char* signature) {
+        if (!signature || *signature != '(') return 0;
+        uint32_t count = 0;
+        for (const char* p = signature + 1; *p && *p != ')'; ++count) {
+            while (*p == '[') ++p;
+            if (*p == 'L') {
+                p = strchr(p, ';');
+                if (!p) return 0;
+                ++p;
+            } else if (*p) {
+                ++p;
+            }
+        }
+        return count;
+    }
+
+    static int api_register_jni_class(const char* class_name,
+                                      const BogoJniMethod* methods,
+                                      uint32_t method_count) {
+        if (!g_jvm || !class_name || (!methods && method_count)) return 0;
+        static_assert(sizeof(BogoJniValue) == sizeof(jvalue),
+                      "plugin JNI value must match jvalue");
+
+        auto clazz = g_jvm->findClass(class_name);
+        if (!clazz) return 0;
+        if (!clazz->Instantiate) {
+            std::weak_ptr<jnivm::Class> weak_class = clazz;
+            clazz->Instantiate = [weak_class](jnivm::ENV*) {
+                auto object = std::make_shared<jnivm::Object>();
+                object->clazz = weak_class;
+                return object;
+            };
+        }
+
+        std::lock_guard<std::mutex> lock(clazz->mtx);
+        for (uint32_t i = 0; i < method_count; ++i) {
+            const BogoJniMethod& descriptor = methods[i];
+            if (!descriptor.name || !descriptor.signature || !descriptor.callback)
+                return 0;
+            const bool is_static =
+                (descriptor.flags & BOGO_JNI_METHOD_STATIC) != 0;
+            auto existing = std::find_if(
+                clazz->methods.begin(), clazz->methods.end(),
+                [&](const std::shared_ptr<jnivm::Method>& method) {
+                    return method->_static == is_static &&
+                           method->name == descriptor.name &&
+                           method->signature == descriptor.signature;
+                });
+            auto method = existing != clazz->methods.end()
+                ? *existing
+                : std::make_shared<jnivm::Method>();
+            method->name = descriptor.name;
+            method->signature = descriptor.signature;
+            method->_static = is_static;
+            const uint32_t argument_count =
+                jni_argument_count(descriptor.signature);
+            const BogoJniMethodCallback callback = descriptor.callback;
+            void* userdata = descriptor.userdata;
+            method->dynamic = [callback, userdata, argument_count](
+                JNIEnv* env, jobject object, jclass clazz_ref,
+                const jvalue* arguments) {
+                BogoJniValue result = callback(
+                    env, object ? (void*)object : (void*)clazz_ref,
+                    reinterpret_cast<const BogoJniValue*>(arguments),
+                    argument_count, userdata);
+                jvalue value{};
+                std::memcpy(&value, &result, sizeof(value));
+                return value;
+            };
+            if (existing == clazz->methods.end())
+                clazz->methods.push_back(std::move(method));
+        }
+        return 1;
+    }
+
+    static int api_jni_string_utf8(void* env_ptr, void* string_ref,
+                                   char* output, uint32_t output_size) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        auto string = static_cast<jstring>(string_ref);
+        if (!env || !string) return 0;
+        const char* utf8 = env->GetStringUTFChars(string, nullptr);
+        if (!utf8) return 0;
+        const size_t length = std::strlen(utf8);
+        if (output && output_size) {
+            const size_t copy_length = std::min<size_t>(length, output_size - 1);
+            std::memcpy(output, utf8, copy_length);
+            output[copy_length] = '\0';
+        }
+        env->ReleaseStringUTFChars(string, utf8);
+        return static_cast<int>(length);
+    }
+
+    static void* api_jni_new_string_utf8(void* env_ptr, const char* value) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        return env ? (void*)env->NewStringUTF(value ? value : "") : nullptr;
+    }
+
+    static void set_jvm(FakeJni::Jvm* vm) { g_jvm = vm; }
 
     static void api_log(const char* tag, const char* fmt, ...) {
 #ifdef BD_ENABLE_LOG
@@ -452,6 +565,7 @@ namespace plugin_host {
         api.struct_size = sizeof(api);
         api.config_path = g_config_path.c_str();
         api.il2cpp = (BogoSoModule*)g_il2cpp;
+        api.jvm = g_jvm;
         api.getenv = &api_getenv;
         api.config_get_string = &api_config_get_string;
         api.config_get_bool = &api_config_get_bool;
@@ -459,11 +573,16 @@ namespace plugin_host {
         api.so_symbol = &api_so_symbol;
         api.hook_address_detour = &api_hook_address_detour;
         api.register_il2cpp_post_init = &api_register_il2cpp_post_init;
+        api.register_jni_init = &api_register_jni_init;
+        api.register_jni_class = &api_register_jni_class;
+        api.jni_string_utf8 = &api_jni_string_utf8;
+        api.jni_new_string_utf8 = &api_jni_new_string_utf8;
         api.log = &api_log;
         return api;
     }
 
     static void load_one(const char* path, const BogoPluginApi& api) {
+        if (!path || g_loaded_paths.count(path)) return;
         void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             BD_LOG("PLUGIN", "dlopen failed: %s: %s", path, dlerror());
@@ -476,12 +595,17 @@ namespace plugin_host {
             return;
         }
         int rc = init(&api);
-        if (rc != 0) {
+        if (rc == BOGO_PLUGIN_DEFERRED) {
+            dlclose(handle);
+            return;
+        }
+        if (rc != BOGO_PLUGIN_OK) {
             BD_LOG("PLUGIN", "init failed rc=%d: %s", rc, path);
             dlclose(handle);
             return;
         }
         g_handles.push_back(handle);
+        g_loaded_paths.insert(path);
     }
 
     static void load(so_module* lil2cpp, const char* config_path) {
@@ -512,6 +636,12 @@ namespace plugin_host {
             load_one(gl.gl_pathv[i], g_api);
         }
         globfree(&gl);
+    }
+
+    static void run_jni_init(FakeJni::Jvm* vm) {
+        g_jvm = vm;
+        for (const auto& entry : g_jni_init_callbacks)
+            entry.cb((void*)vm, entry.userdata);
     }
 }
 
@@ -732,6 +862,11 @@ int main(int argc, char* argv[])
 
     // Init config, GLES pointers, JNI VN and bindings
     init_config(config_path_abs.c_str());
+    // Load JNI-aware plugins before class registration. Plugins that need
+    // IL2CPP defer this early phase and are loaded again below.
+    plugin_host::set_jvm(&vm);
+    plugin_host::load(nullptr, config_path_abs.c_str());
+    plugin_host::run_jni_init(&vm);
     // sdl_initialize_gles();
     InitJNIBinding(&vm);
 

@@ -10,9 +10,12 @@
 
 ---
 
-## 现状（2026-09-01 已验证）
+## 现状（2026-09-05 已验证）
 
 空洞骑士（Unity 2020.2.2f1 IL2CPP ARM64）从 Ports 菜单点 **`hk`** 可进关、可操作、系统音量与游戏内音量键有效。
+
+同一个最新版 Release/LTO `unityloader` 已在 Samurai II、Unity 2021、
+Unity 2022 和 Hollow Knight 四个 Ports 目录中运行通过并正常退出。
 
 | 项 | 结果 |
 |---|---|
@@ -56,7 +59,7 @@
 
 ## 1. 真机约束（已验证）
 
-掌机：Anbernic Linux ARM64，IP `172.16.5.189`，Dropbeak agent **0.6.4**，端口 `8080`。  
+掌机：Anbernic Linux ARM64，IP 由 DHCP 分配（最近验证为 `172.16.7.25`），Dropbeak agent **0.6.4**，端口 `8080`。
 Ports 路径：**`/mnt/mmc/Roms/ports`**（不是 `/mnt/sdcard`）。  
 UI：`dmenu.bin` / `launcher.sh`，**不是** Weston。GPU：**Mali-G31**。系统 SDL：**2.0.12**（构建容器 `pkg-config` 报 **2.0.10**，同一代，必须链这份，不要 bundled 新 SDL）。
 
@@ -152,6 +155,7 @@ NEO vendor 树里 **CMake 这一段已经改过一半**（pkg-config、USE_MOLD 
   unityloader          ← 每次迭代只换这个
   unity.toml
   gamecontrollerdb.txt
+  unityloader.d/       ← 只放当前游戏需要的 Plugin ABI 匹配插件
   gamedata/            ← APK 的 assets/ + lib/，推一次
     lib/arm64-v8a/     ← libmain / libunity / libil2cpp / lib_burst_generated
     assets/bin/Data/
@@ -162,6 +166,24 @@ NEO vendor 树里 **CMake 这一段已经改过一半**（pkg-config、USE_MOLD 
 
 `hk.toml` 要点：`displayWidth/Height=640x480`，`dpad_synthesize_hat=false`，`textureMaxDim=512`，`[game_patches.hollow_knight_viewport]` 全开，`[audio] backend="auto"`。  
 `hk.sh` 每次启动合并 PlayerPrefs（`VidOSSet=1` 等，否则 Overscan 引导卡住进关）。插件目标：`cmake --build build-anbernic --target plugin_hollow_knight_viewport`（`EXCLUDE_FROM_ALL`）。
+
+Samurai II 的 Madfinger/Google Play 离线兼容全部位于
+`unityloader.d/samurai2_offline.so`，不在 loader 核心中。其配置必须显式启用：
+
+```toml
+[input]
+controller_name = "Microsoft X-Box 360 pad"
+
+[input.remap]
+guide = "ESCAPE"
+
+[google_play]
+offline = true
+```
+
+游戏目录只部署需要的插件，例如 Hollow Knight 使用
+`hollow_knight_viewport.so`，Samurai II 使用 `samurai2_offline.so`。插件与
+`unityloader` 必须由同一 Plugin ABI 源码构建。
 
 ### 3.5 之后才轮到的（按新游戏日志补）
 
@@ -288,9 +310,10 @@ NEO 的 `BUILD-DOCKER.md` / `Dockerfile.builder`（Ubuntu 22.04 + mold）**不�
 CLI：`D:\Locke\gitee\dropbeak\dist\dropbeak-cli.exe`（或该仓库当前产物路径）。
 
 ```powershell
-$env:DROPBEAK_HOST = "172.16.5.189"
+$deviceIp = "172.16.7.25" # 示例；先确认掌机当前 DHCP 地址
+$env:DROPBEAK_HOST = $deviceIp
 $cli = "D:\Locke\gitee\dropbeak\dist\dropbeak-cli.exe"
-$hb = @("--host", "172.16.5.189", "--port", "8080")
+$hb = @("--host", $deviceIp, "--port", "8080")
 
 & $cli ping @hb
 
@@ -309,7 +332,7 @@ $hb = @("--host", "172.16.5.189", "--port", "8080")
 拉日志：
 
 ```powershell
-.\dist\dropbeak-cli.exe pull /mnt/mmc/Roms/ports/hk/log.txt .\log.txt --host 172.16.5.189 --port 8080
+& $cli pull /mnt/mmc/Roms/ports/hk/log.txt .\log.txt @hb
 ```
 
 音量路径是否生效：日志里应有 `volume backend=sysfs` 和 `SDL_AUDIODRIVER=alsa AUDIODEV=plughw:audiocodec`。
@@ -317,7 +340,7 @@ $hb = @("--host", "172.16.5.189", "--port", "8080")
 大目录（整包 gamedata）不要走 `dropbeak push`：会 tar 进内存，且 CLI 没有 `--timeout`，默认 HTTP 30s。改用：
 
 ```powershell
-tar -cf - -C <本地目录> . | curl --max-time 300 -X POST "http://172.16.5.189:8080/api/v1/files/extract?path=/mnt/mmc/Roms/ports/unity2021" --data-binary @-
+tar -cf - -C <本地目录> . | curl --max-time 300 -X POST "http://${deviceIp}:8080/api/v1/files/extract?path=/mnt/mmc/Roms/ports/unity2021" --data-binary @-
 ```
 
 （agent `ReadTimeout` 300s。具体 query 以当时 agent 版本为准。）
@@ -411,10 +434,11 @@ tar -cf - -C <本地目录> . | curl --max-time 300 -X POST "http://172.16.5.189
 | unityloader 构建容器 | Docker 容器名 **`GlES_Dev`**，镜像 `dropbeak-gles-dev:local`，`ubuntu:20.04` aarch64 |
 | 容器内源码落点（无 bind mount，靠 `docker cp`） | `GlES_Dev:/workspace/Bogodroid` |
 | 容器内构建目录 | `GlES_Dev:/workspace/Bogodroid/build-anbernic/`（迭代）· `build-anbernic-release/`（本阶段 Release） |
-| 掌机 IP / agent | `172.16.5.189:8080`（agent 0.6.4） |
+| 掌机 IP / agent | DHCP 地址（最近验证 `172.16.7.25:8080`，agent 0.6.4） |
 | 掌机 Ports 根（不是 `/mnt/sdcard`） | `/mnt/mmc/Roms/ports` |
 | 已部署的 Unity 2021 测试包 | `/mnt/mmc/Roms/ports/unity2021.sh` + `/mnt/mmc/Roms/ports/unity2021/` |
 | 已部署的空洞骑士测试入口 | `/mnt/mmc/Roms/ports/hk.sh` + `/mnt/mmc/Roms/ports/hk/` |
+| 已验证的插件目录 | `HollowKnight/unityloader.d/hollow_knight_viewport.so`、`Samurai2/unityloader.d/samurai2_offline.so` |
 | 旧 PortMaster 空洞骑士（不要当启动器） | `/mnt/mmc/Roms/ports/` 下 `K_空洞骑士[中].sh` + `hollowknight/` |
 | 已部署且菜单能跑的洞窟物语 | `/mnt/mmc/Roms/ports/` 下洞窟物语脚本 + `CaveStory+/` |
 

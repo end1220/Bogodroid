@@ -5,8 +5,18 @@
 #include <mutex>
 #include <unordered_set>
 #include <string>
+#include <cstring>
 
 using namespace jnivm;
+
+template<class T> static T dynamicValue(jvalue value) {
+    T result{};
+    static_assert(sizeof(T) <= sizeof(value), "JNI return value is too large");
+    std::memcpy(&result, &value, sizeof(T));
+    return result;
+}
+
+template<> void dynamicValue<void>(jvalue) {}
 
 // Print each (kind, class, name, sig) tuple only once.
 void jnivm::log_stub_miss_once(const char* kind, const char* cls, const char* meth, const char* sig) {
@@ -238,7 +248,8 @@ static Method* findNonVirtualOverload(Class*cl, Method*mid) {
         return mid;
     }
     auto res = std::find_if(cl->methods.begin(), cl->methods.end(), [mid](auto&& m) {
-        return !m->_static && mid->name == m->name && mid->signature == m->signature && m->nativehandle;
+        return !m->_static && mid->name == m->name && mid->signature == m->signature &&
+               (m->nativehandle || m->dynamic);
     });
     if(res != cl->methods.end()) {
         return res->get();
@@ -250,7 +261,8 @@ static Method* findVirtualOverload(jnivm::ENV *env, Class*cl, Method*mid) {
     if (!mid) return nullptr;
     if (cl) {
         auto res = std::find_if(cl->methods.begin(), cl->methods.end(), [mid](auto&& m) {
-            return !m->_static && mid->name == m->name && mid->signature == m->signature && m->nativehandle;
+            return !m->_static && mid->name == m->name && mid->signature == m->signature &&
+                   (m->nativehandle || m->dynamic);
         });
         if (res != cl->methods.end()) {
             return res->get();
@@ -275,6 +287,13 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
     if(!id)
         LOG("JNIVM", "CallMethod field is null");
 #endif
+    if (mid && mid->dynamic) {
+        auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(
+            ENV::FromJNIEnv(env), env->GetObjectClass(obj));
+        mid = findVirtualOverload(ENV::FromJNIEnv(env), cl.get(), mid);
+        if (mid && mid->dynamic)
+            return dynamicValue<T>(mid->dynamic(env, obj, nullptr, param));
+    }
     if (mid && mid->nativehandle) {
         auto orig_name = mid->name;
         auto orig_sig = mid->signature;
@@ -353,6 +372,8 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
     if(!id)
         LOG("JNIVM", "CallMethod field is null");
 #endif
+    if (mid && mid->dynamic)
+        return dynamicValue<T>(mid->dynamic(env, obj, cl, param));
     if (mid && mid->nativehandle) {
         auto orig_name = mid->name;
         auto orig_sig = mid->signature;
@@ -404,6 +425,8 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jclass _cl
     if(!id)
         LOG("JNIVM", "CallMethod method is null");
 #endif
+    if (mid && mid->dynamic)
+        return dynamicValue<T>(mid->dynamic(env, nullptr, _cl, param));
     if (mid && mid->nativehandle) {
 #ifdef JNI_TRACE
         LOG("JNIVM", "Call Static Function Class=`%s` Method=`%s` Signature=`%s`", cl ? cl->nativeprefix.data() : "???", mid->name.data(), mid ? mid->signature.data() : "???");

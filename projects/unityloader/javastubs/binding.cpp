@@ -43,6 +43,7 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper::InvocationError>();
     vm->registerClass<jnivm::bitter::jnibridge::JNIBridge>();
+    vm->registerClass<jnivm::bitter::jnibridge::JNIBridgeProxy>();
 
     // Fake FMOD
 

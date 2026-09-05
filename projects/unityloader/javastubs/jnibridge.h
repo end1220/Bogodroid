@@ -6,6 +6,9 @@
 #include "baron/baron.h"
 #include "javac.h"
 #include "logging.h"
+#ifdef BD_ENABLE_GPLAY
+#include "gplay.h"
+#endif
 #include <set>
 #include <string>
 
@@ -21,7 +24,10 @@ namespace bitter {
         class JNIBridgeProxy : public jnivm::java::lang::Runnable,
                                public jnivm::android::os::Handler::Callback,
                                public jnivm::android::view::Choreographer::FrameCallback,
-                               public jnivm::android::hardware::input::InputManager::InputDeviceListener //Stub, since we're probably not handling device additions and removals
+                               public jnivm::android::hardware::input::InputManager::InputDeviceListener
+#ifdef BD_ENABLE_GPLAY
+                               , public jnivm::com::google::android::vending::licensing::LicenseCheckerCallback
+#endif
                                 {
         public:
             // This gives the class a stable, registerable name for your JNI layer.
@@ -44,6 +50,12 @@ namespace bitter {
 
             // --- Implementation of android.view.Choreographer.FrameCallback ---
             void doFrame(jlong frameTimeNanos) override;
+
+#ifdef BD_ENABLE_GPLAY
+            void allow(jint reason) override;
+            void dontAllow(jint reason) override;
+            void applicationError(jint errorCode) override;
+#endif
         };
 
         /**

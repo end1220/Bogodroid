@@ -443,8 +443,11 @@ namespace terraria_autoname {
 }
 
 extern "C" int bogodroid_plugin_init(const BogoPluginApi* api) {
-    if (!api || api->abi_version != BOGODROID_PLUGIN_ABI_VERSION || !api->il2cpp)
+    if (!api || api->abi_version != BOGODROID_PLUGIN_ABI_VERSION ||
+        api->struct_size < sizeof(BogoPluginApi))
         return -1;
+    if (!api->il2cpp)
+        return BOGO_PLUGIN_DEFERRED;
     terraria_autoname::g_api_storage = *api;
     terraria_autoname::g_api = &terraria_autoname::g_api_storage;
     return terraria_autoname::init(api->il2cpp);

@@ -2,6 +2,7 @@
 #include "../globals.h"
 #include "baron/baron.h"
 #include "logging.h"
+#include "jnibridge.h"
 #include "toml++/toml.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -511,8 +512,15 @@ std::shared_ptr<FakeJni::JString> jnivm::com::unity3d::player::ReflectionHelper:
 
 std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::newProxyInstance(std::shared_ptr<UnityPlayer> player, long nativeHandle, std::shared_ptr<jnivm::Class> interface)
 {
-    verbose("UnityReflection", "newProxyInstance(%p, %ld, %s) \n", player.get(), nativeHandle, interface.get()->getName().c_str());
-    return nullptr;
+    if (!interface) {
+        BD_LOG("UnityReflection", "newProxyInstance(%p, %ld, null)", player.get(), nativeHandle);
+        return nullptr;
+    }
+
+    const std::string interfaceName = interface->getName();
+    verbose("UnityReflection", "newProxyInstance(%p, %ld, %s) \n", player.get(), nativeHandle, interfaceName.c_str());
+    return std::make_shared<jnivm::bitter::jnibridge::JNIBridgeProxy>(
+        nativeHandle, std::set<std::string>{interfaceName});
 }
 
 std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::createInvocationError(long nativeHandle, bool toggle)

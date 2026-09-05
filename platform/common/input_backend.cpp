@@ -362,10 +362,16 @@ InputBackend::InputBackend()
         //   stick L/R = AXIS_X/Y, AXIS_Z/RZ ; trigger L/R = AXIS_LTRIGGER/RTRIGGER
         //   dpad = AXIS_HAT_X/Y. Source bits intentionally omit KEYBOARD —
         //   setting it makes Unity spawn a duplicate device and split routing.
-        auto xbox = addDevice(INPUT_ID_XBOX, "Xbox 360 Controller", 0x045E, 0x028E,
+        // Legacy games often select their button layout by exact joystick name.
+        // Keep this configurable so a title can match the name used by its
+        // built-in gamepad database (for example, Samurai II's Xbox profile).
+        const std::string controllerName = config["input"]["controller_name"]
+                                               .value_or<std::string>("Xbox 360 Controller");
+        auto xbox = addDevice(INPUT_ID_XBOX, controllerName, 0x045E, 0x028E,
                               jnivm::android::view::InputDevice::SOURCE_GAMEPAD
                             | jnivm::android::view::InputDevice::SOURCE_JOYSTICK
                             | jnivm::android::view::InputDevice::SOURCE_DPAD);
+        BD_LOG("INPUT", "Android controller name='%s'", controllerName.c_str());
         xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_X,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
         xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Y,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);
         xbox->addMotionRange(jnivm::android::view::MotionEvent::AXIS_Z,        xbox->source, -1.0f, 1.0f, 0.12f, 0.0f);

@@ -614,8 +614,11 @@ namespace hollow_knight_viewport {
 }
 
 extern "C" int bogodroid_plugin_init(const BogoPluginApi* api) {
-    if (!api || api->abi_version != BOGODROID_PLUGIN_ABI_VERSION || !api->il2cpp)
+    if (!api || api->abi_version != BOGODROID_PLUGIN_ABI_VERSION ||
+        api->struct_size < sizeof(BogoPluginApi))
         return -1;
+    if (!api->il2cpp)
+        return BOGO_PLUGIN_DEFERRED;
     hollow_knight_viewport::g_api_storage = *api;
     hollow_knight_viewport::g_api = &hollow_knight_viewport::g_api_storage;
     return hollow_knight_viewport::init(api->il2cpp);

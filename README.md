@@ -145,6 +145,15 @@ For example, to build a project named `hexagonloader` as a `Release` build, you 
 cmake .. -DCMAKE_BUILD_TYPE=Release -DPROJ=hexagonloader
 ```
 
+### Unityloader Plugins
+
+Game-specific compatibility code can be built as shared-library plugins and
+deployed beside a game's TOML file in `unityloader.d/`. Build all bundled
+plugins with `cmake --build build --target unityloader_plugins`, or use a
+specific `plugin_<name>` target. See
+[`projects/unityloader/plugins/README.md`](projects/unityloader/plugins/README.md)
+for the Plugin ABI, lifecycle, configuration, and deployment layout.
+
 # Running
 
 *Please note that most loaders require /proc to be mounted, which is not the case in the chroot environment in the VM image. Run `mount -t proc none /proc` as root inside the chroot environment to fix this.*

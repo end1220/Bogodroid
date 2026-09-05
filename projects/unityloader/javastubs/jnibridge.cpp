@@ -49,6 +49,26 @@ void JNIBridgeProxy::doFrame(jlong frameTimeNanos) {
     }
 }
 
+#ifdef BD_ENABLE_GPLAY
+void JNIBridgeProxy::allow(jint reason) {
+    JNIBridge::invoke(nativeHandle,
+        "com/google/android/vending/licensing/LicenseCheckerCallback",
+        "allow", "(I)V", reason);
+}
+
+void JNIBridgeProxy::dontAllow(jint reason) {
+    JNIBridge::invoke(nativeHandle,
+        "com/google/android/vending/licensing/LicenseCheckerCallback",
+        "dontAllow", "(I)V", reason);
+}
+
+void JNIBridgeProxy::applicationError(jint errorCode) {
+    JNIBridge::invoke(nativeHandle,
+        "com/google/android/vending/licensing/LicenseCheckerCallback",
+        "applicationError", "(I)V", errorCode);
+}
+#endif
+
 // --- JNIBridge Factory and Invoker Implementation ---
 
 std::shared_ptr<jnivm::java::lang::Object> JNIBridge::newInterfaceProxy(FakeJni::JLong j, std::shared_ptr<jnivm::Array<FakeJni::JClass>> classes) {
@@ -96,6 +116,7 @@ void JNIBridge::invoke(long nativeHandle, const char* className, const char* met
 template void JNIBridge::invoke(long, const char*, const char*, const char*); // For Runnable.run()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, std::shared_ptr<jnivm::android::os::Message>); // For Handler.Callback.handleMessage()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, jlong); // for FrameCallback.doFrame()
+template void JNIBridge::invoke(long, const char*, const char*, const char*, jint);
 
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::bitter::jnibridge::JNIBridge) { FakeJni::Function<&JNIBridge::newInterfaceProxy> {}, "newInterfaceProxy", FakeJni::JMethodID::STATIC },

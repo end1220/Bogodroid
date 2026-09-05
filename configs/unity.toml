@@ -31,5 +31,11 @@ backend = "auto"
 # sysfs_max = 10
 # intercept_volume_keys = "auto"
 
+# [input]
+# controller_name = "Xbox 360 Controller"
+# dpad_synthesize_hat = false
 
-
+# Game-specific plugins may define additional sections. For example,
+# samurai2_offline.so requires this explicit opt-in:
+# [google_play]
+# offline = true

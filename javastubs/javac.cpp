@@ -21,17 +21,8 @@ jnivm::java::lang::reflect::Constructor::Constructor(
     : targetClass(clazz)
 {
     const char* sig = constructorSignature ? constructorSignature->c_str() : "()V";
-    auto resolved = clazz ? static_cast<jnivm::Method*>(clazz->getMethod(sig, "<init>")) : nullptr;
-    if (resolved) {
-        name = resolved->name;
-        signature = resolved->signature;
-        _static = resolved->_static;
-        native = resolved->native;
-        nativehandle = resolved->nativehandle;
-    } else {
-        name = "<init>";
-        signature = sig;
-    }
+    name = "<init>";
+    signature = sig;
 }
 
 std::shared_ptr<jnivm::Object>
@@ -50,7 +41,13 @@ jnivm::java::lang::reflect::Constructor::newInstance(std::shared_ptr<jnivm::Arra
     }
 
     auto cls = jnivm::JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(jnivm::ENV::FromJNIEnv(env), targetClass);
-    auto obj = env->NewObjectA(cls, reinterpret_cast<jmethodID>(this), values.empty() ? nullptr : values.data());
+    auto constructor = env->GetMethodID(cls, "<init>", signature.c_str());
+    if (!constructor) {
+        BD_LOG("JavaReflect", "Constructor.newInstance could not resolve %s%s",
+               targetClass->getName().c_str(), signature.c_str());
+        return nullptr;
+    }
+    auto obj = env->NewObjectA(cls, constructor, values.empty() ? nullptr : values.data());
     return jnivm::JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(jnivm::ENV::FromJNIEnv(env), obj);
 }
 
