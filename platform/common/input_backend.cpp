@@ -9,6 +9,7 @@
 #include <string>
 #include <cstring>
 #include <cctype>
+#include <cmath>
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
@@ -525,6 +526,37 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
     }
 
     mControllerAxisState[axis] = motionValue;
+
+    // Diagnostic sampling for physical stick range. SDL can report frequent
+    // axis events, so log at most once per stick every 250 ms and only while
+    // the axis which triggered this event is beyond half travel.
+    if (!isTrigger && std::fabs(motionValue) > 0.5f) {
+        const bool isLeftStick =
+            sdlAxis == SDL_CONTROLLER_AXIS_LEFTX ||
+            sdlAxis == SDL_CONTROLLER_AXIS_LEFTY;
+        const int xAxis = isLeftStick
+            ? jnivm::android::view::MotionEvent::AXIS_X
+            : jnivm::android::view::MotionEvent::AXIS_Z;
+        const int yAxis = isLeftStick
+            ? jnivm::android::view::MotionEvent::AXIS_Y
+            : jnivm::android::view::MotionEvent::AXIS_RZ;
+        static Uint32 lastStickLogMs[2] = { 0, 0 };
+        const int stickIndex = isLeftStick ? 0 : 1;
+        const Uint32 nowMs = SDL_GetTicks();
+        if (lastStickLogMs[stickIndex] == 0 ||
+            nowMs - lastStickLogMs[stickIndex] >= 250) {
+            const float x = mControllerAxisState[xAxis];
+            const float y = mControllerAxisState[yAxis];
+            const float magnitude = std::sqrt(x * x + y * y);
+            BD_LOG("INPUT-AXIS",
+                   "stick=%s sdl_axis=%d raw=%d normalized=%.5f x=%.5f y=%.5f magnitude=%.5f",
+                   isLeftStick ? "left" : "right", sdlAxis,
+                   static_cast<int>(rawAxisValue), static_cast<double>(motionValue),
+                   static_cast<double>(x), static_cast<double>(y),
+                   static_cast<double>(magnitude));
+            lastStickLogMs[stickIndex] = nowMs;
+        }
+    }
 
     auto dev = devices[INPUT_ID_XBOX];
     auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
