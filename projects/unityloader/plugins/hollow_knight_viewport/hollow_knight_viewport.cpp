@@ -166,7 +166,7 @@ namespace hollow_knight_viewport {
         UnityEngine_Rect_o rect = {0.0f, 0.0f, 1.0f, 1.0f};
         set_rect(camera, &rect, g_mi_camera_set_rect_injected);
         static int count = 0;
-        if (count++ < 32) {
+        if (g_debug && count++ < 32) {
             g_api->log("HKVIEW", "%s full camera rect applied camera=%p screen=%dx%d",
                        tag, camera, screen_w(), screen_h());
         }
@@ -235,7 +235,7 @@ namespace hollow_knight_viewport {
         ((orig_float_void_t)g_camera_set_orthographic_size_orig)(
             camera, patched, g_mi_camera_set_orthographic_size);
         static int count = 0;
-        if (count++ < 64) {
+        if (g_debug && count++ < 64) {
             g_api->log("HKVIEW", "%s UI ortho width-safe camera=%p %.4f(base %.4f) -> %.4f scale=%.4f screen=%dx%d",
                        tag, camera, (double)current, (double)base, (double)patched,
                        (double)scale, screen_w(), screen_h());
@@ -283,7 +283,7 @@ namespace hollow_knight_viewport {
     }
 
     static void log_tk2d_camera_state(const char* tag, void* tk2d) {
-        if (!tk2d) return;
+        if (!g_debug || !tk2d) return;
         void* settings = *(void**)((uintptr_t)tk2d + g_tk2d_cam_off.cameraSettings);
         int native_w = *(int*)((uintptr_t)tk2d + g_tk2d_cam_off.nativeResolutionWidth);
         int native_h = *(int*)((uintptr_t)tk2d + g_tk2d_cam_off.nativeResolutionHeight);
@@ -336,7 +336,7 @@ namespace hollow_knight_viewport {
             *(float*)((uintptr_t)tk2d + g_tk2d_cam_off.zoomFactor) = base->zoom_patched;
 
         static int count = 0;
-        if (count++ < 96) {
+        if (g_debug && count++ < 96) {
             UnityEngine_Vector2_o target =
                 *(UnityEngine_Vector2_o*)((uintptr_t)tk2d + g_tk2d_cam_off.targetResolution);
             g_api->log("HKVIEW", "%s tk2d width-safe tk2d=%p target=%.1fx%.1f ortho %.4f(base %.4f)->%.4f ppm %.4f(base %.4f)->%.4f zoom %.4f(base %.4f)->%.4f scale=%.4f screen=%dx%d",
@@ -349,6 +349,7 @@ namespace hollow_knight_viewport {
     }
 
     static void log_game_settings(const char* tag, void* gs) {
+        if (!g_debug) return;
         float overscan = 0.0f;
         int adjusted = -1;
         if (gs && g_gs_overscan_adjustment_off >= 0)
@@ -371,7 +372,7 @@ namespace hollow_knight_viewport {
 
     static void force_aspect_set_overscan_hook(void* self, float adjustment, void* method) {
         static int count = 0;
-        if (count++ < 32) {
+        if (g_debug && count++ < 32) {
             g_api->log("HKVIEW", "ForceCameraAspect.SetOverscanViewport adjustment=%.4f self=%p screen=%dx%d",
                        (double)adjustment, self, screen_w(), screen_h());
         }
@@ -395,7 +396,7 @@ namespace hollow_knight_viewport {
             apply_ui_width_safe_ortho(hud, "ForceCameraAspect.AutoScale");
         }
         static int count = 0;
-        if (count++ < 32) {
+        if (g_debug && count++ < 32) {
             g_api->log("HKVIEW", "ForceCameraAspect.AutoScaleViewport -> %.4f self=%p screen=%dx%d",
                        (double)ret, self, screen_w(), screen_h());
         }
@@ -405,7 +406,7 @@ namespace hollow_knight_viewport {
 
     static void game_cameras_set_overscan_hook(void* self, float value, void* method) {
         static int count = 0;
-        if (count++ < 32) {
+        if (g_debug && count++ < 32) {
             g_api->log("HKVIEW", "GameCameras.SetOverscan value=%.4f self=%p screen=%dx%d",
                        (double)value, self, screen_w(), screen_h());
         }
@@ -436,7 +437,7 @@ namespace hollow_knight_viewport {
         UnityEngine_Rect_o before = rect ? *rect : UnityEngine_Rect_o{0.0f, 0.0f, 0.0f, 0.0f};
         if (g_force_full_viewport) clamp_rect_to_full(rect);
         static int count = 0;
-        if (count++ < 96) {
+        if (g_debug && count++ < 96) {
             g_api->log("HKVIEW", "Camera.set_rect_Injected camera=%p rect %.4f,%.4f %.4fx%.4f -> %.4f,%.4f %.4fx%.4f screen=%dx%d",
                        self,
                        (double)before.x, (double)before.y, (double)before.width, (double)before.height,
@@ -451,7 +452,7 @@ namespace hollow_knight_viewport {
         float scale = g_ui_orthographic_width_safe ? width_safe_scale() : 1.0f;
         float patched = value * scale;
         static int count = 0;
-        if (count++ < 96) {
+        if (g_debug && count++ < 96) {
             g_api->log("HKVIEW", "Camera.set_orthographicSize camera=%p %.4f -> %.4f scale=%.4f screen=%dx%d",
                        self, (double)value, (double)patched, (double)scale, screen_w(), screen_h());
         }

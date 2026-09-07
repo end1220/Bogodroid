@@ -24,6 +24,10 @@ private:
     std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> onMotion;
 
     std::unordered_map<int, float> mControllerAxisState;
+    std::unordered_map<int, float> mControllerRawAxisState;
+    float mLeftStickRange = 1.0f;
+    float mRightStickRange = 1.0f;
+    bool mClampStickVector = false;
 
     InputBackend(); // Private constructor for singleton
     void dispatchControllerAxisMotion(int sdlAxis, Sint16 rawValue);

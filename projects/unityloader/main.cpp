@@ -42,7 +42,6 @@ toml::table config;
 #include <SDL2/SDL_hints.h>
 #include <cstdarg>
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <dirent.h>
 #include <ctime>
@@ -1187,17 +1186,8 @@ int main(int argc, char* argv[])
     // nativeRender() returns false after Application.Quit() — must stop rendering
     // or Unity crashes mid-shutdown. OnApplicationQuit has already saved PlayerPrefs;
     // we only flush our own SharedPreferences and fast-exit (skip dtor cascade).
-    uint64_t nrender_n = 0;
     while (true) {
-        auto t0 = std::chrono::steady_clock::now();
         auto ret4 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
-        nrender_n++;
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (nrender_n <= 8 || (nrender_n % 60) == 0 || dt > 200) {
-            BD_LOG("RENDER", "nativeRender #%llu ret=%d dt=%lld ms",
-                   (unsigned long long)nrender_n, (int)ret4.z, (long long)dt);
-        }
         if (!ret4.z) {
             BD_LOG("EXIT", "nativeRender returned false - Unity requested quit");
             bd_flush_prefs_impl();

@@ -169,9 +169,6 @@ extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
 extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
                                    GLsizei width, GLsizei height)
 {
-    BD_LOG("TEX", "glTexStorage2D %dx%d ifmt=0x%04x mips=%d bound=%u",
-           (int)width, (int)height, (unsigned)internalformat, (int)levels,
-           (unsigned)g_bound_tex_2d);
     GLsizei out_w = width, out_h = height;
     int max_dim = bd_cap_for_format(internalformat);
     int short_side = std::min(width, height);

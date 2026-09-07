@@ -35,6 +35,12 @@ backend = "auto"
 # controller_name = "Xbox 360 Controller"
 # dpad_synthesize_hat = false
 
+# Scale a stick whose SDL values do not reach the full -1..1 range.
+# [input.axis_calibration]
+# left_stick_range = 0.8
+# right_stick_range = 1.0
+# clamp_vector = true
+
 # Game-specific plugins may define additional sections. For example,
 # samurai2_offline.so requires this explicit opt-in:
 # [google_play]

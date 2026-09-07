@@ -117,7 +117,7 @@ docker run --rm --platform linux/arm64 \
 | Flag | 默认 | 作用 |
 |---|---|---|
 | `CMAKE_BUILD_TYPE=Release` | Debug | 启用 LTO + `-fvisibility=hidden` + `-Wl,--gc-sections -s`。9.5 MB → 4.9 MB |
-| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开 `BD_LOG` + jnivm `LOG` 事件行。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
+| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开关键启动、状态、错误、退出的 `BD_LOG` + jnivm `LOG`。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
 | `BD_ENABLE_TRACE=ON` | OFF | 在 LOG 之上额外打开 `BD_DEBUG` / `warning` / `BOOT_LOG` 细节诊断行。需 `BD_ENABLE_LOG=ON` |
 | `BD_ENABLE_VERBOSE=ON` | OFF | 在 LOG 之上额外打开 `verbose()`（365 处 legacy）。需 `BD_ENABLE_LOG=ON` |
 | `IL2CPP_TRACE=ON` | OFF | 在 LOG 之上额外打开 il2cpp 内部 trace（仅 unityloader）。需 `BD_ENABLE_LOG=ON` |
@@ -147,7 +147,7 @@ ls -la "$SD_PORT/unityloader"                                          # 期望 
 strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* 字符串清单
 ```
 
-### 6.1 Release 二进制里应该出现的 BD-* 标签
+### 6.1 Release 二进制里的常用 BD-* 标签
 
 `BD_LOG` 是事件级日志，默认 **关闭**；编译时加 `-DBD_ENABLE_LOG=ON` 才会出现以下标签：
 
@@ -160,7 +160,7 @@ strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* �
 | `[BD-MKPARENT]` | `thunks/libc/stdio.cpp` | open() 自动建父目录时 |
 | `[BD-CAP]` | `thunks/khronos/gles2.cpp` | textureMaxDim 启用值，启动时一次 |
 | `[BD-INPUT-REMAP]` | `platform/common/input_backend.cpp` | wsm.toml 有 key remap 时 |
-| `[BD-INPUT]` | `platform/common/input_backend.cpp` | SDL_Init 失败等关键错误 |
+| `[BD-INPUT]` | `platform/common/input_backend.cpp` | 控制器发现、轴校准配置及关键错误 |
 | `[BD-JNI]` | `javastubs/javac.cpp` | `System.load / loadLibrary` 调用 |
 | `[BD-SEGV]` | `platform/common/debug_utils.cpp` | SIGSEGV 处理器 |
 | `[BD-SYM]` | `loader/so_util.cpp` | 链接没解析到的符号 |
@@ -169,9 +169,21 @@ strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* �
 
 默认 build（不传 `-DBD_ENABLE_LOG=ON`）**以上全没**。崩溃信息仍然会打：`fatal_error` 走 stderr，`SIGSEGV` 走 libc `backtrace_symbols_fd` 直接打栈帧符号（不经 BD_LOG）。
 
-### 6.2 仅在 debug / `-DBD_ENABLE_TRACE=ON` 出现的 BD-* 标签
+日志没有 TOML 分类过滤器，也没有 `[logging].exclude`。常态运行曾经持续输出的
+`nativeRender` 帧耗时、`eglSwapBuffers`、`glTexStorage2D`、控制器逐键事件和摇杆轴采样
+已经从代码中删除，不需要每个游戏携带一份过滤器配置。这样 `BD_ENABLE_LOG=ON` 仍能
+保留控制器识别、EGL 初始化、音频后端、插件安装、退出和错误信息，同时不会让
+`log.txt` 被帧级遥测淹没。
 
-`BD_DEBUG` 是 NDEBUG-gated，Release 编译成 `((void)0)`：
+如果以后需要排查这些热路径，应在问题分支中临时加入有界/限频日志，验证完成后删除，
+而不是扩展公共 TOML。Hollow Knight 视口插件是例外：其已有的
+`[game_patches.hollow_knight_viewport] debug = true` 可临时打开有限次数的摄像机/tk2d 状态日志；
+默认 `false` 时只保留插件加载、hook 和失败状态。
+
+### 6.2 仅在 `-DBD_ENABLE_TRACE=ON` 出现的 BD-* 标签
+
+`BD_DEBUG` 由 `BD_ENABLE_TRACE` 控制；默认关闭时编译成 `((void)0)`。它与
+`CMAKE_BUILD_TYPE` 独立，因此也可以在 Release 构建中临时开启：
 
 `[BD-ASSET]` `[BD-WROPEN]` `[BD-RES]` `[BD-PREFS-GET]` `[BD-PREFS-PUT]`
 `[BD-PREFS-EDIT]` `[BD-PREFS-IO]` `[BD-GRAPHICS-IO]` `[BD-STRGUARD]`

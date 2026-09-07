@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cctype>
 #include <cmath>
+#include <algorithm>
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
@@ -332,6 +333,25 @@ InputBackend::InputBackend()
     input_mouse_accurate_mode = config["input"]["accurate_mode"].value_or<bool>(false);
     input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
     input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
+    if (auto* calibration = config["input"]["axis_calibration"].as_table()) {
+        auto read_range = [&](const char* key, float fallback) {
+            auto configured = (*calibration)[key].value<double>();
+            float value = configured ? static_cast<float>(*configured) : fallback;
+            if (!std::isfinite(value) || value < 0.1f || value > 2.0f) {
+                BD_LOG("INPUT", "ignore input.axis_calibration.%s=%.3f (expected 0.1..2.0)",
+                       key, static_cast<double>(value));
+                return fallback;
+            }
+            return value;
+        };
+        mLeftStickRange = read_range("left_stick_range", 1.0f);
+        mRightStickRange = read_range("right_stick_range", 1.0f);
+        mClampStickVector = (*calibration)["clamp_vector"].value_or<bool>(true);
+        BD_LOG("INPUT", "axis calibration left_range=%.3f right_range=%.3f clamp_vector=%d",
+               static_cast<double>(mLeftStickRange),
+               static_cast<double>(mRightStickRange),
+               mClampStickVector ? 1 : 0);
+    }
     if (!input_dpad_synthesize_hat) {
         BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = false (D-pad → KeyEvent only, no HAT axis)");
     } else {
@@ -410,6 +430,10 @@ InputBackend::InputBackend()
         mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_RTRIGGER] = 0.0f;
         mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_BRAKE]    = 0.0f;
         mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_GAS]      = 0.0f;
+        mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_X]     = 0.0f;
+        mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_Y]     = 0.0f;
+        mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_Z]     = 0.0f;
+        mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_RZ]    = 0.0f;
     }
 }
 
@@ -467,7 +491,6 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
 
     int axis  = -1;
     int axis2 = -1;
-    float value = 0.0f;
     bool isTrigger = false;
 
     switch (sdlAxis) {
@@ -497,40 +520,16 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
 
     if (axis == -1) return;
 
-    if (isTrigger) {
-        value = rawAxisValue / 32767.0f;
-    } else {
-        value = rawAxisValue < 0 ? rawAxisValue / 32768.0f : rawAxisValue / 32767.0f;
-    }
-    float rawValue = value;
-
-    // MotionEvent should carry the normalized physical axis. The InputDevice
-    // MotionRange advertises flat=0.12, and Unity is expected to apply its own
-    // stick deadzone. The filtered value below is only for optional axis->KeyEvent
-    // synthesis.
-    if (!isTrigger) {
-        constexpr float kFlat = 0.12f;
-        if (value > -kFlat && value < kFlat) {
-            value = 0.0f;
-        } else if (value > 0.0f) {
-            value = (value - kFlat) / (1.0f - kFlat);
-        } else {
-            value = (value + kFlat) / (1.0f - kFlat);
-        }
-    }
-    float synthValue = value;
+    const float rawValue = isTrigger
+        ? rawAxisValue / 32767.0f
+        : (rawAxisValue < 0 ? rawAxisValue / 32768.0f : rawAxisValue / 32767.0f);
     float motionValue = rawValue;
 
-    if (axis2 != -1) {
-        mControllerAxisState[axis2] = motionValue;
-    }
-
-    mControllerAxisState[axis] = motionValue;
-
-    // Diagnostic sampling for physical stick range. SDL can report frequent
-    // axis events, so log at most once per stick every 250 ms and only while
-    // the axis which triggered this event is beyond half travel.
-    if (!isTrigger && std::fabs(motionValue) > 0.5f) {
+    if (isTrigger) {
+        mControllerAxisState[axis] = motionValue;
+        if (axis2 != -1)
+            mControllerAxisState[axis2] = motionValue;
+    } else {
         const bool isLeftStick =
             sdlAxis == SDL_CONTROLLER_AXIS_LEFTX ||
             sdlAxis == SDL_CONTROLLER_AXIS_LEFTY;
@@ -540,21 +539,34 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
         const int yAxis = isLeftStick
             ? jnivm::android::view::MotionEvent::AXIS_Y
             : jnivm::android::view::MotionEvent::AXIS_RZ;
-        static Uint32 lastStickLogMs[2] = { 0, 0 };
-        const int stickIndex = isLeftStick ? 0 : 1;
-        const Uint32 nowMs = SDL_GetTicks();
-        if (lastStickLogMs[stickIndex] == 0 ||
-            nowMs - lastStickLogMs[stickIndex] >= 250) {
-            const float x = mControllerAxisState[xAxis];
-            const float y = mControllerAxisState[yAxis];
-            const float magnitude = std::sqrt(x * x + y * y);
-            BD_LOG("INPUT-AXIS",
-                   "stick=%s sdl_axis=%d raw=%d normalized=%.5f x=%.5f y=%.5f magnitude=%.5f",
-                   isLeftStick ? "left" : "right", sdlAxis,
-                   static_cast<int>(rawAxisValue), static_cast<double>(motionValue),
-                   static_cast<double>(x), static_cast<double>(y),
-                   static_cast<double>(magnitude));
-            lastStickLogMs[stickIndex] = nowMs;
+        const float range = isLeftStick ? mLeftStickRange : mRightStickRange;
+
+        mControllerRawAxisState[axis] = rawValue;
+        float x = std::clamp(mControllerRawAxisState[xAxis] / range, -1.0f, 1.0f);
+        float y = std::clamp(mControllerRawAxisState[yAxis] / range, -1.0f, 1.0f);
+        const float magnitude = std::sqrt(x * x + y * y);
+        if (mClampStickVector && magnitude > 1.0f) {
+            x /= magnitude;
+            y /= magnitude;
+        }
+        mControllerAxisState[xAxis] = x;
+        mControllerAxisState[yAxis] = y;
+        motionValue = mControllerAxisState[axis];
+    }
+
+    // MotionEvent carries the configured stick value. The InputDevice
+    // MotionRange advertises flat=0.12, and Unity is expected to apply its own
+    // stick deadzone. The filtered value below is only for optional
+    // axis->KeyEvent synthesis.
+    float synthValue = motionValue;
+    if (!isTrigger) {
+        constexpr float kFlat = 0.12f;
+        if (synthValue > -kFlat && synthValue < kFlat) {
+            synthValue = 0.0f;
+        } else if (synthValue > 0.0f) {
+            synthValue = (synthValue - kFlat) / (1.0f - kFlat);
+        } else {
+            synthValue = (synthValue + kFlat) / (1.0f - kFlat);
         }
     }
 
@@ -771,10 +783,6 @@ void InputBackend::runEventLoop()
                                       action == jnivm::android::view::KeyEvent::ACTION_DOWN,
                                       "controller");
                 bool is_dpad = is_dpad_button(physicalButton);
-                if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-                    BD_LOG("INPUT", "CONTROLLER button=%d logical=%d -> KEYCODE=%d",
-                            physicalButton, logicalButton, keyCode);
-                }
                 auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(
                     devices[INPUT_ID_XBOX], action, keyCode, 0);
                 keyEvent->downTime = bd_stamp_keyevent_downtime(

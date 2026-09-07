@@ -119,7 +119,8 @@ CMake 原先 `target_link_libraries(... SDL2 ...)`，在 GlES_Dev（无 mold、G
 - `find_package(PkgConfig)` + `pkg_check_modules(SDL2 REQUIRED sdl2)`，链接 `${SDL2_LIBRARIES}`。
 - **不要**把 `${SDL2_INCLUDE_DIRS}` 加进 include path：Ubuntu 的 cflags 是 `-I/usr/include/SDL2`，而源码写 `#include "SDL2/SDL.h"`，加上会变成 `SDL2/SDL2/SDL.h`。编译选项只用 `${SDL2_CFLAGS_OTHER}`（例如 `-D_REENTRANT`）。
 - `option(BD_FAKE_EGL ... ON)` → `target_compile_definitions(... FAKE_EGL BD_FAKE_EGL)`。
-- 真机迭代构建打开 `-DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=ON`（TRACE 依赖 LOG，CMake 会强制）。
+- 常规真机迭代使用 `-DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF`；只有定位启动细节时
+  临时打开 TRACE（TRACE 依赖 LOG，CMake 会强制）。
 - 继续 `-static-libstdc++ -static-libgcc`（掌机 libstdc++ 可能偏旧）。`libbsd` / `libmd` 静态链，避免 ROM 上缺 `.so`。
 
 NEO vendor 树里 **CMake 这一段已经改过一半**（pkg-config、USE_MOLD OFF、BD_FAKE_EGL）。合进本目录后以那份为准再补全。
@@ -144,6 +145,24 @@ NEO vendor 树里 **CMake 这一段已经改过一半**（pkg-config、USE_MOLD 
 ### 3.3 `fatal_error` 必须停下来（已做）
 
 `platform/common/logging.h` 的 `fatal_error` 打印后 `fflush` + `abort()`。`BD_LOG` 同样 `fflush`，避免崩溃前日志留在缓冲里。
+
+### 3.3.1 Release 日志策略（已真机验证）
+
+Release 部署使用 `BD_ENABLE_LOG=ON`、`BD_ENABLE_TRACE=OFF`。保留启动阶段、控制器
+识别与映射、EGL 初始化、音频后端、插件安装/失败、Unity 退出及崩溃信息。以下高频
+遥测已直接从代码删除：
+
+- `nativeRender` 周期帧日志；
+- 每次 `eglSwapBuffers` 日志；
+- 每次 `glTexStorage2D` 日志；
+- 控制器逐键事件和临时摇杆轴诊断；
+- Hollow Knight 默认状态下的摄像机/tk2d 详细跟踪。
+
+不要在游戏 TOML 中增加 `[logging]` 或分类 denylist；unityloader 不实现运行时日志
+过滤。Hollow Knight 需要详细视口诊断时，临时设置
+`[game_patches.hollow_knight_viewport] debug = true`，复现结束
+后恢复 `false`。其他热路径需要诊断时，在开发分支加入限频日志并重新构建，问题解决后
+删除诊断代码。
 
 ### 3.4 启动脚本与部署布局
 
@@ -255,7 +274,7 @@ GlES_Dev 是 QEMU，没有 Mali。在容器里跑 unityloader 会在 `eglQuerySt
 
 合进 NEO 源码并改完 §3 之后。
 
-日常迭代（带日志，体积约 110MB）：
+日常迭代使用与部署一致的 Release 配置：保留关键日志，关闭 trace 和调试符号。
 
 ```powershell
 # 1. 源码拷进容器（GlES_Dev 无挂载）
@@ -264,20 +283,23 @@ docker cp D:\Locke\gitee\Bogodroid GlES_Dev:/workspace/Bogodroid
 # 2. 容器内配置 + 编译（在 PowerShell 里整段用单引号，避免 $ 被展开）
 docker exec GlES_Dev bash -c 'set -e
 cd /workspace/Bogodroid
-cmake -S . -B build-anbernic -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -S . -B build-anbernic-release -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
   -DUSE_MOLD=OFF \
   -DBD_FAKE_EGL=ON \
   -DBD_ENABLE_LOG=ON \
-  -DBD_ENABLE_TRACE=ON
-cmake --build build-anbernic -j$(nproc)
+  -DBD_ENABLE_TRACE=OFF \
+  -DBD_ENABLE_OPENSLES_SHIM=OFF
+cmake --build build-anbernic-release --target unityloader -j$(nproc)
 '
 
 # 3. 产物拷回本机
-docker cp GlES_Dev:/workspace/Bogodroid/build-anbernic/unityloader D:\Locke\gitee\Bogodroid\unityloader
+docker cp GlES_Dev:/workspace/Bogodroid/build-anbernic-release/unityloader D:\Locke\gitee\Bogodroid\unityloader
 ```
 
-本阶段 **Release**（无调试符号、无 BD_LOG/TRACE；CMake 对 Release 开 LTO + `-Wl,-s`）。2026-09-01 产物约 **4.5MB**（对照 RelWithDebInfo ~110MB），`readelf -S` 无 `.debug*`：
+本阶段 **Release** 无调试符号，但保留 `BD_LOG` 关键事件；CMake 对 Release 开 LTO +
+`-Wl,-s`。2026-09-07 真机验证产物为 **4,594,584 bytes**（对照旧
+RelWithDebInfo 约 110MB），`readelf -S` 无 `.debug*`：
 
 ```powershell
 docker exec GlES_Dev bash -c 'set -e
@@ -286,7 +308,7 @@ cmake -S . -B build-anbernic-release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DUSE_MOLD=OFF \
   -DBD_FAKE_EGL=ON \
-  -DBD_ENABLE_LOG=OFF \
+  -DBD_ENABLE_LOG=ON \
   -DBD_ENABLE_TRACE=OFF \
   -DBD_ENABLE_OPENSLES_SHIM=OFF
 cmake --build build-anbernic-release -j$(nproc)
@@ -320,7 +342,7 @@ $hb = @("--host", $deviceIp, "--port", "8080")
 # 游戏在跑时 8080 常连不上：先退回 Ports，或：
 & $cli exec 'killall unityloader 2>/dev/null; true' @hb
 
-# loader 约 110MB，必须 --chunk；标志写在子命令后面
+# Release loader 约 4.6MB；仍使用 --chunk 以提高不稳定网络下的上传可靠性。
 & $cli push D:\Locke\gitee\Bogodroid\unityloader /mnt/mmc/Roms/ports/hk/unityloader --force --chunk --progress @hb
 & $cli push D:\Locke\gitee\dropbeak\examples\deploy\hk.toml /mnt/mmc/Roms/ports/hk/hk.toml --force --progress @hb
 & $cli push D:\Locke\gitee\dropbeak\examples\deploy\hk.sh /mnt/mmc/Roms/ports/hk.sh --force --progress @hb
@@ -360,6 +382,11 @@ tar -cf - -C <本地目录> . | curl --max-time 300 -X POST "http://${deviceIp}:
 空洞骑士已到阶段 5。`unity2021` 空场景仍可当 GLES 最小对照。
 
 ### 6.2 日志怎么读
+
+当前日志是启动/状态/错误日志，不再包含帧、swap、纹理上传、逐键或摇杆连续采样。
+2026-09-07 的清理版 ARM64 Release 已在 Samurai II 真机验证通过：剥离 debug 后
+`unityloader` 为 4,594,584 bytes，SHA-256
+`61f50566f2baef00e880ff0bb36d8003f6c8df6091859906867e6ddc928f91ac`。
 
 - `volume backend=passthrough` 但 Anbernic 音量没变 → 没读到 `openbor_volume`，或 `SDL_AUDIODRIVER=pulse`。
 - `OpenGL ES 3.2` / `Mali-G31` 然后立刻 `exited (1)` → 仍是 §3.2 的真 EGL 转发问题。

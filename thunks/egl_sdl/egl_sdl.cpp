@@ -6,7 +6,6 @@
 #include "platform.h"
 #include "so_util.h"
 #include "thunk_gen.h"
-#include <chrono>
 #include <inttypes.h>
 #include <memory>
 #include <dlfcn.h>
@@ -209,17 +208,8 @@ void* getProc(const char* sym)
 EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     EGLSurface surface)
 {
-    static uint64_t swap_n = 0;
-    auto t0 = std::chrono::steady_clock::now();
     bd_sdl_gl_make_current(sdl_ctx);
     SDL_GL_SwapWindow(sdl_win);
-    auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    swap_n++;
-    if (swap_n <= 8 || (swap_n % 60) == 0 || dt > 50) {
-        BD_LOG("EGL_SDL", "eglSwapBuffers #%llu dt=%lld ms",
-               (unsigned long long)swap_n, (long long)dt);
-    }
 
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {
