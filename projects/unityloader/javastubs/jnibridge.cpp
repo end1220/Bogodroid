@@ -12,14 +12,25 @@ using namespace jnivm::bitter::jnibridge;
 
 // --- JNIBridgeProxy Implementation ---
 
-JNIBridgeProxy::JNIBridgeProxy(long handle, const std::set<std::string>& interfaces)
-    : nativeHandle(handle), implementedInterfaces(interfaces) {}
+JNIBridgeProxy::JNIBridgeProxy(long handle, const std::set<std::string>& interfaces,
+                               InvocationMode mode)
+    : nativeHandle(handle), implementedInterfaces(interfaces), invocationMode(mode) {}
+
+template <typename... Args>
+void JNIBridgeProxy::invoke(const char* className, const char* methodName,
+                           const char* methodSig, Args... args) {
+    if (invocationMode == InvocationMode::ManagedGCHandle) {
+        JNIBridge::invokeManaged(nativeHandle, methodName, args...);
+        return;
+    }
+    JNIBridge::invoke(nativeHandle, className, methodName, methodSig, args...);
+}
 
 void JNIBridgeProxy::run() {
     // Runtime check: does this instance actually implement Runnable?
     if (implementedInterfaces.count("java/lang/Runnable")) {
         // Yes, so forward the call to the native engine via the invoker.
-        JNIBridge::invoke(nativeHandle, "java/lang/Runnable", "run", "()V");
+        invoke("java/lang/Runnable", "run", "()V");
     } else {
         // This should not happen if the engine is well-behaved.
         verbose("JNIBridgeProxy", "run() called on a proxy that doesn't implement java/lang/Runnable!");
@@ -30,7 +41,7 @@ bool JNIBridgeProxy::handleMessage(std::shared_ptr<jnivm::android::os::Message> 
     // Runtime check: does this instance actually implement Handler.Callback?
     if (implementedInterfaces.count("android/os/Handler$Callback")) {
         // Yes, so forward the call.
-        JNIBridge::invoke(nativeHandle, "android/os/Handler$Callback", "handleMessage", "(Landroid/os/Message;)Z", msg);
+        invoke("android/os/Handler$Callback", "handleMessage", "(Landroid/os/Message;)Z", msg);
         // The native invoke probably returns a Boolean object. We'll assume null means 'false'.
         return true;
     } else {
@@ -43,9 +54,58 @@ void JNIBridgeProxy::doFrame(jlong frameTimeNanos) {
     if (implementedInterfaces.count("android/view/Choreographer$FrameCallback")) {
         // Note: The native method probably doesn't take an argument. The frame time
         // is usually queried from a native system. We just call the method.
-        JNIBridge::invoke(nativeHandle, "android/view/Choreographer$FrameCallback", "doFrame", "(J)V" /* Check signature! */, frameTimeNanos);
+        invoke("android/view/Choreographer$FrameCallback", "doFrame", "(J)V" /* Check signature! */, frameTimeNanos);
     } else {
         verbose("JNIBridgeProxy", "doFrame() called on a proxy that doesn't implement FrameCallback!");
+    }
+}
+
+void JNIBridgeProxy::onStatusResult(
+    FakeJni::JLong sequence,
+    std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names,
+    std::shared_ptr<FakeJni::JIntArray> statuses,
+    std::shared_ptr<FakeJni::JIntArray> errors) {
+    if (implementedInterfaces.count(
+            "com/unity3d/player/IAssetPackManagerStatusQueryCallback")) {
+        invoke(
+            "com/unity3d/player/IAssetPackManagerStatusQueryCallback",
+            "onStatusResult",
+            "(J[Ljava/lang/String;[I[I)V",
+            sequence, names, statuses, errors);
+    } else {
+        verbose("JNIBridgeProxy", "onStatusResult() called on a proxy that doesn't implement PAD status callback!");
+    }
+}
+
+void JNIBridgeProxy::onStatusUpdate(
+    std::shared_ptr<FakeJni::JString> name,
+    FakeJni::JInt status,
+    FakeJni::JLong transferred,
+    FakeJni::JLong total,
+    FakeJni::JInt error,
+    FakeJni::JInt errorCode) {
+    if (implementedInterfaces.count(
+            "com/unity3d/player/IAssetPackManagerDownloadStatusCallback")) {
+        invoke(
+            "com/unity3d/player/IAssetPackManagerDownloadStatusCallback",
+            "onStatusUpdate",
+            "(Ljava/lang/String;IJJII)V",
+            name, status, transferred, total, error, errorCode);
+    } else {
+        verbose("JNIBridgeProxy", "onStatusUpdate() called on a proxy that doesn't implement PAD download callback!");
+    }
+}
+
+void JNIBridgeProxy::onMobileDataConfirmationResult(FakeJni::JBoolean accepted) {
+    if (implementedInterfaces.count(
+            "com/unity3d/player/IAssetPackManagerMobileDataConfirmationCallback")) {
+        invoke(
+            "com/unity3d/player/IAssetPackManagerMobileDataConfirmationCallback",
+            "onMobileDataConfirmationResult",
+            "(Z)V",
+            accepted);
+    } else {
+        verbose("JNIBridgeProxy", "onMobileDataConfirmationResult() called on a proxy that doesn't implement PAD mobile-data callback!");
     }
 }
 
@@ -111,12 +171,42 @@ void JNIBridge::invoke(long nativeHandle, const char* className, const char* met
     invokeMethod.invoke(frame.getJniEnv(), jniBridgeClass, nativeHandle, interfaceClass, interfaceMethod, argsArray);
 }
 
+template<typename... Args>
+void JNIBridge::invokeManaged(long nativeHandle, const char* methodName, Args... args) {
+    auto reflectionClass = vm.findClass("com/unity3d/player/ReflectionHelper").get();
+    // Unity 2020 registers this handle as a jlong. This is a managed GCHandle,
+    // not the ProxyInvoker* accepted by bitter.jnibridge.JNIBridge.invoke.
+    auto invokeMethod = reflectionClass->getMethod(
+        "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+        "nativeProxyInvoke");
+    auto argsArray = std::make_shared<FakeJni::JArray<jnivm::java::lang::Object>>(sizeof...(args));
+    int i = 0;
+    (((*argsArray)[i++] = autobox(args)), ...);
+    auto name = std::make_shared<FakeJni::JString>(methodName);
+    verbose("JNIBridge", "Invoking managed GCHandle %ld for %s", nativeHandle, methodName);
+    FakeJni::LocalFrame frame(vm);
+    invokeMethod.invoke(frame.getJniEnv(), reflectionClass, nativeHandle, name, argsArray);
+}
+
 
 // Explicit template instantiation is still required to prevent linker errors.
 template void JNIBridge::invoke(long, const char*, const char*, const char*); // For Runnable.run()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, std::shared_ptr<jnivm::android::os::Message>); // For Handler.Callback.handleMessage()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, jlong); // for FrameCallback.doFrame()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, jint);
+template void JNIBridge::invoke(long, const char*, const char*, const char*,
+                                FakeJni::JLong,
+                                std::shared_ptr<FakeJni::JArray<FakeJni::JString>>,
+                                std::shared_ptr<FakeJni::JIntArray>,
+                                std::shared_ptr<FakeJni::JIntArray>);
+template void JNIBridge::invoke(long, const char*, const char*, const char*,
+                                std::shared_ptr<FakeJni::JString>,
+                                FakeJni::JInt,
+                                FakeJni::JLong,
+                                FakeJni::JLong,
+                                FakeJni::JInt,
+                                FakeJni::JInt);
+template void JNIBridge::invoke(long, const char*, const char*, const char*, FakeJni::JBoolean);
 
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::bitter::jnibridge::JNIBridge) { FakeJni::Function<&JNIBridge::newInterfaceProxy> {}, "newInterfaceProxy", FakeJni::JMethodID::STATIC },

@@ -6,11 +6,20 @@
 #include "platform.h"
 #include "so_util.h"
 #include "thunk_gen.h"
+#include <algorithm>
+#include <errno.h>
 #include <inttypes.h>
 #include <memory>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <linux/fb.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <toml++/toml.hpp>
+#include <unistd.h>
+#include <vector>
 extern toml::table config;
 
 // Opaque EGL objects must be distinct, aligned, and readable. 0xDEAD collided
@@ -65,6 +74,110 @@ SDL_GLContext sdl_ctx;
 EGLDisplay egl_display;
 EGLContext egl_context;
 EGLSurface egl_surface;
+
+static uint32_t bd_fb_channel(uint8_t value, const fb_bitfield& field)
+{
+    if (!field.length)
+        return 0;
+    const uint32_t max_value = field.length >= 32
+        ? 0xffffffffu : ((1u << field.length) - 1u);
+    return ((static_cast<uint32_t>(value) * max_value + 127u) / 255u)
+        << field.offset;
+}
+
+static bool bd_cpu_present_frame()
+{
+    static int fb_fd = -1;
+    static uint8_t* fb_map = nullptr;
+    static size_t fb_map_size = 0;
+    static fb_fix_screeninfo finfo = {};
+    static fb_var_screeninfo vinfo = {};
+    static std::vector<uint8_t> rgba;
+    static bool failed = false;
+
+    if (failed)
+        return false;
+    if (!fb_map) {
+        fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+        if (fb_fd < 0 || ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) != 0 ||
+            ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) != 0 ||
+            vinfo.bits_per_pixel != 32) {
+            BD_LOG("EGL_SDL", "CPU present init failed fd=%d bpp=%u errno=%d",
+                   fb_fd, vinfo.bits_per_pixel, errno);
+            if (fb_fd >= 0)
+                close(fb_fd);
+            fb_fd = -1;
+            failed = true;
+            return false;
+        }
+        fb_map_size = finfo.smem_len;
+        void* mapped = mmap(nullptr, fb_map_size, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, fb_fd, 0);
+        if (mapped == MAP_FAILED) {
+            BD_LOG("EGL_SDL", "CPU present mmap failed size=%zu errno=%d",
+                   fb_map_size, errno);
+            close(fb_fd);
+            fb_fd = -1;
+            failed = true;
+            return false;
+        }
+        fb_map = static_cast<uint8_t*>(mapped);
+        BD_LOG("EGL_SDL", "CPU present active fb=%ux%u virtual=%ux%u yoffset=%u stride=%u format=%u:%u/%u:%u/%u:%u/%u:%u",
+               vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
+               vinfo.yoffset, finfo.line_length,
+               vinfo.red.offset, vinfo.red.length,
+               vinfo.green.offset, vinfo.green.length,
+               vinfo.blue.offset, vinfo.blue.length,
+               vinfo.transp.offset, vinfo.transp.length);
+    }
+
+    int drawable_w = 0;
+    int drawable_h = 0;
+    SDL_GL_GetDrawableSize(sdl_win, &drawable_w, &drawable_h);
+    const int copy_w = std::min(drawable_w, static_cast<int>(vinfo.xres));
+    const int copy_h = std::min(drawable_h, static_cast<int>(vinfo.yres));
+    if (copy_w <= 0 || copy_h <= 0 || !glad_glReadPixels)
+        return false;
+    rgba.resize(static_cast<size_t>(drawable_w) * drawable_h * 4u);
+    glad_glFinish();
+    glad_glReadPixels(0, 0, drawable_w, drawable_h, GL_RGBA,
+                      GL_UNSIGNED_BYTE, rgba.data());
+
+    static std::vector<uint32_t> packed;
+    packed.resize(static_cast<size_t>(copy_w) * copy_h);
+    for (int y = 0; y < copy_h; ++y) {
+        const uint8_t* src = rgba.data() +
+            (static_cast<size_t>(drawable_h - 1 - y) * drawable_w * 4u);
+        uint32_t* dst = packed.data() + static_cast<size_t>(y) * copy_w;
+        for (int x = 0; x < copy_w; ++x) {
+            const uint8_t* pixel = src + static_cast<size_t>(x) * 4u;
+            dst[x] = bd_fb_channel(pixel[0], vinfo.red) |
+                     bd_fb_channel(pixel[1], vinfo.green) |
+                     bd_fb_channel(pixel[2], vinfo.blue) |
+                     bd_fb_channel(pixel[3], vinfo.transp);
+        }
+    }
+    // This Allwinner driver can report yoffset=480 while the display engine
+    // continues scanning page 0 after its RCQ state gets out of sync.  Mirror
+    // the frame into every complete virtual page so the visible page updates
+    // without issuing the FBIOPAN_DISPLAY ioctl that deadlocks.
+    const uint32_t page_count = std::max(1u, vinfo.yres_virtual / vinfo.yres);
+    for (uint32_t page = 0; page < page_count; ++page) {
+        const size_t page_offset = static_cast<size_t>(page) * vinfo.yres *
+            finfo.line_length + static_cast<size_t>(vinfo.xoffset) * 4u;
+        for (int y = 0; y < copy_h; ++y) {
+            const size_t dst_offset = page_offset +
+                static_cast<size_t>(y) * finfo.line_length;
+            if (dst_offset + static_cast<size_t>(copy_w) * 4u > fb_map_size)
+                break;
+            memcpy(fb_map + dst_offset,
+                   packed.data() + static_cast<size_t>(y) * copy_w,
+                   static_cast<size_t>(copy_w) * 4u);
+        }
+    }
+    __sync_synchronize();
+    return true;
+}
 
 static void bd_log_sdl_display_mode(const char* label, int display_index)
 {
@@ -209,7 +322,66 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     EGLSurface surface)
 {
     bd_sdl_gl_make_current(sdl_ctx);
-    SDL_GL_SwapWindow(sdl_win);
+
+    const char* cpu_present_value = getenv("BD_EGL_CPU_PRESENT");
+    const bool cpu_present = cpu_present_value && *cpu_present_value &&
+        strcmp(cpu_present_value, "0") != 0;
+
+    // Skul's AndroidDownloadPacks -> PlatformLoader transition can wedge the
+    // Allwinner mali-fbdev backend in sunxi_fb_pan_display.  The Skul plugin
+    // raises this process-local flag only around that bootstrap transition so
+    // Unity can keep advancing the scene without submitting the fatal flip.
+    // A bounded timeout makes the diagnostic self-clearing even if the old
+    // scene is destroyed before its AsyncOperation poll observes completion.
+    static bool transition_pause_active = false;
+    static Uint32 transition_pause_started = 0;
+    static Uint32 transition_pause_ms = 0;
+    static uint32_t transition_skipped = 0;
+    const char* pause_requested = getenv("BD_EGL_SWAP_PAUSE");
+    const bool pause_enabled = pause_requested && *pause_requested &&
+        strcmp(pause_requested, "0") != 0;
+    bool skip_swap = cpu_present;
+    if (cpu_present) {
+        bd_cpu_present_frame();
+        // The target handheld exposes a single CPU core to the process. Keep
+        // the readback/copy fallback near 60 FPS so input, audio and the
+        // Dropbeak service are not starved by an unbounded render loop.
+        SDL_Delay(16);
+    } else if (pause_enabled) {
+        if (!transition_pause_active) {
+            const char* duration = getenv("BD_EGL_SWAP_PAUSE_MS");
+            long parsed = duration ? strtol(duration, nullptr, 10) : 3000;
+            if (parsed < 1 || parsed > 15000)
+                parsed = 3000;
+            transition_pause_ms = static_cast<Uint32>(parsed);
+            transition_pause_started = SDL_GetTicks();
+            transition_skipped = 0;
+            transition_pause_active = true;
+            BD_LOG("EGL_SDL", "pausing SDL swaps for PlatformLoader (max=%u ms)",
+                   transition_pause_ms);
+        }
+        const Uint32 elapsed = SDL_GetTicks() - transition_pause_started;
+        if (elapsed < transition_pause_ms) {
+            ++transition_skipped;
+            skip_swap = true;
+            // Drain each frame's GPU work without presenting it.  Otherwise
+            // the unthrottled transition can queue hundreds of default-FBO
+            // frames and make the first resumed fbdev flip wait forever.
+            if (glad_glFinish)
+                glad_glFinish();
+            SDL_Delay(16);
+        } else {
+            setenv("BD_EGL_SWAP_PAUSE", "0", 1);
+            BD_LOG("EGL_SDL", "resuming SDL swaps after %u ms (%u skipped)",
+                   elapsed, transition_skipped);
+            transition_pause_active = false;
+        }
+    } else {
+        transition_pause_active = false;
+    }
+
+    if (!skip_swap)
+        SDL_GL_SwapWindow(sdl_win);
 
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {

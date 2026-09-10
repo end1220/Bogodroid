@@ -261,6 +261,14 @@ long jnivm::java::lang::System::nanoTime()
     return time_point_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()).time_since_epoch().count();
 }
 
+jint jnivm::java::lang::System::identityHashCode(std::shared_ptr<jnivm::Object> object)
+{
+    // Java only promises stability for an object's lifetime, not a particular
+    // hash algorithm. Fold the native object identity into a signed jint.
+    const uintptr_t identity = reinterpret_cast<uintptr_t>(object.get());
+    return static_cast<jint>(identity ^ (identity >> 32));
+}
+
 // System.load / loadLibrary: no-op. Games typically wrap these in a
 // platform-detect path; on Bogodroid we have no Java-side classloader to
 // register natives, so silent success is safer than throwing — throwing
@@ -581,6 +589,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::System) { FakeJni::Constructor<System> {} },
     { FakeJni::Function<&System::nanoTime> {}, "nanoTime", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&System::identityHashCode> {}, "identityHashCode", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&System::load> {}, "load", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&System::loadLibrary> {}, "loadLibrary", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
@@ -722,8 +731,28 @@ void HookClassExtensions(FakeJni::Jvm* vm)
 
     // Class.getName
     classClass->HookInstanceFunction(&frame.getJniEnv(), "getName", [](jnivm::ENV* env, jnivm::Object* self) -> std::shared_ptr<FakeJni::JString> {
-        verbose("JBRIDGE", "getName for Class %s", self->getClass().getName().c_str());
-        return std::make_shared<FakeJni::JString>(self->getClass().getName());
+        auto representedClass = dynamic_cast<jnivm::Class*>(self);
+        std::string name = representedClass
+            ? representedClass->getName()
+            : self->getClass().getName();
+        // java.lang.Class.getName() uses binary Java names, while jnivm stores
+        // JNI internal names. Unity's proxy unboxer compares against names such
+        // as "java.lang.Integer", so slash-separated names prevent primitive
+        // wrappers from being unboxed and make proxy method lookup fail.
+        std::replace(name.begin(), name.end(), '/', '.');
+        verbose("JBRIDGE", "getName for Class %s", name.c_str());
+        return std::make_shared<FakeJni::JString>(name);
+    });
+
+    // AndroidJNIHelper inspects every boxed proxy argument with Class.isArray.
+    // Class objects in jnivm represent array types using their JNI descriptor.
+    classClass->HookInstanceFunction(&frame.getJniEnv(), "isArray", [](jnivm::ENV*, jnivm::Object* self) -> bool {
+        auto representedClass = dynamic_cast<jnivm::Class*>(self);
+        const bool result = representedClass && !representedClass->getName().empty() &&
+                            representedClass->getName().front() == '[';
+        verbose("JBRIDGE", "isArray for Class %s -> %d",
+                representedClass ? representedClass->getName().c_str() : "(invalid)", result);
+        return result;
     });
 }
 
@@ -735,11 +764,27 @@ void HookObjectExtensions(FakeJni::Jvm* vm)
 
     // Object.getClass
     objClass->HookInstanceFunction(&frame.getJniEnv(), "getClass", [](jnivm::ENV* env, jnivm::Object* self) {
+        // jnivm::String (FakeJni::JString) is a built-in value type and does
+        // not carry a normal Class descriptor.  When it is boxed into the
+        // Object[] used by Unity's proxy bridge, Java code must still see the
+        // runtime type java.lang.String; reporting java.lang.Object makes
+        // AndroidJNIHelper reject the argument and raises a spurious
+        // NullReferenceException while processing PAD callbacks.
+        if (dynamic_cast<FakeJni::JString*>(self)) {
+            verbose("JBRIDGE", "getClass for String -> java/lang/String");
+            return env->GetClass("java/lang/String");
+        }
         verbose("JBRIDGE", "getClass for Object %s", self->getClass().getName().c_str());
         return env->GetClass(self->getClass().getName().c_str());
     });
 
     objClass->HookInstanceFunction(&frame.getJniEnv(), "toString", [](jnivm::ENV* env, jnivm::Object* self) {
+        if (auto string = dynamic_cast<FakeJni::JString*>(self)) {
+            // java.lang.String.toString() returns the string itself.  Unity's
+            // managed proxy unboxer calls this through Object after checking
+            // the runtime class, so a placeholder here corrupts PAD pack names.
+            return std::make_shared<FakeJni::JString>(string->asStdString());
+        }
         verbose("JBRIDGE", "toString for Object %s", self->getClass().getName().c_str());
         return std::make_shared<FakeJni::JString>("I dunno");
     });

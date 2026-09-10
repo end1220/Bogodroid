@@ -32,7 +32,10 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     // vm->registerClass<jnivm::com::unity3d::player::Camera2Wrapper>();
     // vm->registerClass<jnivm::com::unity3d::player::HFPStatus>();
     // vm->registerClass<jnivm::com::unity3d::player::AudioVolumeHandler>();
-    // vm->registerClass<jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks>();
+    vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback>();
+    vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback>();
+    vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback>();
+    vm->registerClass<jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks>();
     // vm->registerClass<jnivm::com::unity3d::player::OrientationLockListener>();
     // vm->registerClass<jnivm::com::google::androidgamesdk::ChoreographerCallback>();
     // vm->registerClass<jnivm::com::google::androidgamesdk::SwappyDisplayManager>();

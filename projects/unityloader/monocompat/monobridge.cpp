@@ -36,6 +36,7 @@ static void* (*mono_runtime_invoke)(void*, void*, void*, void*) = NULL;
 
 // Garbage collection functions
 static uint32_t (*mono_gchandle_new)(void*, bool) = NULL;
+static void* (*mono_gchandle_get_target)(uint32_t) = NULL;
 static void (*mono_gchandle_free)(uint32_t) = NULL;
 static void (*mono_gc_collect)(int) = NULL;
 static uint8_t (*mono_gc_is_incremental)() = NULL;
@@ -178,6 +179,7 @@ void monobridge_init(so_module* mod)
 
     // Garbage collection functions
     mono_gchandle_new = (uint32_t (*)(void*, bool))so_symbol(mod, "mono_gchandle_new");
+    mono_gchandle_get_target = (void* (*)(uint32_t))so_symbol(mod, "mono_gchandle_get_target");
     mono_gchandle_free = (void (*)(uint32_t))so_symbol(mod, "mono_gchandle_free");
     mono_gc_collect = (void (*)(int))so_symbol(mod, "mono_gc_collect");
     mono_gc_is_incremental = (uint8_t (*)())so_symbol(mod, "mono_gc_is_incremental");
@@ -1049,10 +1051,10 @@ void il2cpp_gchandle_new_weakref_impl()
     exit(-1);
 }
 
-void il2cpp_gchandle_get_target_impl()
+void* il2cpp_gchandle_get_target_impl(uint32_t handle)
 {
-    verbose("Monobridge", "Unimplemented call: il2cpp_gchandle_get_target");
-    exit(-1);
+    verbose("Monobridge", "Bridged call: il2cpp_gchandle_get_target");
+    return mono_gchandle_get_target(handle);
 }
 
 void il2cpp_gchandle_free_impl(uint32_t handle)

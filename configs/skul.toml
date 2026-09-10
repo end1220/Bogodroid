@@ -1,0 +1,40 @@
+[paths]
+
+game_files="/gamefiles/skul"
+support_files="/gamefiles/skul"
+
+android_package_code="/gamefiles/skul"
+android_external_files="/gamefiles/skul_external"
+android_files="/gamefiles/skul_internal"
+android_data="/gamefiles/skul_data"
+android_obb_dirs=["/gamefiles/skul_obb"]
+android_source_dirs=["/gamefiles/skul_src"]
+android_cache="/gamefiles/skul_cache"
+
+
+[package]
+
+packageName="com.playdigious.skul"
+versionName="1.0.6"
+mainIntentBundle = {}
+
+
+[device]
+
+displayWidth=640
+displayHeight=480
+displayRotation=0
+displayDpi=320
+displayRefreshRate=60
+
+
+[audio]
+backend = "auto"
+
+
+[unity]
+block_analytics = true
+
+[game_patches.skul_pad]
+enabled = true
+direct_title_scene = false

@@ -4,8 +4,11 @@
 #include "logging.h"
 #include "jnibridge.h"
 #include "toml++/toml.hpp"
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <string>
 
@@ -89,15 +92,239 @@ bool jnivm::com::unity3d::player::UnityPlayerActivity::injectEvent(std::shared_p
 
 ///// PlayAssetDeliveryUnityWrapper
 
+void jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback::onStatusResult(
+    FakeJni::JLong, std::shared_ptr<FakeJni::JArray<FakeJni::JString>>,
+    std::shared_ptr<FakeJni::JIntArray>, std::shared_ptr<FakeJni::JIntArray>)
+{
+}
+
+void jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback::onStatusUpdate(
+    std::shared_ptr<FakeJni::JString>, FakeJni::JInt, FakeJni::JLong,
+    FakeJni::JLong, FakeJni::JInt, FakeJni::JInt)
+{
+}
+
+void jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback::onMobileDataConfirmationResult(
+    FakeJni::JBoolean)
+{
+}
+
+void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::report(
+    std::shared_ptr<FakeJni::JString> name, FakeJni::JInt status, FakeJni::JInt error)
+{
+    BD_LOG("SKULPAD", "status result name=%s status=%d error=%d",
+           name ? name->c_str() : "(null)", (int)status, (int)error);
+    auto callbacks = vm.findClass("com/unity3d/player/UnityCoreAssetPacksStatusCallbacks");
+    if (!callbacks) {
+        BD_LOG("SKULPAD", "status result dropped: callback class not found");
+        return;
+    }
+    auto method = callbacks->getMethod("(Ljava/lang/String;II)V", "nativeStatusQueryResult");
+    if (!method) {
+        BD_LOG("SKULPAD", "nativeStatusQueryResult method is not registered");
+        return;
+    }
+    FakeJni::LocalFrame frame(vm);
+    BD_LOG("SKULPAD", "calling nativeStatusQueryResult");
+    method.invoke(frame.getJniEnv(), this, name, status, error);
+}
+
+void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::onStatusResult(
+    FakeJni::JLong sequence, std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names,
+    std::shared_ptr<FakeJni::JIntArray> statuses, std::shared_ptr<FakeJni::JIntArray> errors)
+{
+    (void)sequence;
+    BD_LOG("SKULPAD", "onStatusResult count=%d", names ? names->getSize() : 0);
+    if (!names || !statuses || !errors)
+        return;
+    const int count = std::min({ names->getSize(), statuses->getSize(), errors->getSize() });
+    for (int i = 0; i < count; ++i)
+        report((*names)[i], (*statuses)[i], (*errors)[i]);
+}
+
+void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::onStatusUpdate(
+    std::shared_ptr<FakeJni::JString> name, FakeJni::JInt status,
+    FakeJni::JLong transferred, FakeJni::JLong total, FakeJni::JInt error,
+    FakeJni::JInt errorCode)
+{
+    BD_LOG("SKULPAD", "onStatusUpdate name=%s status=%d transferred=%lld total=%lld error=%d errorCode=%d",
+           name ? name->c_str() : "(null)", (int)status,
+           (long long)transferred, (long long)total, (int)error, (int)errorCode);
+    report(name, status, errorCode ? errorCode : error);
+}
+
+std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>
+    jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::instance = nullptr;
+
 std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper> jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::init(std::shared_ptr<jnivm::android::content::Context> context)
 {
-    return std::make_shared<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
+    if (!instance)
+        instance = std::make_shared<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
+    verbose("PlayAssetDeliveryUnityWrapper", "init() -> %p", instance.get());
+    return instance;
+}
+
+std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>
+jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getInstance()
+{
+    if (!instance)
+        instance = std::make_shared<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
+    verbose("PlayAssetDeliveryUnityWrapper", "getInstance() -> %p", instance.get());
+    return instance;
 }
 
 bool jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::playCoreApiMissing()
 {
-    verbose("PlayAssetDeliveryUnityWrapper", "We don't have Google Play Core APIs, don't even try. \n");
-    return true;
+    // The Linux loader supplies the PAD result through the IL2CPP hook in
+    // skul_pad.so. Treat the Java Play Core dependency as available so the
+    // managed AndroidAssetPacks path does not abort before reaching it.
+    verbose("PlayAssetDeliveryUnityWrapper", "playCoreApiMissing() -> false (native PAD shim)");
+    return false;
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::cancelAssetPackDownload(
+    std::shared_ptr<FakeJni::JString> name)
+{
+    auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
+    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    cancelAssetPackDownloads(names);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::cancelAssetPackDownloads(
+    std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "cancelAssetPackDownloads(%d)", names ? names->getSize() : 0);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::downloadAssetPack(
+    std::shared_ptr<FakeJni::JString> name,
+    std::shared_ptr<IAssetPackManagerDownloadStatusCallback> callback)
+{
+    auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
+    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    downloadAssetPacks(names, callback);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::downloadAssetPacks(
+    std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names,
+    std::shared_ptr<IAssetPackManagerDownloadStatusCallback> callback)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "downloadAssetPacks(%d) -> completed", names ? names->getSize() : 0);
+    if (!callback)
+        return;
+    // An empty list is a normal success path when every custom pack is already
+    // installed. AssetPackDownloader has called NotifyCustomPackDownloaded for
+    // those packs before reaching Java; after this method returns it observes
+    // the empty list and sets customAssetPacksDownloaded itself. Synthesizing a
+    // status event here would report a pack that is no longer pending and make
+    // the managed callback dereference a missing list/dictionary entry.
+    if (!names || names->getSize() == 0) {
+        BD_LOG("SKULPAD", "empty download list; all custom packs already installed");
+        return;
+    }
+    for (int i = 0; i < names->getSize(); ++i)
+        callback->onStatusUpdate((*names)[i], 4, 1, 1, 0, 0);
+}
+
+std::shared_ptr<FakeJni::JString>
+jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackPath(
+    std::shared_ptr<FakeJni::JString> name)
+{
+    const std::string pack_name = name ? name->c_str() : std::string();
+    verbose("PlayAssetDeliveryUnityWrapper", "getAssetPackPath(%s)",
+            pack_name.empty() ? "(null)" : pack_name.c_str());
+
+    // init_config changes cwd to paths.game_files (the port's gamedata
+    // directory). Unity asks this Java method for both the core data-pack
+    // directory and the custom PAD bundle locations, which are different
+    // directories in the Linux port layout.
+    const std::filesystem::path game_root = std::filesystem::current_path();
+    std::string android_root = config["paths"]["android_files"].value_or<std::string>("../conf");
+    std::filesystem::path custom_root = android_root.empty()
+        ? game_root.parent_path() / "conf"
+        : std::filesystem::path(android_root);
+    if (custom_root.is_relative())
+        custom_root = game_root / custom_root;
+    custom_root = custom_root.lexically_normal();
+
+    std::filesystem::path path;
+    if (pack_name == "UnityDataAssetPack" ||
+        pack_name == "UnityStreamingAssetsPack") {
+        // The Android asset-pack root contains the "assets/" directory.
+        // Returning game_root/assets would make Unity look for
+        // <root>/assets/assets/bin/Data and leaves the core data pack
+        // partially mounted.
+        path = game_root;
+    } else if (pack_name.size() == 32 &&
+               std::all_of(pack_name.begin(), pack_name.end(), [](unsigned char c) {
+                   return std::isxdigit(c) != 0;
+               })) {
+        // Addressables passes the bundle hash through GetAssetPackPath.
+        path = custom_root / "assetpacks" / "CustomFastFollow" / "48" / "48" /
+               "assets" / (pack_name + ".bundle");
+    } else {
+        path = custom_root / "assetpacks" / "CustomFastFollow" / "48" / "48";
+    }
+
+    const std::string path_string = path.lexically_normal().string();
+    BD_LOG("SKULPAD", "getAssetPackPath(%s) -> %s",
+           pack_name.empty() ? "(null)" : pack_name.c_str(), path_string.c_str());
+    return std::make_shared<FakeJni::JString>(path_string);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackState(
+    std::shared_ptr<FakeJni::JString> name,
+    std::shared_ptr<IAssetPackManagerStatusQueryCallback> callback)
+{
+    auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
+    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    getAssetPackStates(names, callback);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackStates(
+    std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names,
+    std::shared_ptr<IAssetPackManagerStatusQueryCallback> callback)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "getAssetPackStates(%d) -> completed", names ? names->getSize() : 0);
+    if (!callback || !names)
+        return;
+    auto statuses = std::make_shared<FakeJni::JIntArray>(names->getSize());
+    auto errors = std::make_shared<FakeJni::JIntArray>(names->getSize());
+    for (int i = 0; i < names->getSize(); ++i) {
+        BD_LOG("SKULPAD", "getAssetPackStates[%d] name=%s status=4 error=0",
+               i, (*names)[i] ? (*names)[i]->c_str() : "(null)");
+        (*statuses)[i] = 4;
+        (*errors)[i] = 0;
+    }
+    callback->onStatusResult(0, names, statuses, errors);
+}
+
+std::shared_ptr<jnivm::Object>
+jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::registerDownloadStatusListener(
+    std::shared_ptr<IAssetPackManagerDownloadStatusCallback> callback)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "registerDownloadStatusListener(%p)", callback.get());
+    return callback;
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::removeAssetPack(
+    std::shared_ptr<FakeJni::JString> name)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "removeAssetPack(%s)", name ? name->c_str() : "(null)");
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::requestToUseMobileData(
+    std::shared_ptr<jnivm::android::app::Activity>,
+    std::shared_ptr<IAssetPackManagerMobileDataConfirmationCallback> callback)
+{
+    if (callback)
+        callback->onMobileDataConfirmationResult(JNI_TRUE);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::unregisterDownloadStatusListener(
+    std::shared_ptr<jnivm::Object> token)
+{
+    verbose("PlayAssetDeliveryUnityWrapper", "unregisterDownloadStatusListener(%p)", token.get());
 }
 
 ///// UnityPlayer
@@ -487,6 +714,11 @@ std::shared_ptr<jnivm::java::lang::reflect::Field> jnivm::com::unity3d::player::
 
     if (strcmp("currentActivity", name) == 0 && strcmp(clazz->getName().c_str(), "com/unity3d/player/UnityPlayer") == 0)
         sig = "Lcom/unity3d/player/UnityPlayerActivity;";
+    else if (strcmp("mUnityPlayer", name) == 0 &&
+             strcmp(clazz->getName().c_str(), "com/unity3d/player/UnityPlayerActivity") == 0)
+        // Unity's AndroidJNIHelper asks for Object, while the actual field is
+        // declared as UnityPlayer in the Android UnityPlayerActivity class.
+        sig = "Lcom/unity3d/player/UnityPlayer;";
     else if (strcmp("PressedStates", name) == 0 && strcmp(clazz->getName().c_str(), "com/unity3d/player/UnityPlayerActivity") == 0)
         sig = "[Z";
     else
@@ -520,7 +752,8 @@ std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::ne
     const std::string interfaceName = interface->getName();
     verbose("UnityReflection", "newProxyInstance(%p, %ld, %s) \n", player.get(), nativeHandle, interfaceName.c_str());
     return std::make_shared<jnivm::bitter::jnibridge::JNIBridgeProxy>(
-        nativeHandle, std::set<std::string>{interfaceName});
+        nativeHandle, std::set<std::string>{interfaceName},
+        jnivm::bitter::jnibridge::JNIBridgeProxy::InvocationMode::ManagedGCHandle);
 }
 
 std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::createInvocationError(long nativeHandle, bool toggle)
@@ -529,9 +762,48 @@ std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::cr
     return std::make_shared<jnivm::com::unity3d::player::ReflectionHelper::InvocationError>(nativeHandle, toggle);
 }
 
-BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper) { FakeJni::Constructor<PlayAssetDeliveryUnityWrapper> {} },
+void jnivm::com::unity3d::player::ReflectionHelper::setNativeExceptionOnProxy(
+    std::shared_ptr<jnivm::Object> proxy, long nativeHandle, bool hasException)
+{
+    // Unity uses this Java helper to associate native exception state with
+    // its InvocationHandler. jnivm invokes the native callback synchronously,
+    // so there is no Java-side handler state to update.
+    verbose("UnityReflection", "setNativeExceptionOnProxy(%p, %ld, %d)\n",
+            proxy.get(), nativeHandle, hasException);
+}
+
+BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback) { FakeJni::Constructor<IAssetPackManagerStatusQueryCallback> {} },
+    { FakeJni::Function<&IAssetPackManagerStatusQueryCallback::onStatusResult> {}, "onStatusResult", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback) { FakeJni::Constructor<IAssetPackManagerDownloadStatusCallback> {} },
+    { FakeJni::Function<&IAssetPackManagerDownloadStatusCallback::onStatusUpdate> {}, "onStatusUpdate", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback) { FakeJni::Constructor<IAssetPackManagerMobileDataConfirmationCallback> {} },
+    { FakeJni::Function<&IAssetPackManagerMobileDataConfirmationCallback::onMobileDataConfirmationResult> {}, "onMobileDataConfirmationResult", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks) { FakeJni::Constructor<UnityCoreAssetPacksStatusCallbacks> {} },
+    { FakeJni::Function<&UnityCoreAssetPacksStatusCallbacks::onStatusResult> {}, "onStatusResult", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityCoreAssetPacksStatusCallbacks::onStatusUpdate> {}, "onStatusUpdate", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper) { FakeJni::Constructor<PlayAssetDeliveryUnityWrapper> {} },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::init> {}, "init", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getInstance> {}, "getInstance", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::playCoreApiMissing> {}, "playCoreApiMissing", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::cancelAssetPackDownload> {}, "cancelAssetPackDownload", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::cancelAssetPackDownloads> {}, "cancelAssetPackDownloads", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::downloadAssetPack> {}, "downloadAssetPack", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::downloadAssetPacks> {}, "downloadAssetPacks", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getAssetPackPath> {}, "getAssetPackPath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getAssetPackState> {}, "getAssetPackState", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getAssetPackStates> {}, "getAssetPackStates", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::registerDownloadStatusListener> {}, "registerDownloadStatusListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::removeAssetPack> {}, "removeAssetPack", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::requestToUseMobileData> {}, "requestToUseMobileData", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::unregisterDownloadStatusListener> {}, "unregisterDownloadStatusListener", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerActivity) { FakeJni::Constructor<UnityPlayerActivity> {} },
@@ -563,6 +835,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapp
     { FakeJni::Function<&ReflectionHelper::getFieldID> {}, "getFieldID", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::getFieldSignature> {}, "getFieldSignature", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::newProxyInstance> {}, "newProxyInstance", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&ReflectionHelper::setNativeExceptionOnProxy> {}, "setNativeExceptionOnProxy", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::createInvocationError> {}, "createInvocationError", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 

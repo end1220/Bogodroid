@@ -874,7 +874,11 @@ int main(int argc, char* argv[])
     auto unityActivity = std::make_shared<jnivm::com::unity3d::player::UnityPlayerActivity>();
     auto unityPlayer = std::make_shared<jnivm::com::unity3d::player::UnityPlayer>();
     auto unityPlayerObj = std::dynamic_pointer_cast<jnivm::Object>(unityPlayer);
+    unityActivity->mUnityPlayer = unityPlayer;
     jnivm::com::unity3d::player::UnityPlayer::currentActivity = unityActivity;
+    BD_LOG("JNI", "UnityPlayerActivity=%p mUnityPlayer=%p currentActivity=%p",
+           unityActivity.get(), unityActivity->mUnityPlayer.get(),
+           jnivm::com::unity3d::player::UnityPlayer::currentActivity.get());
     auto& backend = InputBackend::instance();
 
     int module_count = 0;

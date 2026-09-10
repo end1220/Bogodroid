@@ -172,6 +172,7 @@ namespace java {
         public:
             DEFINE_CLASS_NAME("java/lang/System")
             static long nanoTime();
+            static jint identityHashCode(std::shared_ptr<jnivm::Object> object);
             // Throws UnsatisfiedLinkError so games (e.g. Hollow Knight's
             // NativeInput plugin) fall back to Unity Input when their .so
             // can't be loaded under Bogodroid.
@@ -314,7 +315,10 @@ template <typename T>
 std::shared_ptr<jnivm::java::lang::Object> autobox(T value)
 {
     // Path 1: Box primitive integral types used by Java proxy callbacks.
-    if constexpr (std::is_same_v<T, jint> || std::is_same_v<T, int>) {
+    if constexpr (std::is_same_v<T, jboolean> || std::is_same_v<T, bool>) {
+        return std::make_shared<jnivm::java::lang::Boolean>(value);
+    }
+    else if constexpr (std::is_same_v<T, jint> || std::is_same_v<T, int>) {
         return std::make_shared<jnivm::java::lang::Integer>(value);
     }
     else if constexpr (std::is_same_v<T, jlong> || std::is_same_v<T, long long> || std::is_same_v<T, long>) {
