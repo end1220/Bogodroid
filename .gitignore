@@ -17,6 +17,11 @@ projects/unityloader/monocompat/il2cpp_log_shim.cpp
 __pycache__/
 tools/unity_astc/.cache/
 tools/unity_astc/bin/
+# Local PC01 scratch / probe build outputs (not for commit)
+tools/_pc01_remote.sh
+tools/_pc01_*.sh
+tools/csharp-godot-arm64-kit/**/obj/
+tools/csharp-godot-arm64-kit/**/bin/
 pocs/
 build-local/
 output/
