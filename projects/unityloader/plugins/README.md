@@ -45,6 +45,8 @@ Bundled plugins:
 - `terraria_autoname`: title-specific character naming support.
 - `samurai2_offline`: offline Madfinger Google Play JNI implementation. It
   requires `[google_play] offline = true` in the game's TOML file.
+- `skul_pad`: **archived** Skul PAD/bootstrap hooks (port stopped; keep
+  `game_patches.skul_pad.enabled = false` unless replaying that case study).
 
 JNI callbacks must not allow C++ exceptions to cross the C ABI boundary.
 Passing null as the module to `so_symbol` searches all loaded Android modules;
