@@ -50,6 +50,18 @@ JNI callbacks must not allow C++ exceptions to cross the C ABI boundary.
 Passing null as the module to `so_symbol` searches all loaded Android modules;
 passing `api->il2cpp` restricts the lookup to that module.
 
+## Present callbacks (ABI v3)
+
+Plugins that need work on the Unity render/present thread (for example polling
+an `AsyncOperation` while `BD_EGL_CPU_PRESENT` is armed) must register via:
+
+```c
+api->register_present_callback(my_cb, userdata);
+```
+
+Do **not** export game-specific symbols for the core to `dlsym`. The host calls
+`bd_plugin_run_present_callbacks()` from `eglSwapBuffers`.
+
 ## Plugin logging
 
 Plugins use the host `api->log` callback and follow the loader's compile-time
