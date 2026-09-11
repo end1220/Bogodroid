@@ -110,6 +110,15 @@ namespace com {
                 void startActivityIndicator(FakeJni::JInt unused);
                 void stopActivityIndicator();
 
+                // Unity 2022 player JNI used at boot; return safe no-ops.
+                static std::shared_ptr<jnivm::android::app::Notification> getNotificationFromIntent(
+                    std::shared_ptr<jnivm::android::content::Intent> intent);
+                static FakeJni::JBoolean isUaaLUseCase();
+                static std::shared_ptr<FakeJni::JString> getNetworkProxySettings(
+                    std::shared_ptr<FakeJni::JString> url);
+                void addPhoneCallListener();
+                void hidePreservedContent();
+
                 static std::shared_ptr<UnityPlayerActivity> currentActivity;
     
             };
@@ -136,4 +145,67 @@ namespace com {
     }
 }
 }
+
+namespace jnivm {
+namespace com {
+namespace unity {
+namespace androidnotifications {
+    class NotificationCallback : public FakeJni::JObject {
+    public:
+        DEFINE_CLASS_NAME("com/unity/androidnotifications/NotificationCallback")
+    };
+
+    // Minimal stubs so Unity.Notifications.Android.JniApi.FindMethod succeeds.
+    class UnityNotificationManager : public FakeJni::JObject {
+    public:
+        DEFINE_CLASS_NAME("com/unity/androidnotifications/UnityNotificationManager")
+
+        inline static FakeJni::JString KEY_FIRE_TIME = (FakeJni::JString)"fireTime";
+        inline static FakeJni::JString KEY_ID = (FakeJni::JString)"id";
+        inline static FakeJni::JString KEY_INTENT_DATA = (FakeJni::JString)"data";
+        inline static FakeJni::JString KEY_LARGE_ICON = (FakeJni::JString)"largeIcon";
+        inline static FakeJni::JString KEY_REPEAT_INTERVAL = (FakeJni::JString)"repeatInterval";
+        inline static FakeJni::JString KEY_NOTIFICATION = (FakeJni::JString)"unityNotification";
+        inline static FakeJni::JString KEY_SMALL_ICON = (FakeJni::JString)"smallIcon";
+        inline static FakeJni::JString KEY_SHOW_IN_FOREGROUND = (FakeJni::JString)"showInForeground";
+        inline static FakeJni::JString KEY_BIG_PICTURE = (FakeJni::JString)"bigPicture";
+        inline static FakeJni::JString KEY_BIG_LARGE_ICON = (FakeJni::JString)"bigLargeIcon";
+        inline static FakeJni::JString KEY_BIG_CONTENT_TITLE = (FakeJni::JString)"bigContentTitle";
+        inline static FakeJni::JString KEY_BIG_SUMMARY_TEXT = (FakeJni::JString)"bigSummaryText";
+        inline static FakeJni::JString KEY_BIG_CONTENT_DESCRIPTION = (FakeJni::JString)"bigContentDescription";
+        inline static FakeJni::JString KEY_BIG_SHOW_WHEN_COLLAPSED = (FakeJni::JString)"bigShowWhenCollapsed";
+
+        static std::shared_ptr<jnivm::Object> getNotificationManagerImpl(
+            std::shared_ptr<jnivm::Object> activity,
+            std::shared_ptr<jnivm::Object> callback);
+
+        std::shared_ptr<jnivm::android::app::Notification> getNotificationFromIntent(
+            std::shared_ptr<jnivm::android::content::Intent> intent);
+
+        static void setNotificationIcon(
+            std::shared_ptr<jnivm::Object> builder,
+            std::shared_ptr<FakeJni::JString> largeIconPath,
+            std::shared_ptr<FakeJni::JString> smallIconPath);
+        static void setNotificationColor(std::shared_ptr<jnivm::Object> builder, FakeJni::JInt color);
+        static FakeJni::JInt getNotificationColor(std::shared_ptr<jnivm::Object> notification);
+        static void setNotificationUsesChronometer(std::shared_ptr<jnivm::Object> builder, FakeJni::JBoolean uses);
+        static void setNotificationGroupAlertBehavior(std::shared_ptr<jnivm::Object> builder, FakeJni::JInt behavior);
+        static FakeJni::JInt getNotificationGroupAlertBehavior(std::shared_ptr<jnivm::Object> notification);
+        static std::shared_ptr<FakeJni::JString> getNotificationChannelId(std::shared_ptr<jnivm::Object> notification);
+
+        // Instance API on the manager returned by getNotificationManagerImpl.
+        FakeJni::JInt scheduleNotification(std::shared_ptr<jnivm::Object> builder, FakeJni::JBoolean customized);
+        void cancelNotification(FakeJni::JInt id);
+        void cancelAllNotifications();
+        void cancelAllPendingNotificationIntents();
+        FakeJni::JBoolean areNotificationsEnabled();
+        FakeJni::JInt areNotificationsEnabledInt();
+        std::shared_ptr<jnivm::android::app::Notification::Builder> createNotificationBuilder(
+            std::shared_ptr<FakeJni::JString> channelId);
+    };
+}
+}
+}
+}
+
 #endif

@@ -42,11 +42,12 @@ jmethodID FromReflectedMethod(JNIEnv *env, jobject obj) {
 	}
 };
 jfieldID FromReflectedField(JNIEnv *env, jobject obj) {
-	if(obj && env->functions->IsSameObject(env, env->functions->GetObjectClass(env, obj), FindClass(env, "java/lang/reflect/Field"))) {
+	// Bogodroid ReflectionHelper returns jnivm::Field* as jobject. Those objects
+	// are not always tagged with java/lang/reflect/Field in typecheck, which made
+	// Unity's GetFieldID treat a successful lookup as "not found" (e.g. Notification.extras).
+	if (obj)
 		return (jfieldID) obj;
-	} else {
-		return nullptr;
-	}
+	return nullptr;
 };
 jobject ToReflectedMethod(JNIEnv * env, jclass c, jmethodID mid, jboolean isStatic) {
 	auto method = (Method*)mid;
@@ -258,12 +259,39 @@ jint EnsureLocalCapacity(JNIEnv * env, jint cap) {
 	return 0;
 };
 jobject AllocObject(JNIEnv *env, jclass cl) {
-	LOG("JNIVM", "Not Implemented Method AllocObject called");
-	return nullptr;
+	auto clazz = JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), cl);
+	if (!clazz)
+		return nullptr;
+	if (!clazz->Instantiate) {
+		std::weak_ptr<jnivm::Class> weak = clazz;
+		clazz->Instantiate = [weak](jnivm::ENV*) {
+			auto object = std::make_shared<jnivm::Object>();
+			object->clazz = weak;
+			return object;
+		};
+	}
+	return JNITypes<std::shared_ptr<jnivm::Object>>::ToJNIReturnType(
+		ENV::FromJNIEnv(env), clazz->Instantiate(ENV::FromJNIEnv(env)));
 };
 
 jclass GetObjectClass(JNIEnv *env, jobject jo) {
-	return jo ? JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(ENV::FromJNIEnv(env), JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(ENV::FromJNIEnv(env), jo)->getClassInternal(ENV::FromJNIEnv(env))) : env->FindClass("Invalid");
+	if (!jo)
+		return env->FindClass("Invalid");
+	auto obj = JNITypes<std::shared_ptr<jnivm::Object>>::JNICast(ENV::FromJNIEnv(env), jo);
+	if (!obj) {
+#ifndef NDEBUG
+		LOG("JNIVM", "GetObjectClass: JNICast failed for %p", (void*)jo);
+#endif
+		return env->FindClass("Invalid");
+	}
+	auto cl = obj->getClassInternal(ENV::FromJNIEnv(env));
+	if (!cl) {
+#ifndef NDEBUG
+		LOG("JNIVM", "GetObjectClass: clazz weak expired for %p", (void*)jo);
+#endif
+		return env->FindClass("Invalid");
+	}
+	return JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(ENV::FromJNIEnv(env), cl);
 };
 jboolean IsInstanceOf(JNIEnv *env, jobject jo, jclass cl) {
     const jboolean result = jo && IsAssignableFrom(env, GetObjectClass(env, jo), cl);

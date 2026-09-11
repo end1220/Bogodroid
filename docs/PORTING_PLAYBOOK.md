@@ -79,6 +79,19 @@ aarch64-linux-gnu-strip --strip-unneeded unityloader unityloader.d/*.so
 2. 每帧工作用 `register_present_callback`，不要让核心 `dlsym` 游戏名符号。
 3. PAD 路径补丁 / IL2CPP hook 留在插件。
 
+## 4.1 单机掌机：优先跳过在线 SDK（重要经验）
+
+掌机 Ports **默认无 Google Play / 推送 / 广告归因**。Boot 里若串了 Adjust / Firebase / AppLovin(MAX) / Play Games：
+
+| 做法 | 何时用 |
+|------|--------|
+| **IL2CPP 早跳过**托管入口（`InitFirebase`→继续 `StartGame`，空掉 `*Manager.Initialization`） | **优先**。目标是让游戏进 `BundleManager` / 主场景，而不是把 SDK 跑通 |
+| JNI `sdk-skip` / FakeJni 空 stub | 反射 `AndroidJavaObject` 调用时防 NRE；**不能**代替跳过 Boot 门闩 |
+| 大面积 `dlsym` 假实现 Firebase C++ | **慎用**。假指针/`strdup` 易 `free()`/`double free` ABRT；最多只 nop `SWIGRegister*` |
+
+反例（PC01）：花大量时间修 Adjust/Firebase JNI 与 native stub，引擎已能刷帧却长期黑屏；一旦 `InitFirebase` bypass→`StartGame`，立刻进 splash。  
+细则与当前卡点见 [`PC01_HANDOFF.md`](PC01_HANDOFF.md)。
+
 ## 5. 选游戏与引擎初判
 
 | 信号 | 含义 |

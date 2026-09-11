@@ -743,7 +743,43 @@ int jnivm::android::content::Context::checkCallingOrSelfPermission(std::shared_p
     return jnivm::android::content::pm::PackageManager::PERMISSION_GRANTED; // Sure why not, what could go wrong....
 }
 
-///// Intent — getExtras migrated to registerFactory (Bundle).
+std::shared_ptr<jnivm::android::content::res::AssetManager>
+jnivm::android::content::Context::getAssets()
+{
+    BD_LOG("JBRIDGE", "Context.getAssets()");
+    return std::make_shared<jnivm::android::content::res::AssetManager>();
+}
+
+std::shared_ptr<jnivm::android::content::pm::PackageManager>
+jnivm::android::content::Context::getPackageManager()
+{
+    return std::make_shared<jnivm::android::content::pm::PackageManager>();
+}
+
+std::shared_ptr<jnivm::android::content::ContentResolver>
+jnivm::android::content::Context::getContentResolver()
+{
+    return std::make_shared<jnivm::android::content::ContentResolver>();
+}
+
+std::shared_ptr<jnivm::java::io::File>
+jnivm::android::content::Context::getObbDir()
+{
+    // No OBB on this port layout; empty path File is enough for null-safe callers.
+    return std::make_shared<jnivm::java::io::File>(std::make_shared<FakeJni::JString>(""));
+}
+
+std::shared_ptr<jnivm::Array<jnivm::java::io::File>>
+jnivm::android::content::Context::getObbDirs()
+{
+    return std::make_shared<jnivm::Array<jnivm::java::io::File>>();
+}
+
+std::shared_ptr<jnivm::android::os::Bundle>
+jnivm::android::content::Intent::getExtras()
+{
+    return std::make_shared<jnivm::android::os::Bundle>();
+}
 
 ///// Content Descriptors
 
@@ -837,12 +873,14 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Function<&Context::getDataDir> {}, "getDataDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getCacheDir> {}, "getCacheDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getExternalCacheDir> {}, "getExternalCacheDir", FakeJni::JMethodID::PUBLIC },
-    // getAssets / getPackageManager / getResources / getWindow /
-    // getContentResolver -> registerFactory in android_descriptors.cpp.
-    // getObbDir / getObbDirs -> STUB-MISS path returns null (same as before).
+    { FakeJni::Function<&Context::getAssets> {}, "getAssets", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getPackageManager> {}, "getPackageManager", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDir> {}, "getObbDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDirs> {}, "getObbDirs", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::checkCallingOrSelfPermission> {}, "checkCallingOrSelfPermission", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::Intent) { FakeJni::Constructor<Intent> {} },
-    // getExtras -> registerFactory in android_descriptors.cpp.
+    { FakeJni::Function<&Intent::getExtras> {}, "getExtras", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR

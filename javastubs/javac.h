@@ -45,6 +45,9 @@ namespace java {
         // to it via BEGIN_NATIVE_DESCRIPTOR. Instead this stub class shares
         // the JNI name "java/lang/String" — registering both maps to the
         // same VM Class object, so methods land in the same method table.
+        // WARNING: registerClass<StringStubs> overwrites Class::Instantiate
+        // with Factory<StringStubs>; HookStringExtensions must restore a
+        // JString factory (see javac.cpp) or getBytes/equals will SEGV.
         class StringStubs : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("java/lang/String")
@@ -209,6 +212,8 @@ namespace java {
             std::shared_ptr<FakeJni::JString> path;
             File(std::shared_ptr<FakeJni::JString> path);
             std::shared_ptr<FakeJni::JString> getPath();
+            std::shared_ptr<FakeJni::JString> getAbsolutePath();
+            std::shared_ptr<FakeJni::JString> getParent();
             std::shared_ptr<FakeJni::JString> toString();
             jlong getFreeSpace();
             jlong getUsableSpace();

@@ -1,6 +1,7 @@
 # Bogodroid Agent Notes
 
-新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)。Skul 已止损。
+新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)。Skul 已止损。  
+**PC01 进行中**：交接见 [`docs/PC01_HANDOFF.md`](docs/PC01_HANDOFF.md)。
 
 ## 日志 / 构建开关（必读）
 

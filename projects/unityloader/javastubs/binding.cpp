@@ -45,6 +45,8 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayer>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper::InvocationError>();
+    vm->registerClass<jnivm::com::unity::androidnotifications::NotificationCallback>();
+    vm->registerClass<jnivm::com::unity::androidnotifications::UnityNotificationManager>();
     vm->registerClass<jnivm::bitter::jnibridge::JNIBridge>();
     vm->registerClass<jnivm::bitter::jnibridge::JNIBridgeProxy>();
 
@@ -88,18 +90,28 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     if (auto ctx = vm->findClass("android/content/Context"))
         ctx->HookInstanceFunction(&frame.getJniEnv(), "getWindowManager", &hook_getWindowManager);
 
-    // libjnivm does not have an implementation of Field.getDeclaringClass, and adding one is not trivial. So we hardcode a couple of classes here. Bad hack, but eh.
+    // libjnivm Field.getDeclaringClass — Unity GetFieldID for instance fields
+    // re-resolves via declaring class + JNI GetFieldID. Prefer Field::declaringClass
+    // (set by ReflectionHelper); keep a few hardcoded names as fallback.
     auto fieldClass = vm->findClass("java/lang/reflect/Field");
     fieldClass->HookInstanceFunction(&frame.getJniEnv(), "getDeclaringClass", [vm](jnivm::ENV* env, jnivm::Object* self) -> std::shared_ptr<jnivm::java::lang::Class> {
         if (self == nullptr)
             return nullptr;
         auto selfField = dynamic_cast<jnivm::java::lang::reflect::Field*>(self);
-        verbose("getDeclaringClass","%s - %s", selfField->name.c_str(), selfField->type.c_str());
+        if (!selfField)
+            return nullptr;
+        if (auto decl = selfField->declaringClass.lock())
+            return decl;
+        BD_LOG("UnityReflection", "getDeclaringClass fallback name=%s type=%s",
+               selfField->name.c_str(), selfField->type.c_str());
         if (selfField->name == "currentActivity")
             return vm->findClass("com/unity3d/player/UnityPlayer");
         if (selfField->name == "PressedStates" || selfField->name == "mUnityPlayer" ||
             selfField->name == "MouseMode" || selfField->name == "MouseInside")
             return vm->findClass("com/unity3d/player/UnityPlayerActivity");
-        return nullptr; // TODO: Implement this generally once Field tracks its owner class.
+        if (selfField->name == "extras" || selfField->name == "flags" ||
+            selfField->name == "number" || selfField->name == "when")
+            return vm->findClass("android/app/Notification");
+        return nullptr;
     });
 }

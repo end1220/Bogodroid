@@ -17,6 +17,9 @@ endif()
 # Set the build options for the libjnivm library.
 set(JNIVM_ENABLE_GC ON CACHE BOOL "Enable garbage collector in libjnivm")
 set(JNIVM_USE_FAKE_JNI_CODEGEN ON CACHE BOOL "Use fake JNI codegen in libjnivm")
+# Needed so unknown object field getters (e.g. Adjust LogLevel.SUPPRESS) and
+# unresolved object returns fabricate dummy instances instead of null → NRE.
+set(JNIVM_ENABLE_RETURN_NON_ZERO ON CACHE BOOL "jnivm: fabricate non-null object defaults")
 
 # Conditionally enable debug features for libjnivm only for Debug builds
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

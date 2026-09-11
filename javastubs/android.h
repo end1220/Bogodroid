@@ -554,6 +554,15 @@ namespace android {
             DEFINE_CLASS_NAME("android/os/Bundle")
             bool containsKey(std::shared_ptr<FakeJni::JString> key);
             std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def);
+            // Overload used by Unity.Notifications (no default).
+            std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key);
+            FakeJni::JBoolean getBoolean(std::shared_ptr<FakeJni::JString> key, FakeJni::JBoolean def);
+            FakeJni::JInt getInt(std::shared_ptr<FakeJni::JString> key, FakeJni::JInt def);
+            FakeJni::JLong getLong(std::shared_ptr<FakeJni::JString> key, FakeJni::JLong def);
+            void putBoolean(std::shared_ptr<FakeJni::JString> key, FakeJni::JBoolean val);
+            void putInt(std::shared_ptr<FakeJni::JString> key, FakeJni::JInt val);
+            void putLong(std::shared_ptr<FakeJni::JString> key, FakeJni::JLong val);
+            void putString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> val);
         };
 
         // Factory-stubbed. See android_descriptors.cpp.
@@ -894,15 +903,19 @@ namespace android {
             std::shared_ptr<jnivm::java::io::File> getExternalFilesDir(std::shared_ptr<FakeJni::JString> path);
             static std::shared_ptr<jnivm::java::io::File> getExternalFilesDirInternal();
             int checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission);
-            // getAssets / getPackageManager / getResources / getWindow /
-            // getContentResolver / getObbDir / getObbDirs -> STUB-MISS path
-            // (registerFactory in android_descriptors.cpp).
+            // Real hooks (not STUB-MISS/factory-only): Unity looks these up on
+            // Context/Activity and needs nativehandle, not just defaultVal factories.
+            std::shared_ptr<jnivm::android::content::res::AssetManager> getAssets();
+            std::shared_ptr<jnivm::android::content::pm::PackageManager> getPackageManager();
+            std::shared_ptr<jnivm::android::content::ContentResolver> getContentResolver();
+            std::shared_ptr<jnivm::java::io::File> getObbDir();
+            std::shared_ptr<jnivm::Array<jnivm::java::io::File>> getObbDirs();
         };
 
         class Intent : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/content/Intent")
-            // getExtras -> registerFactory (Bundle).
+            std::shared_ptr<jnivm::android::os::Bundle> getExtras();
         };
     }
 
@@ -915,6 +928,7 @@ namespace android {
             int getRequestedOrientation();
             void setRequestedOrientation(int orientation);
             std::shared_ptr<jnivm::android::content::res::Resources> getResources();
+            std::shared_ptr<jnivm::android::content::res::AssetManager> getAssets();
             std::shared_ptr<jnivm::android::view::Window> getWindow();
             std::shared_ptr<jnivm::android::view::WindowManager> getWindowManager();
             std::shared_ptr<jnivm::android::view::View> findViewById(int id);
@@ -924,6 +938,36 @@ namespace android {
             virtual bool onKeyDown(int keyCode, std::shared_ptr<android::view::KeyEvent> event) { return false; }
             virtual bool onKeyUp(int keyCode, std::shared_ptr<android::view::KeyEvent> event) { return false; }
             virtual bool onGenericMotionEvent(std::shared_ptr<android::view::MotionEvent> event) { return false; }
+        };
+
+        // Minimal stub for Unity notification JNI lookups.
+        class Notification : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/app/Notification")
+
+            // android.app.Notification extras / flags used by Unity.Notifications.
+            inline static FakeJni::JString EXTRA_TITLE = (FakeJni::JString) "android.title";
+            inline static FakeJni::JString EXTRA_TEXT = (FakeJni::JString) "android.text";
+            inline static FakeJni::JString EXTRA_SHOW_CHRONOMETER = (FakeJni::JString) "android.showChronometer";
+            inline static FakeJni::JString EXTRA_BIG_TEXT = (FakeJni::JString) "android.bigText";
+            inline static FakeJni::JString EXTRA_SHOW_WHEN = (FakeJni::JString) "android.showWhen";
+            inline static int FLAG_AUTO_CANCEL = 0x10;
+            inline static int FLAG_GROUP_SUMMARY = 0x200;
+
+            // Instance fields bound by Unity.Notifications CollectFields.
+            std::shared_ptr<jnivm::android::os::Bundle> extras =
+                std::make_shared<jnivm::android::os::Bundle>();
+            int flags = 0;
+            int number = 0;
+            jlong when = 0;
+
+            std::shared_ptr<FakeJni::JString> getGroup();
+            std::shared_ptr<FakeJni::JString> getSortKey();
+
+            class Builder : public FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("android/app/Notification$Builder")
+            };
         };
 
         class NativeActivity : public jnivm::android::app::Activity {

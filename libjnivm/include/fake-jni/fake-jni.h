@@ -273,7 +273,12 @@ namespace FakeJni {
                                         }
 #define BEGIN_NATIVE_DESCRIPTOR(name, ...)  std::shared_ptr<jnivm::Class> name ::getDescriptor() {\
                                                 auto cl = jnivm::ENV::FromJNIEnv(&FakeJni::JniEnvContext().getJniEnv())->GetClass< name >( name ::getClassName().data());\
-                                                if(cl->methods.size() == 0 && cl->fields.size() == 0 && !cl->Instantiate && !cl->baseclasses) {\
+                                                /* Always register once. Do NOT gate on methods.empty(): GetMethodID may\
+                                                 * insert unresolved stubs first, which would permanently skip HookInstance\
+                                                 * and leave STUB-MISS for real FakeJni methods (e.g. Activity.getAssets). */\
+                                                static bool registered = false;\
+                                                if (!registered) {\
+                                                    registered = true;\
                                                     registerClass();\
                                                 }\
                                                 return cl;\

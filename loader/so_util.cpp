@@ -616,6 +616,26 @@ void so_relocate_all(so_module* mod)
     });
 }
 
+namespace {
+
+// Only stub SWIG *register* callbacks as pure no-ops. Returning fake objects /
+// strdup strings for Create*/Variant*/Name* caused free()/double-free ABRT
+// once Firebase type init succeeded. Unresolved Create/Check symbols fall
+// through to EntryPointNotFound — catchable, previously yielded live black
+// screen instead of abort.
+void sdk_swig_register_nop(void) {}
+
+uintptr_t sdk_missing_native_stub(const char* symbol)
+{
+    if (!symbol)
+        return 0;
+    if (strncmp(symbol, "SWIGRegister", 12) == 0)
+        return (uintptr_t)&sdk_swig_register_nop;
+    return 0;
+}
+
+} // namespace
+
 uintptr_t so_resolve_link(so_module* mod, const char* symbol)
 {
     if (symbol != NULL && strlen(symbol) >= 3 && symbol[0] == 'g' && symbol[1] == 'l' && symbol[2] != 'a') {
@@ -663,6 +683,12 @@ uintptr_t so_resolve_link(so_module* mod, const char* symbol)
                 return link;
         curr = curr->next;
     }
+
+    // Only SWIGRegister* get a void nop so type init can pass the first
+    // DllImport; everything else (Create/Check/Variant/…) stays unresolved →
+    // EntryPointNotFound (catchable). Broad Firebase stubs caused free/double-free.
+    if (symbol && strncmp(symbol, "SWIGRegister", 12) == 0)
+        return sdk_missing_native_stub(symbol);
 
     return 0;
 }

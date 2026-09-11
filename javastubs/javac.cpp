@@ -23,6 +23,26 @@ jnivm::java::lang::reflect::Constructor::Constructor(
     const char* sig = constructorSignature ? constructorSignature->c_str() : "()V";
     name = "<init>";
     signature = sig;
+    // Match GetMethodID's <init> rewrite so NewObject (CallStatic) defaultVal
+    // can Instantiation when needed; also ensure the target can be allocated.
+    if (targetClass) {
+        auto acbrack = signature.find(')');
+        if (acbrack != std::string::npos) {
+            signature.erase(acbrack + 1);
+            signature.append("L");
+            signature.append(targetClass->nativeprefix);
+            signature.append(";");
+        }
+        if (!targetClass->Instantiate) {
+            std::weak_ptr<jnivm::Class> weak = targetClass;
+            targetClass->Instantiate = [weak](jnivm::ENV*) {
+                auto object = std::make_shared<jnivm::Object>();
+                object->clazz = weak;
+                return object;
+            };
+        }
+    }
+    _static = true;
 }
 
 std::shared_ptr<jnivm::Object>
@@ -174,6 +194,26 @@ jnivm::java::io::File::File(std::shared_ptr<FakeJni::JString> path)
 std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getPath()
 {
     return path;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getAbsolutePath()
+{
+    return path ? path : std::make_shared<FakeJni::JString>("");
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getParent()
+{
+    if (!path)
+        return nullptr;
+    std::string p = path->asStdString();
+    while (!p.empty() && (p.back() == '/' || p.back() == '\\'))
+        p.pop_back();
+    auto pos = p.find_last_of("/\\");
+    if (pos == std::string::npos)
+        return nullptr;
+    if (pos == 0)
+        return std::make_shared<FakeJni::JString>("/");
+    return std::make_shared<FakeJni::JString>(p.substr(0, pos));
 }
 
 std::shared_ptr<FakeJni::JString> jnivm::java::io::File::toString()
@@ -521,6 +561,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     END_NATIVE_DESCRIPTOR
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::io::File) { FakeJni::Constructor<File, std::shared_ptr<FakeJni::JString>> {} },
     { FakeJni::Function<&File::getPath> {}, "getPath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getAbsolutePath> {}, "getAbsolutePath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getParent> {}, "getParent", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::getFreeSpace> {}, "getFreeSpace", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::getUsableSpace> {}, "getUsableSpace", FakeJni::JMethodID::PUBLIC },
@@ -646,17 +688,33 @@ void HookStringExtensions(FakeJni::Jvm* vm)
     FakeJni::LocalFrame frame(*vm);
     auto stringClass = vm->findClass("java/lang/String");
 
+    // StringStubs::registerClass does GetClass<StringStubs>("java/lang/String")
+    // and overwrites Instantiate with Factory<StringStubs> (plain JObject).
+    // defaultVal / AllocObject then mint non-JString "strings"; getBytes equals
+    // dynamic_cast and SEGV (PC01 tombstone: getBytes + N5jnivm6ObjectE).
+    vm->registerFactory<FakeJni::JString>("java/lang/String");
+    if (stringClass) {
+        stringClass->Instantiate = [](jnivm::ENV*) {
+            return std::static_pointer_cast<jnivm::Object>(
+                std::make_shared<FakeJni::JString>());
+        };
+    }
+
     // String.equals
     stringClass->HookInstanceFunction(&frame.getJniEnv(), "equals", [](jnivm::ENV* env, jnivm::Object* self, jnivm::Object* obj) {
-        verbose("JBRIDGE", "String %s == %s = %d", (*dynamic_cast<FakeJni::JString*>(self)).c_str(), (*dynamic_cast<FakeJni::JString*>(obj)).c_str(), (*dynamic_cast<FakeJni::JString*>(self)) == (*dynamic_cast<FakeJni::JString*>(obj)));
-        return (*dynamic_cast<FakeJni::JString*>(self)) == (*dynamic_cast<FakeJni::JString*>(obj));
+        auto* a = dynamic_cast<FakeJni::JString*>(self);
+        auto* b = dynamic_cast<FakeJni::JString*>(obj);
+        if (!a || !b)
+            return false;
+        verbose("JBRIDGE", "String %s == %s = %d", a->c_str(), b->c_str(), (*a) == (*b));
+        return (*a) == (*b);
     });
 
     // Hook constructor with lambda
     stringClass->Hook(&frame.getJniEnv(), "<init>",
         [](jnivm::ENV* env, jnivm::Class* c, std::shared_ptr<jnivm::Array<jbyte>> bytes,
             std::shared_ptr<jnivm::String> charset) -> std::shared_ptr<jnivm::String> {
-            std::string charsetName = charset.get()->asStdString();
+            std::string charsetName = charset ? charset->asStdString() : std::string("UTF-8");
             auto byteData = bytes.get()->getArray();
             auto byteSize = bytes.get()->getSize();
             std::string result = "";
@@ -672,8 +730,9 @@ void HookStringExtensions(FakeJni::Jvm* vm)
     stringClass->HookInstanceFunction(&frame.getJniEnv(), "getBytes",
         [](jnivm::ENV* env, jnivm::Object* self, std::shared_ptr<jnivm::String> charset)
             -> std::shared_ptr<jnivm::Array<jbyte>> {
-            std::string charsetName = charset.get()->asStdString();
-            std::string stringValue = (*dynamic_cast<FakeJni::JString*>(self)).asStdString();
+            std::string charsetName = charset ? charset->asStdString() : std::string("UTF-8");
+            auto* js = dynamic_cast<FakeJni::JString*>(self);
+            std::string stringValue = js ? js->asStdString() : std::string();
 
             std::vector<jbyte> bytes;
 

@@ -86,6 +86,8 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
 
     // App
     vm->registerClass<jnivm::android::app::Activity>();
+    vm->registerClass<jnivm::android::app::Notification>();
+    vm->registerClass<jnivm::android::app::Notification::Builder>();
     vm->registerClass<jnivm::android::app::NativeActivity>();
     vm->registerClass<jnivm::android::app::DialogInterface>();
     vm->registerClass<jnivm::android::app::DialogInterfaceOnClickListener>();

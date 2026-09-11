@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -698,9 +699,165 @@ void jnivm::com::unity3d::player::UnityPlayer::stopActivityIndicator()
 {
 }
 
+std::shared_ptr<jnivm::android::app::Notification>
+jnivm::com::unity3d::player::UnityPlayer::getNotificationFromIntent(
+    std::shared_ptr<jnivm::android::content::Intent> intent)
+{
+    (void)intent;
+    return nullptr;
+}
+
+FakeJni::JBoolean jnivm::com::unity3d::player::UnityPlayer::isUaaLUseCase()
+{
+    return FakeJni::JBoolean(false);
+}
+
+std::shared_ptr<FakeJni::JString>
+jnivm::com::unity3d::player::UnityPlayer::getNetworkProxySettings(
+    std::shared_ptr<FakeJni::JString> url)
+{
+    (void)url;
+    return std::make_shared<FakeJni::JString>("");
+}
+
+void jnivm::com::unity3d::player::UnityPlayer::addPhoneCallListener()
+{
+}
+
+void jnivm::com::unity3d::player::UnityPlayer::hidePreservedContent()
+{
+}
+
 
 
 ///// ReflectionHelper
+
+namespace {
+
+// Handheld has no push / ads / analytics SDKs. Unity binds Notification*,
+// Adjust, AppLovin/MAX, etc. via reflection; missing FindMethod/Field aborts
+// boot (seen: AdjustConfig.<init> STUB-MISS → NRE → BundleManager never runs).
+// Auto-insert unresolved Method/Field stubs so Find* succeeds and Call* /
+// NewObject return JNI defaults / dummy instances.
+bool is_lenient_sdk_jni_class(const std::shared_ptr<jnivm::java::lang::Class>& clazz)
+{
+    if (!clazz)
+        return false;
+    // FakeJni stores short name in `name` ("Notification") and the JNI binary
+    // path in `nativeprefix` ("android/app/Notification"). Match either.
+    auto match = [](const std::string& s) {
+        std::string n = s;
+        for (char& c : n) {
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+            if (c == '.')
+                c = '/';
+        }
+        if (n.find("notification") != std::string::npos)
+            return true;
+        if (n.find("androidnotifications") != std::string::npos)
+            return true;
+        if (n.find("com/adjust/") != std::string::npos || n.find("adjust") == 0)
+            return true;
+        if (n.find("applovin") != std::string::npos)
+            return true;
+        if (n.find("maxunity") != std::string::npos)
+            return true;
+        if (n.find("firebase") != std::string::npos)
+            return true;
+        if (n.find("loglevel") != std::string::npos &&
+            (n.find("adjust") != std::string::npos || n.size() <= 16))
+            return true;
+        return false;
+    };
+    return match(clazz->name) || match(clazz->nativeprefix);
+}
+
+void ensure_class_instantiate(const std::shared_ptr<jnivm::java::lang::Class>& clazz)
+{
+    if (!clazz || clazz->Instantiate)
+        return;
+    std::weak_ptr<jnivm::Class> weak = clazz;
+    clazz->Instantiate = [weak](jnivm::ENV*) {
+        auto object = std::make_shared<jnivm::Object>();
+        object->clazz = weak;
+        return object;
+    };
+}
+
+void bind_field_declaring_class(const std::shared_ptr<jnivm::Field>& field,
+                                const std::shared_ptr<jnivm::java::lang::Class>& clazz)
+{
+    if (field && clazz)
+        field->declaringClass = clazz;
+}
+
+std::shared_ptr<jnivm::Method> make_sdk_method_stub(
+    const std::shared_ptr<jnivm::java::lang::Class>& clazz,
+    const char* name, const char* sig, bool isStatic)
+{
+    ensure_class_instantiate(clazz);
+    auto stub = std::make_shared<jnivm::Method>();
+    stub->name = name ? name : "";
+    stub->signature = sig ? sig : "";
+    // Adjust/Unity sometimes resolve constructors via getMethodID("<init>") as
+    // "static"; keep the stub callable either way.
+    if (name && std::strcmp(name, "<init>") == 0)
+        stub->_static = false;
+    else
+        stub->_static = isStatic;
+    // Never leave getClass() as a no-handle stub — Call returns null → NRE.
+    if (name && std::strcmp(name, "getClass") == 0) {
+        stub->signature = "()Ljava/lang/Class;";
+        stub->_static = false;
+        stub->dynamic = [](JNIEnv* env, jobject object, jclass, const jvalue*) -> jvalue {
+            jvalue out{};
+            out.l = object ? env->GetObjectClass(object) : nullptr;
+            return out;
+        };
+    }
+    {
+        std::lock_guard<std::mutex> lock(clazz->mtx);
+        clazz->methods.push_back(stub);
+    }
+    return stub;
+}
+
+std::shared_ptr<jnivm::Field> make_sdk_field_stub(
+    const std::shared_ptr<jnivm::java::lang::Class>& clazz,
+    const char* name, const char* type, bool isStatic)
+{
+    ensure_class_instantiate(clazz);
+    auto stub = std::make_shared<jnivm::Field>();
+    stub->name = name ? name : "";
+    // Empty type: Unity often asks for KEY_*/EXTRA_* without a JNI type.
+    stub->type = (type && type[0]) ? type : "Ljava/lang/String;";
+    if (name && std::strncmp(name, "FLAG_", 5) == 0)
+        stub->type = "I";
+    // Enum-like constants (LogLevel.SUPPRESS): prefer class-typed object so
+    // defaultVal can Instantiate a dummy instance under JNI_RETURN_NON_ZERO.
+    if (name && (std::strcmp(name, "SUPPRESS") == 0 ||
+                 std::strcmp(name, "VERBOSE") == 0 ||
+                 std::strcmp(name, "DEBUG") == 0 ||
+                 std::strcmp(name, "INFO") == 0 ||
+                 std::strcmp(name, "WARN") == 0 ||
+                 std::strcmp(name, "ERROR") == 0 ||
+                 std::strcmp(name, "ASSERT") == 0)) {
+        if (!clazz->nativeprefix.empty())
+            stub->type = "L" + clazz->nativeprefix + ";";
+        else
+            stub->type = "Ljava/lang/Object;";
+    }
+    stub->_static = isStatic;
+    stub->declaringClass = clazz;
+    {
+        std::lock_guard<std::mutex> lock(clazz->mtx);
+        clazz->fields.push_back(stub);
+    }
+    return stub;
+}
+
+} // namespace
 
 std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::player::ReflectionHelper::getConstructorID(std::shared_ptr<jnivm::java::lang::Class> clazz, std::shared_ptr<FakeJni::JString> signature)
 {
@@ -718,35 +875,106 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
         return nullptr;
 
     const char* name = methodName.get()->c_str();
-    const char* sig;
+    // Unity.Notifications sometimes passes Java binary names with '.' instead of '/'.
+    std::string wantSig = signature ? signature->asStdString() : std::string();
+    for (char& c : wantSig) {
+        if (c == '.')
+            c = '/';
+    }
+    const char* wantSigC = wantSig.c_str();
 
-    // Method 1: Search for matching methods in class by name only (bail out if there is ambiguity due to duplicates)
+    auto sig_equal = [](const std::string& a, const std::string& b) {
+        if (a == b)
+            return true;
+        if (a.size() != b.size())
+            return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            char ca = a[i], cb = b[i];
+            if (ca == '.') ca = '/';
+            if (cb == '.') cb = '/';
+            if (ca != cb)
+                return false;
+        }
+        return true;
+    };
 
-    std::shared_ptr<Method> foundMethod=nullptr;
-    bool duplicate=false;
-    for(std::shared_ptr<Method> method : clazz.get()->methods)
-    {
-        if(strcmp(method->name.c_str(), name) == 0)
-        {
-            if(foundMethod != nullptr)
-                duplicate=true;
-            
-            foundMethod=method;
+    // Prefer exact name+signature+_static match. The old "name only" path
+    // breaks when both instance and static overloads exist (MethodProxy
+    // refuses to collapse them), and silently misses STATIC-only hooks when
+    // the caller asks with isStatic=true but an unresolved instance stub
+    // was inserted first.
+    for (std::shared_ptr<Method> method : clazz->methods) {
+        if (method->name == name && method->_static == isStatic &&
+            (wantSig.empty() || sig_equal(method->signature, wantSig)) &&
+            (method->nativehandle || method->dynamic || method->native)) {
+            BD_LOG("UnityReflection", "getMethodID hit %s.%s%s static=%d",
+                   clazz->name.c_str(), name, method->signature.c_str(), (int)isStatic);
+            return method;
+        }
+    }
+    for (std::shared_ptr<Method> method : clazz->methods) {
+        if (method->name == name && method->_static == isStatic &&
+            (wantSig.empty() || sig_equal(method->signature, wantSig))) {
+            BD_LOG("UnityReflection", "getMethodID weak-hit %s.%s%s static=%d (no handle)",
+                   clazz->name.c_str(), name, method->signature.c_str(), (int)isStatic);
+            return method;
         }
     }
 
-    if(foundMethod != nullptr && !duplicate)
+    // Name-only fallback: Unity often asks for a precise parameter class in the
+    // signature while our stub uses Ljava/lang/Object; to accept proxies.
+    // Never cross return types (e.g. ()I vs ()Z) — that yields Mismatched MethodHandle.
     {
-        auto method = std::shared_ptr<Method>(
-        (Method*)clazz->getMethod(foundMethod->signature.c_str(), name),
-        [](Method*) { } // No-op deleter
-        );
-        verbose("UnityReflection", "getMethodID(type 1, %s, %s, %s, %d) = 0x%p \n", clazz->getName().c_str(), name, foundMethod->signature.c_str(), isStatic, method.get());
-        return method;
+        std::vector<std::shared_ptr<Method>> cands;
+        for (std::shared_ptr<Method> method : clazz->methods) {
+            if (method->name == name && method->_static == isStatic &&
+                (method->nativehandle || method->dynamic || method->native)) {
+                cands.push_back(method);
+            }
+        }
+        auto ret_of = [](const std::string& sig) -> std::string {
+            auto p = sig.find(')');
+            return (p == std::string::npos) ? std::string() : sig.substr(p + 1);
+        };
+        auto ret_compatible = [&](const std::string& want, const std::string& got) {
+            if (want.empty())
+                return true;
+            if (sig_equal(want, got))
+                return true;
+            // Object refs may widen to/from Ljava/lang/Object;
+            if (want.size() > 1 && got == "Ljava/lang/Object;")
+                return true;
+            if (got.size() > 1 && want == "Ljava/lang/Object;")
+                return true;
+            return false;
+        };
+        const std::string want_ret = wantSig.empty() ? std::string() : ret_of(wantSig);
+
+        if (cands.size() == 1) {
+            auto got_ret = ret_of(cands[0]->signature);
+            if (ret_compatible(want_ret, got_ret)) {
+                BD_LOG("UnityReflection", "getMethodID name-fallback %s.%s%s -> %s static=%d",
+                       clazz->name.c_str(), name, wantSigC, cands[0]->signature.c_str(), (int)isStatic);
+                return cands[0];
+            }
+            BD_LOG("UnityReflection", "getMethodID name-fallback-skip %s.%s%s (ret %s vs %s)",
+                   clazz->name.c_str(), name, wantSigC, want_ret.c_str(), got_ret.c_str());
+        }
+        if (cands.size() > 1 && !wantSig.empty()) {
+            for (auto& method : cands) {
+                auto got_ret = ret_of(method->signature);
+                if (ret_compatible(want_ret, got_ret)) {
+                    BD_LOG("UnityReflection", "getMethodID overload-fallback %s.%s%s -> %s",
+                           clazz->name.c_str(), name, wantSigC, method->signature.c_str());
+                    return method;
+                }
+            }
+        }
     }
 
     // Method 2: Hardcoded fixes for the signature inaccuracies, then use getMethod
 
+    const char* sig;
     if (strcmp("initialize", name) == 0 && strcmp(clazz->getName().c_str(), "com/google/android/gms/games/PlayGamesSdk") == 0)
         sig = "(Landroid/content/Context;)V";
     else if (strcmp("getGamesSignInClient", name) == 0)
@@ -763,17 +991,31 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
     else if (strcmp("getClass", name) == 0)
         sig = "()Ljava/lang/Class;";
     else
-        sig = signature.get()->c_str();
+        sig = wantSigC;
 
-    auto method = std::shared_ptr<Method>(
-        (Method*)clazz->getMethod(sig, name),
-        [](Method*) { } // No-op deleter
-    );
-    verbose("UnityReflection", "getMethodID(type 2, %s, %s, %s, %d) = 0x%p \n", clazz->getName().c_str(), name, sig, isStatic, method.get());
+    auto proxy = clazz->getMethod(sig, name);
+    Method* raw = proxy; // operator Method*
+    if (!raw) {
+        if (is_lenient_sdk_jni_class(clazz)) {
+            auto stub = make_sdk_method_stub(clazz, name, sig, isStatic);
+            BD_LOG("UnityReflection", "getMethodID sdk-skip %s.%s%s static=%d",
+                   clazz->name.c_str(), name, sig, (int)isStatic);
+            return stub;
+        }
+        BD_LOG("UnityReflection", "getMethodID MISS %s.%s%s static=%d",
+               clazz->name.c_str(), name, sig, (int)isStatic);
+        return nullptr;
+    }
+    auto method = std::shared_ptr<Method>(raw, [](Method*) {});
+    BD_LOG("UnityReflection", "getMethodID type2 %s.%s%s static=%d -> %p",
+           clazz->name.c_str(), name, sig, (int)isStatic, method.get());
     return method;
 }
 std::shared_ptr<jnivm::java::lang::reflect::Field> jnivm::com::unity3d::player::ReflectionHelper::getFieldID(std::shared_ptr<jnivm::java::lang::Class> clazz, std::shared_ptr<FakeJni::JString> fieldName, std::shared_ptr<FakeJni::JString> signature, bool isStatic)
 {
+    if (!clazz || !fieldName)
+        return nullptr;
+
     const char* name = fieldName.get()->c_str();
     const char* sig;
 
@@ -787,16 +1029,54 @@ std::shared_ptr<jnivm::java::lang::reflect::Field> jnivm::com::unity3d::player::
     else if (strcmp("PressedStates", name) == 0 && strcmp(clazz->getName().c_str(), "com/unity3d/player/UnityPlayerActivity") == 0)
         sig = "[Z";
     else
-        sig = signature.get()->c_str();
+        sig = signature ? signature.get()->c_str() : "";
+
+    const bool notify = is_lenient_sdk_jni_class(clazz);
 
     for (auto field : clazz->fields) {
-        if (field->name == name && field->type == sig) {
-            verbose("UnityReflection", "getFieldID(%s, %s, %s, %d) = %p \n", clazz->getName().c_str(), fieldName.get()->c_str(), sig, isStatic, field);
-            return field;
+        if (field->name == name && field->_static == isStatic &&
+            (sig[0] == '\0' || field->type == sig ||
+             (sig[0] == 'L' && field->type.size() > 1 && field->type == "Ljava/lang/String;"))) {
+            // Empty signature: Unity Mobile Notifications often asks for
+            // KEY_* String fields without a JNI type string.
+            if (sig[0] == '\0' || field->type == sig) {
+                bind_field_declaring_class(field, clazz);
+                BD_LOG("UnityReflection", "getFieldID hit %s.%s -> %s static=%d",
+                       clazz->name.c_str(), name, field->type.c_str(), (int)isStatic);
+                return field;
+            }
         }
     }
 
-    verbose("UnityReflection", "getFieldID(%s, %s, %s, %d) = null \n", clazz->getName().c_str(), fieldName.get()->c_str(), sig, isStatic);
+    // Name-only fallback (static KEY_* and notification instance fields like extras).
+    for (auto field : clazz->fields) {
+        if (field->name == name && field->_static == isStatic) {
+            bind_field_declaring_class(field, clazz);
+            BD_LOG("UnityReflection", "getFieldID name-fallback %s.%s -> %s static=%d",
+                   clazz->name.c_str(), name, field->type.c_str(), (int)isStatic);
+            return field;
+        }
+    }
+    if (isStatic) {
+        for (auto field : clazz->fields) {
+            if (field->name == name && field->_static) {
+                bind_field_declaring_class(field, clazz);
+                BD_LOG("UnityReflection", "getFieldID name-fallback %s.%s -> %s",
+                       clazz->name.c_str(), name, field->type.c_str());
+                return field;
+            }
+        }
+    }
+
+    if (notify) {
+        auto stub = make_sdk_field_stub(clazz, name, sig, isStatic);
+        BD_LOG("UnityReflection", "getFieldID sdk-skip %s.%s -> %s static=%d",
+               clazz->name.c_str(), name, stub->type.c_str(), (int)isStatic);
+        return stub;
+    }
+
+    BD_LOG("UnityReflection", "getFieldID MISS %s.%s sig=%s static=%d",
+           clazz->name.c_str(), name, sig, (int)isStatic);
     return nullptr;
 }
 
@@ -877,6 +1157,9 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Field<&UnityPlayerActivity::MouseInside> {}, "MouseInside", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&UnityPlayerActivity::PressedStates> {}, "PressedStates", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Function<&jnivm::android::app::Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&jnivm::android::app::Activity::getAssets> {}, "getAssets", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&jnivm::android::content::Context::getPackageManager> {}, "getPackageManager", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&jnivm::android::content::Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayer) { FakeJni::Constructor<UnityPlayer> {} },
@@ -892,6 +1175,16 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Function<&UnityPlayer::getKeyboardLayout> {}, "getKeyboardLayout", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::startActivityIndicator> {}, "startActivityIndicator", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::stopActivityIndicator> {}, "stopActivityIndicator", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::getNotificationFromIntent> {}, "getNotificationFromIntent", FakeJni::JMethodID::STATIC },
+    // Java declares these static; Unity AndroidJavaObject sometimes Call*s them
+    // as instance methods → register both so we return real "" / false (not a
+    // bare Object dummy that later SEGV in String.getBytes).
+    { FakeJni::Function<&UnityPlayer::isUaaLUseCase> {}, "isUaaLUseCase", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&UnityPlayer::isUaaLUseCase> {}, "isUaaLUseCase", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::getNetworkProxySettings> {}, "getNetworkProxySettings", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&UnityPlayer::getNetworkProxySettings> {}, "getNetworkProxySettings", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::addPhoneCallListener> {}, "addPhoneCallListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::hidePreservedContent> {}, "hidePreservedContent", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::ReflectionHelper) { FakeJni::Constructor<ReflectionHelper> {} },
@@ -906,3 +1199,157 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::ReflectionHelper::InvocationError) { FakeJni::Constructor<InvocationError, long, bool> {} },
     END_NATIVE_DESCRIPTOR
+
+std::shared_ptr<jnivm::Object>
+jnivm::com::unity::androidnotifications::UnityNotificationManager::getNotificationManagerImpl(
+    std::shared_ptr<jnivm::Object> activity,
+    std::shared_ptr<jnivm::Object> callback)
+{
+    (void)activity;
+    (void)callback;
+    BD_LOG("UnityNotify", "getNotificationManagerImpl -> stub manager");
+    return std::make_shared<UnityNotificationManager>();
+}
+
+std::shared_ptr<jnivm::android::app::Notification>
+jnivm::com::unity::androidnotifications::UnityNotificationManager::getNotificationFromIntent(
+    std::shared_ptr<jnivm::android::content::Intent> intent)
+{
+    (void)intent;
+    return nullptr;
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::setNotificationIcon(
+    std::shared_ptr<jnivm::Object> builder,
+    std::shared_ptr<FakeJni::JString> largeIconPath,
+    std::shared_ptr<FakeJni::JString> smallIconPath)
+{
+    (void)builder;
+    (void)largeIconPath;
+    (void)smallIconPath;
+    BD_LOG("UnityNotify", "setNotificationIcon stub");
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::setNotificationColor(
+    std::shared_ptr<jnivm::Object> builder, FakeJni::JInt color)
+{
+    (void)builder;
+    (void)color;
+}
+
+FakeJni::JInt jnivm::com::unity::androidnotifications::UnityNotificationManager::getNotificationColor(
+    std::shared_ptr<jnivm::Object> notification)
+{
+    (void)notification;
+    return FakeJni::JInt(0);
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::setNotificationUsesChronometer(
+    std::shared_ptr<jnivm::Object> builder, FakeJni::JBoolean uses)
+{
+    (void)builder;
+    (void)uses;
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::setNotificationGroupAlertBehavior(
+    std::shared_ptr<jnivm::Object> builder, FakeJni::JInt behavior)
+{
+    (void)builder;
+    (void)behavior;
+}
+
+FakeJni::JInt jnivm::com::unity::androidnotifications::UnityNotificationManager::getNotificationGroupAlertBehavior(
+    std::shared_ptr<jnivm::Object> notification)
+{
+    (void)notification;
+    return FakeJni::JInt(0);
+}
+
+std::shared_ptr<FakeJni::JString>
+jnivm::com::unity::androidnotifications::UnityNotificationManager::getNotificationChannelId(
+    std::shared_ptr<jnivm::Object> notification)
+{
+    (void)notification;
+    return std::make_shared<FakeJni::JString>("");
+}
+
+FakeJni::JInt jnivm::com::unity::androidnotifications::UnityNotificationManager::scheduleNotification(
+    std::shared_ptr<jnivm::Object> builder, FakeJni::JBoolean customized)
+{
+    (void)builder;
+    (void)customized;
+    BD_LOG("UnityNotify", "scheduleNotification stub -> 0");
+    return FakeJni::JInt(0);
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::cancelNotification(FakeJni::JInt id)
+{
+    (void)id;
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::cancelAllNotifications()
+{
+}
+
+void jnivm::com::unity::androidnotifications::UnityNotificationManager::cancelAllPendingNotificationIntents()
+{
+}
+
+FakeJni::JBoolean jnivm::com::unity::androidnotifications::UnityNotificationManager::areNotificationsEnabled()
+{
+    return FakeJni::JBoolean(false);
+}
+
+// Unity Mobile Notifications asks for ()I on some versions (PermissionStatus /
+// int), while the Android API is boolean. Provide both.
+FakeJni::JInt jnivm::com::unity::androidnotifications::UnityNotificationManager::areNotificationsEnabledInt()
+{
+    return FakeJni::JInt(0);
+}
+
+std::shared_ptr<jnivm::android::app::Notification::Builder>
+jnivm::com::unity::androidnotifications::UnityNotificationManager::createNotificationBuilder(
+    std::shared_ptr<FakeJni::JString> channelId)
+{
+    (void)channelId;
+    BD_LOG("UnityNotify", "createNotificationBuilder stub");
+    return std::make_shared<jnivm::android::app::Notification::Builder>();
+}
+
+BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity::androidnotifications::NotificationCallback)
+{ FakeJni::Constructor<NotificationCallback> {} },
+END_NATIVE_DESCRIPTOR
+
+BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity::androidnotifications::UnityNotificationManager)
+{ FakeJni::Constructor<UnityNotificationManager> {} },
+{ FakeJni::Field<&UnityNotificationManager::KEY_FIRE_TIME> {}, "KEY_FIRE_TIME", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_ID> {}, "KEY_ID", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_INTENT_DATA> {}, "KEY_INTENT_DATA", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_LARGE_ICON> {}, "KEY_LARGE_ICON", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_REPEAT_INTERVAL> {}, "KEY_REPEAT_INTERVAL", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_NOTIFICATION> {}, "KEY_NOTIFICATION", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_SMALL_ICON> {}, "KEY_SMALL_ICON", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_SHOW_IN_FOREGROUND> {}, "KEY_SHOW_IN_FOREGROUND", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_PICTURE> {}, "KEY_BIG_PICTURE", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_LARGE_ICON> {}, "KEY_BIG_LARGE_ICON", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_CONTENT_TITLE> {}, "KEY_BIG_CONTENT_TITLE", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_SUMMARY_TEXT> {}, "KEY_BIG_SUMMARY_TEXT", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_CONTENT_DESCRIPTION> {}, "KEY_BIG_CONTENT_DESCRIPTION", FakeJni::JFieldID::STATIC },
+{ FakeJni::Field<&UnityNotificationManager::KEY_BIG_SHOW_WHEN_COLLAPSED> {}, "KEY_BIG_SHOW_WHEN_COLLAPSED", FakeJni::JFieldID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::getNotificationManagerImpl> {}, "getNotificationManagerImpl", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::getNotificationFromIntent> {}, "getNotificationFromIntent", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::setNotificationIcon> {}, "setNotificationIcon", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::setNotificationColor> {}, "setNotificationColor", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::getNotificationColor> {}, "getNotificationColor", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::setNotificationUsesChronometer> {}, "setNotificationUsesChronometer", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::setNotificationGroupAlertBehavior> {}, "setNotificationGroupAlertBehavior", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::getNotificationGroupAlertBehavior> {}, "getNotificationGroupAlertBehavior", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::getNotificationChannelId> {}, "getNotificationChannelId", FakeJni::JMethodID::STATIC },
+{ FakeJni::Function<&UnityNotificationManager::scheduleNotification> {}, "scheduleNotification", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::cancelNotification> {}, "cancelNotification", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::cancelAllNotifications> {}, "cancelAllNotifications", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::cancelAllPendingNotificationIntents> {}, "cancelAllPendingNotificationIntents", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::areNotificationsEnabled> {}, "areNotificationsEnabled", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::areNotificationsEnabledInt> {}, "areNotificationsEnabled", FakeJni::JMethodID::PUBLIC },
+{ FakeJni::Function<&UnityNotificationManager::createNotificationBuilder> {}, "createNotificationBuilder", FakeJni::JMethodID::PUBLIC },
+END_NATIVE_DESCRIPTOR

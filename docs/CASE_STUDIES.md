@@ -2,6 +2,11 @@
 
 完整长文仍在 `LinuxArmPorts/SKULL_ARM_LINUX_PORTING.md`；**后续移植只读本节 + [`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md)**。
 
+## 进行中：PC01（Five Hearts Under One Roof）
+
+交接全文见 **[`PC01_HANDOFF.md`](PC01_HANDOFF.md)**（2026-09-11 19:05）。  
+摘要：Unity 2022.3.62 IL2CPP；`InitFirebase`→`StartGame` 已通（两段 splash）；prefs `SettingData` **已 HIT** 但 `StartGame` 内仍 **NRE**；**无** `BundleManager.Initialization ENTER`。RSS≈650MB/972MB 为 **splash 基线**（UnityCache 未开）。Git 分支 **`pc01`**。
+
 ## 结论
 
 - Unity 2020.3 IL2CPP + URP + Addressables/PAD；主界面可玩，**进关失败**。

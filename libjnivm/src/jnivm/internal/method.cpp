@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <string>
 #include <cstring>
+#include <type_traits>
 
 using namespace jnivm;
 
@@ -149,34 +150,74 @@ template<> void jnivm::defaultValForMethod(ENV* env, const char*, const char*,
 }
 
 template<> jobject jnivm::defaultVal(ENV* env, std::string signature) {
-    // Explicit factory registry — always active (each entry is opt-in).
-    if(!signature.empty()) {
-        size_t off = signature.find_last_of(")");
-        if(signature[off + 1] == 'L' && signature[signature.size() - 1] == ';') {
-            std::string cls_name = signature.substr(off + 2, signature.size() - (off + 3));
+    // Resolve class name from either a method return ("(...)Ljava/lang/Foo;")
+    // or a bare field descriptor ("Ljava/lang/Foo;"). The old ')'-only path
+    // treated npos incorrectly and produced names like "com/foo/Bar;" for fields.
+    auto object_class_name = [](const std::string& sig) -> std::string {
+        if (sig.empty())
+            return {};
+        if (sig[0] == 'L' && sig.back() == ';')
+            return sig.substr(1, sig.size() - 2);
+        size_t off = sig.find_last_of(')');
+        if (off != std::string::npos && off + 1 < sig.size() &&
+            sig[off + 1] == 'L' && sig.back() == ';')
+            return sig.substr(off + 2, sig.size() - (off + 3));
+        return {};
+    };
+
+    const std::string cls_name = object_class_name(signature);
+    if (!cls_name.empty()) {
+        // Explicit factory registry — always active (each entry is opt-in).
+        {
             auto& vm = *env->GetVM();
             std::function<std::shared_ptr<Object>()> ctor;
             {
                 std::lock_guard<std::mutex> lock(vm.factories_mtx);
                 auto it = vm.class_factories.find(cls_name);
-                if (it != vm.class_factories.end()) {
+                if (it != vm.class_factories.end())
                     ctor = it->second;
+            }
+            if (ctor)
+                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, ctor());
+        }
+#ifdef JNI_RETURN_NON_ZERO
+        auto c = env->GetClass(cls_name.data());
+        if (c && c->Instantiate) {
+#ifdef JNI_TRACE
+            LOG("JNIVM", "Construct object=`%s` via default constructor", cls_name.data());
+#endif
+            return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, c->Instantiate(env));
+        }
+        if (c) {
+            std::lock_guard<std::mutex> guard(env->GetVM()->mtx);
+            bool safetocreatedummy = true;
+            for (auto&& ty : env->GetVM()->typecheck) {
+                if (ty.second == c) {
+                    safetocreatedummy = false;
+                    break;
                 }
             }
-            if (ctor) {
-                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, ctor());
+            if (safetocreatedummy) {
+#ifdef JNI_TRACE
+                LOG("JNIVM", "Construct dummy object=`%s`, no native type attached",
+                    cls_name.data());
+#endif
+                auto dummy = std::make_shared<Object>();
+                dummy->clazz = c;
+                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, dummy);
             }
         }
+#endif
     }
 #ifdef JNI_RETURN_NON_ZERO
-    if(!signature.empty()) {
-        size_t off = signature.find_last_of(")");
-        if(signature[off + 1] == '[' ){
+    if (!signature.empty()) {
+        size_t off = signature.find_last_of(')');
+        if (off != std::string::npos && off + 1 < signature.size() &&
+            signature[off + 1] == '[') {
 #ifdef JNI_TRACE
             LOG("JNIVM", "Construct array=`%s` via New*Array", &signature.data()[off + 1]);
 #endif
-            switch (signature[off + 2])
-            {
+            switch (signature[off + 2]) {
             case 'B':
                 return env->GetJNIEnv()->NewByteArray(0);
             case 'S':
@@ -193,42 +234,19 @@ template<> jobject jnivm::defaultVal(ENV* env, std::string signature) {
                 return env->GetJNIEnv()->NewDoubleArray(0);
             case 'L':
             case '[':
-                return env->GetJNIEnv()->NewObjectArray(0, env->GetJNIEnv()->FindClass(signature[off + 2] == 'L' && signature[signature.size() - 1] == ';' ? signature.substr(off + 3, signature.size() - (off + 4)).data() : &signature.data()[off + 1]), nullptr);
+                return env->GetJNIEnv()->NewObjectArray(
+                    0,
+                    env->GetJNIEnv()->FindClass(
+                        signature[off + 2] == 'L' && signature.back() == ';'
+                            ? signature.substr(off + 3, signature.size() - (off + 4)).data()
+                            : &signature.data()[off + 1]),
+                    nullptr);
             default:
 #ifdef JNI_TRACE
-            LOG("JNIVM", "Constructing array=`%s` failed unknown type", &signature.data()[off + 1]);
+                LOG("JNIVM", "Constructing array=`%s` failed unknown type",
+                    &signature.data()[off + 1]);
 #endif
                 break;
-            }
-            
-        } else if(signature[off + 1] == 'L' && signature[signature.size() - 1] == ';'){
-            auto c = env->GetClass(signature.substr(off + 2, signature.size() - (off + 3)).data());
-            if(c->Instantiate) {
-#ifdef JNI_TRACE
-                LOG("JNIVM", "Construct object=`%s` via default constructor", &signature.data()[off + 1]);
-#endif
-                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, c->Instantiate(env));
-            } else {
-                std::lock_guard<std::mutex> guard(env->GetVM()->mtx);
-                bool safetocreatedummy = true;
-                for(auto&& ty : env->GetVM()->typecheck) {
-                    if(ty.second == c) {
-                        safetocreatedummy = false;
-                        break;
-                    }
-                }
-                if(safetocreatedummy) {
-#ifdef JNI_TRACE
-                    LOG("JNIVM", "Construct dummy object=`%s`, no native type attached to this Class", &signature.data()[off + 1]);
-#endif
-                    auto dummy = std::make_shared<Object>();
-                    dummy->clazz = c;
-                    return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(env, dummy);
-                } else {
-#ifdef JNI_TRACE
-                    LOG("JNIVM", "You have to create a default constructor for object=`%s` to get a non zero return value", &signature.data()[off + 1]);
-#endif
-                }
             }
         }
 #ifdef JNI_TRACE
@@ -324,6 +342,12 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
                 orig_name.data(), orig_sig);
         }
     } else {
+        // Empty sdk-skip stubs for getClass() return null and NRE AndroidJavaObject
+        // (seen: AdjustConfig after NewObject). Always report the receiver's class.
+        if constexpr (std::is_same<T, jobject>::value) {
+            if (mid && mid->name == "getClass" && obj)
+                return env->GetObjectClass(obj);
+        }
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
         log_stub_miss_once("Unknown Member",
             cl ? cl->nativeprefix.data() : nullptr,
@@ -443,6 +467,28 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jclass _cl
             return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
         }
     } else {
+        // jnivm maps NewObject{A,V} to CallStaticObjectMethod. Unity's
+        // AndroidJavaObject ctors arrive as Method/Constructor named "<init>"
+        // with a void JNI signature ("(...)V"); defaultVal then returns null
+        // and Adjust/MAX init NREs. Treat unresolved <init> as Instantiation.
+        if constexpr (std::is_same<T, jobject>::value) {
+            if (mid && mid->name == "<init>" && cl) {
+                if (!cl->Instantiate) {
+                    std::weak_ptr<Class> weak = cl;
+                    cl->Instantiate = [weak](ENV*) {
+                        auto object = std::make_shared<Object>();
+                        object->clazz = weak;
+                        return object;
+                    };
+                }
+#ifndef NDEBUG
+                LOG("JNIVM", "NewObject/static <init> Instantiated Class=`%s`",
+                    cl->nativeprefix.data());
+#endif
+                return JNITypes<std::shared_ptr<Object>>::ToJNIReturnType(
+                    ENV::FromJNIEnv(env), cl->Instantiate(ENV::FromJNIEnv(env)));
+            }
+        }
         log_stub_miss_once("Unknown Static",
             cl ? cl->nativeprefix.data() : nullptr,
             mid ? mid->name.data() : nullptr,

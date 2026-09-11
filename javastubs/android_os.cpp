@@ -32,6 +32,31 @@ std::shared_ptr<FakeJni::JString> jnivm::android::os::Bundle::getString(std::sha
     return std::make_shared<FakeJni::JString>(config["package"]["mainIntentBundle"][key.get()->c_str()].value_or<std::string>(""));
 }
 
+std::shared_ptr<FakeJni::JString> jnivm::android::os::Bundle::getString(std::shared_ptr<FakeJni::JString> key)
+{
+    return getString(key, nullptr);
+}
+
+FakeJni::JBoolean jnivm::android::os::Bundle::getBoolean(std::shared_ptr<FakeJni::JString>, FakeJni::JBoolean def)
+{
+    return def;
+}
+
+FakeJni::JInt jnivm::android::os::Bundle::getInt(std::shared_ptr<FakeJni::JString>, FakeJni::JInt def)
+{
+    return def;
+}
+
+FakeJni::JLong jnivm::android::os::Bundle::getLong(std::shared_ptr<FakeJni::JString>, FakeJni::JLong def)
+{
+    return def;
+}
+
+void jnivm::android::os::Bundle::putBoolean(std::shared_ptr<FakeJni::JString>, FakeJni::JBoolean) {}
+void jnivm::android::os::Bundle::putInt(std::shared_ptr<FakeJni::JString>, FakeJni::JInt) {}
+void jnivm::android::os::Bundle::putLong(std::shared_ptr<FakeJni::JString>, FakeJni::JLong) {}
+void jnivm::android::os::Bundle::putString(std::shared_ptr<FakeJni::JString>, std::shared_ptr<FakeJni::JString>) {}
+
 ///// Process
 
 void jnivm::android::os::Process::setThreadPriority(int i, int j) { }
@@ -476,7 +501,15 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Bundle) { FakeJni::Constructor<Bundle> {} },
     { FakeJni::Function<&Bundle::containsKey> {}, "containsKey", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&Bundle::getString> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<std::shared_ptr<FakeJni::JString> (Bundle::*)(std::shared_ptr<FakeJni::JString>, std::shared_ptr<FakeJni::JString>)>(&Bundle::getString)> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<std::shared_ptr<FakeJni::JString> (Bundle::*)(std::shared_ptr<FakeJni::JString>)>(&Bundle::getString)> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::getBoolean> {}, "getBoolean", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::getInt> {}, "getInt", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::getLong> {}, "getLong", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::putBoolean> {}, "putBoolean", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::putInt> {}, "putInt", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::putLong> {}, "putLong", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::putString> {}, "putString", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Process) { FakeJni::Constructor<Process> {} },

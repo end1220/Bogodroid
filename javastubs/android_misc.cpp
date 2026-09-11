@@ -99,6 +99,12 @@ std::shared_ptr<jnivm::android::content::res::Resources> jnivm::android::app::Ac
     return std::make_shared<jnivm::android::content::res::Resources>();
 }
 
+std::shared_ptr<jnivm::android::content::res::AssetManager> jnivm::android::app::Activity::getAssets()
+{
+    BD_LOG("JBRIDGE", "Activity.getAssets()");
+    return std::make_shared<jnivm::android::content::res::AssetManager>();
+}
+
 std::shared_ptr<jnivm::android::view::Window> jnivm::android::app::Activity::getWindow()
 {
     return std::make_shared<jnivm::android::view::Window>();
@@ -163,9 +169,46 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
     { FakeJni::Function<&Activity::getRequestedOrientation> {}, "getRequestedOrientation", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::setRequestedOrientation> {}, "setRequestedOrientation", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getResources> {}, "getResources", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getAssets> {}, "getAssets", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getWindow> {}, "getWindow", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::findViewById> {}, "findViewById", FakeJni::JMethodID::PUBLIC },
+    // Also expose Context methods on Activity — Unity often GetMethodID's against
+    // the concrete Activity class, and parent-walk + stub insert can leave the
+    // Activity-local copy without a nativehandle.
+    { FakeJni::Function<&Context::getPackageManager> {}, "getPackageManager", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDir> {}, "getObbDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDirs> {}, "getObbDirs", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    std::shared_ptr<FakeJni::JString> jnivm::android::app::Notification::getGroup()
+    {
+        return nullptr;
+    }
+
+    std::shared_ptr<FakeJni::JString> jnivm::android::app::Notification::getSortKey()
+    {
+        return nullptr;
+    }
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::Notification) { FakeJni::Constructor<Notification> {} },
+    { FakeJni::Field<&Notification::EXTRA_TITLE> {}, "EXTRA_TITLE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::EXTRA_TEXT> {}, "EXTRA_TEXT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::EXTRA_SHOW_CHRONOMETER> {}, "EXTRA_SHOW_CHRONOMETER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::EXTRA_BIG_TEXT> {}, "EXTRA_BIG_TEXT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::EXTRA_SHOW_WHEN> {}, "EXTRA_SHOW_WHEN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::FLAG_AUTO_CANCEL> {}, "FLAG_AUTO_CANCEL", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::FLAG_GROUP_SUMMARY> {}, "FLAG_GROUP_SUMMARY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Notification::extras> {}, "extras", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Notification::flags> {}, "flags", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Notification::number> {}, "number", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Notification::when> {}, "when", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Function<&Notification::getGroup> {}, "getGroup", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Notification::getSortKey> {}, "getSortKey", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::Notification::Builder) { FakeJni::Constructor<Builder> {} },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::NativeActivity) { FakeJni::Constructor<NativeActivity> {} },
