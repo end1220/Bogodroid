@@ -6,9 +6,84 @@
 #include "android.h" // for SharedPreferences::flush_all
 #include "logging.h"
 
+#include <cstdio>
+#include <cstring>
 #include <csignal>
+#include <ctime>
 #include <execinfo.h>
 #include <unistd.h>
+
+static long bd_read_status_kb(const char* key)
+{
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f)
+        return -1;
+    char line[256];
+    const size_t key_len = strlen(key);
+    long value = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, key_len) == 0 && line[key_len] == ':') {
+            if (sscanf(line + key_len + 1, "%ld", &value) == 1)
+                break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+static long bd_read_meminfo_kb(const char* key)
+{
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return -1;
+    char line[256];
+    const size_t key_len = strlen(key);
+    long value = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, key_len) == 0 && line[key_len] == ':') {
+            if (sscanf(line + key_len + 1, "%ld", &value) == 1)
+                break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+void bd_log_process_memory(const char* why)
+{
+    const long rss = bd_read_status_kb("VmRSS");
+    const long hwm = bd_read_status_kb("VmHWM");
+    const long size = bd_read_status_kb("VmSize");
+    const long avail = bd_read_meminfo_kb("MemAvailable");
+    const long total = bd_read_meminfo_kb("MemTotal");
+    BD_LOG("MEM", "pid=%d rss=%.1fMB hwm=%.1fMB vsz=%.1fMB sys_avail=%.1fMB/%ldMB%s%s",
+           (int)getpid(),
+           rss >= 0 ? rss / 1024.0 : -1.0,
+           hwm >= 0 ? hwm / 1024.0 : -1.0,
+           size >= 0 ? size / 1024.0 : -1.0,
+           avail >= 0 ? avail / 1024.0 : -1.0,
+           total >= 0 ? total / 1024 : -1L,
+           why && *why ? " @ " : "",
+           why && *why ? why : "");
+}
+
+int bd_log_process_memory_throttled(const char* why, int interval_ms)
+{
+    if (interval_ms <= 0)
+        return 0;
+    static struct timespec last = {0, 0};
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    const long long elapsed_ms =
+        (long long)(now.tv_sec - last.tv_sec) * 1000LL +
+        (now.tv_nsec - last.tv_nsec) / 1000000LL;
+    if (last.tv_sec != 0 && elapsed_ms < interval_ms)
+        return 0;
+    last = now;
+    bd_log_process_memory(why);
+    return 1;
+}
 
 void print_native_callbacks(ANativeActivity nActivity)
 {

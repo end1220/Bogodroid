@@ -5,10 +5,31 @@
 #include "baron/baron.h"
 #include "logging.h"
 #include "platform.h"
+#include <atomic>
+#include <cstring>
 #include <set>
 #include <string>
 
 using namespace jnivm::bitter::jnibridge;
+
+// FrameCallback.doFrame / Handler.handleMessage fire every frame and drown
+// useful diagnostics. Keep a few early samples plus a sparse heartbeat.
+static bool bd_should_log_jni_invoke(const char* className, const char* methodName)
+{
+    const bool hot =
+        (methodName && std::strcmp(methodName, "doFrame") == 0) ||
+        (methodName && std::strcmp(methodName, "handleMessage") == 0);
+    if (!hot)
+        return true;
+
+    static std::atomic<uint32_t> hot_count{0};
+    const uint32_t n = ++hot_count;
+    if (n <= 3 || n == 60 || (n % 600) == 0) {
+        BD_LOG("JNIBridge", "hot invoke #%u %s->%s (further doFrame/handleMessage suppressed)",
+               n, className ? className : "?", methodName ? methodName : "?");
+    }
+    return false;
+}
 
 // --- JNIBridgeProxy Implementation ---
 
@@ -165,7 +186,8 @@ void JNIBridge::invoke(long nativeHandle, const char* className, const char* met
 
     // We must explicitly cast each argument to the base Object type.
      ( ( (*argsArray)[i++] = autobox(args) ), ... );
-    verbose("JNIBridge", "Invoking native handle %ld for %s->%s", nativeHandle, className, methodName);
+    if (bd_should_log_jni_invoke(className, methodName))
+        verbose("JNIBridge", "Invoking native handle %ld for %s->%s", nativeHandle, className, methodName);
     FakeJni::LocalFrame frame(vm);
     // The invoke call itself was correct, as you pointed out.
     invokeMethod.invoke(frame.getJniEnv(), jniBridgeClass, nativeHandle, interfaceClass, interfaceMethod, argsArray);
@@ -183,7 +205,8 @@ void JNIBridge::invokeManaged(long nativeHandle, const char* methodName, Args...
     int i = 0;
     (((*argsArray)[i++] = autobox(args)), ...);
     auto name = std::make_shared<FakeJni::JString>(methodName);
-    verbose("JNIBridge", "Invoking managed GCHandle %ld for %s", nativeHandle, methodName);
+    if (bd_should_log_jni_invoke("ReflectionHelper", methodName))
+        verbose("JNIBridge", "Invoking managed GCHandle %ld for %s", nativeHandle, methodName);
     FakeJni::LocalFrame frame(vm);
     invokeMethod.invoke(frame.getJniEnv(), reflectionClass, nativeHandle, name, argsArray);
 }

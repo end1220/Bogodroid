@@ -16,13 +16,14 @@ Selection
 ---------
 A clip is patched when ALL of these hold:
   - current load type is DecompressOnLoad or CompressedInMemory
-  - length >= --min-secs (default 10): music and ambience qualify, short
-    SFX keep their in-memory latency
-  - its data lives in an external .resource file (streaming from inside
-    an LZMA bundle would be pathological; such clips are skipped loudly)
+  - length >= --min-secs (default 10) for --mode streaming; hybrid uses
+    --min-secs as the Streaming threshold and patches shorter clips to
+    CompressedInMemory; --mode compressed ignores length
+  - its data lives in an external .resource file, OR --allow-embedded is
+    set (needed for Addressables packs that embed FSB/raw in the UnityFS)
   - name not on the --skip list
 
-The patch sets m_LoadType = Streaming and clears m_PreloadAudioData.
+The patch sets m_LoadType and clears m_PreloadAudioData for Streaming.
 
 Risks / QA
 ----------
@@ -39,6 +40,9 @@ Usage
     python3 tools/unity_astc/audio_stream_patch.py data.unity3d --min-secs 20
     python3 tools/unity_astc/audio_stream_patch.py data.unity3d \\
         --skip "S23-11 INSIDE LOOP" --skip "S23-11 OUTSIDE LOOP"
+    # Embedded Addressables packs (no .resource sidecars):
+    python3 tools/unity_astc/audio_stream_patch.py pack.bundle \\
+        --allow-embedded --mode hybrid --min-secs 3 --packer original
 
 Requirements
 ------------
@@ -89,7 +93,16 @@ def main():
     ap.add_argument("bundle", help="path to data.unity3d (or any Unity bundle)")
     ap.add_argument("-o", "--out", help="output path (default: <bundle>.streamed)")
     ap.add_argument("--min-secs", type=float, default=10.0,
-                    help="only patch clips at least this long (default: 10)")
+                    help="Streaming length threshold (default: 10). "
+                         "In hybrid mode shorter clips become CompressedInMemory.")
+    ap.add_argument("--mode", choices=("streaming", "compressed", "hybrid"),
+                    default="streaming",
+                    help="streaming: long clips -> Streaming; "
+                         "compressed: all eligible -> CompressedInMemory; "
+                         "hybrid: >=min-secs Streaming else CompressedInMemory")
+    ap.add_argument("--allow-embedded", action="store_true",
+                    help="also patch clips whose audio bytes live inside the "
+                         "UnityFS (archive:/...). Default skips them.")
     ap.add_argument("--skip", action="append", default=[],
                     help="clip name to leave untouched (repeatable)")
     ap.add_argument("--skip-file", help="file with one clip name per line")
@@ -124,6 +137,7 @@ def main():
     log(f"  loaded in {time.time() - t0:.1f}s", always=True)
 
     n_patched = n_short = n_skip = n_inbundle = 0
+    n_to_stream = n_to_comp = 0
     ram_freed = 0
     for obj in env.objects:
         if obj.type.name != "AudioClip":
@@ -135,33 +149,62 @@ def main():
             n_skip += 1
             log(f"  SKIP [list] {a.m_Name!r}")
             continue
-        if a.m_Length < args.min_secs:
-            n_short += 1
-            continue
         src = a.m_Resource.m_Source if a.m_Resource else ""
-        if not src or src.startswith("archive:"):
+        embedded = (not src) or src.startswith("archive:")
+        if embedded and not args.allow_embedded:
             n_inbundle += 1
             log(f"  SKIP [in-bundle data] {a.m_Name!r} (source {src!r})", always=True)
             continue
 
+        # Decide target load type.
+        if args.mode == "compressed":
+            target = LOAD_COMPRESSED_IN_MEMORY
+        elif args.mode == "hybrid":
+            if a.m_Length >= args.min_secs:
+                target = LOAD_STREAMING
+            else:
+                target = LOAD_COMPRESSED_IN_MEMORY
+        else:  # streaming
+            if a.m_Length < args.min_secs:
+                n_short += 1
+                continue
+            target = LOAD_STREAMING
+
+        if a.m_LoadType == target:
+            continue
+
         freed = ram_estimate(a)
+        # CompressedInMemory still keeps compressed bytes resident; only the
+        # PCM inflate from DecompressOnLoad is avoided.
+        if target == LOAD_COMPRESSED_IN_MEMORY and a.m_LoadType == LOAD_DECOMPRESS:
+            comp = a.m_Resource.m_Size if a.m_Resource else 0
+            freed = max(0, freed - int(comp or 0))
         log(f"  {'would patch' if args.dry_run else 'patch'} {a.m_Name!r} "
-            f"{a.m_Length:6.0f}s {a.m_Channels}ch "
-            f"[{LOAD_NAMES.get(a.m_LoadType, a.m_LoadType)}] "
-            f"frees {freed / 1048576:.2f} MB")
+            f"{a.m_Length:6.1f}s {a.m_Channels}ch "
+            f"[{LOAD_NAMES.get(a.m_LoadType, a.m_LoadType)} -> "
+            f"{LOAD_NAMES.get(target, target)}] "
+            f"frees ~{freed / 1048576:.2f} MB")
         if not args.dry_run:
-            a.m_LoadType = LOAD_STREAMING
-            a.m_PreloadAudioData = False
+            a.m_LoadType = target
+            if target == LOAD_STREAMING:
+                a.m_PreloadAudioData = False
             a.save()
         ram_freed += freed
         n_patched += 1
+        if target == LOAD_STREAMING:
+            n_to_stream += 1
+        else:
+            n_to_comp += 1
         if args.limit and n_patched >= args.limit:
             log(f"  (limit {args.limit} reached)", always=True)
             break
 
     log(f"\n=== Summary ===", always=True)
-    log(f"  Patched to Streaming: {n_patched}  "
-        f"(skipped: {n_short} short, {n_skip} listed, {n_inbundle} in-bundle)",
+    log(f"  Mode: {args.mode}  allow_embedded={args.allow_embedded}  "
+        f"min_secs={args.min_secs}", always=True)
+    log(f"  Patched: {n_patched}  "
+        f"(->Streaming {n_to_stream}, ->CompressedInMemory {n_to_comp}; "
+        f"skipped: {n_short} short, {n_skip} listed, {n_inbundle} in-bundle)",
         always=True)
     log(f"  Est. RAM freed when those clips are loaded: {ram_freed / 1048576:.1f} MB",
         always=True)

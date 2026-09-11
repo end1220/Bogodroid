@@ -18,9 +18,84 @@ extern toml::table config;
 using bd_json = nlohmann::json;
 
 ///// PackageManager
-// getPackageInfo migrated to registerFactory in android_descriptors.cpp.
 // getInstallerPackageName stays here: registerFactory<JString> would catch
 // every missing String-returning method, not just this one.
+
+static std::string bd_abs_path(const std::string& path)
+{
+    if (char* abs = realpath(path.c_str(), nullptr)) {
+        std::string out(abs);
+        free(abs);
+        return out;
+    }
+    try {
+        return std::filesystem::absolute(path).lexically_normal().string();
+    } catch (...) {
+        return path;
+    }
+}
+
+static std::shared_ptr<jnivm::android::content::pm::ApplicationInfo>
+bd_make_application_info()
+{
+    auto info = std::make_shared<jnivm::android::content::pm::ApplicationInfo>();
+
+    std::string dd = config["paths"]["android_data"].value_or<std::string>("../");
+    info->dataDir = std::make_shared<FakeJni::JString>(bd_abs_path(dd).c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.dataDir = %s",
+            info->dataDir->asStdString().c_str());
+
+    std::string pkg = config["package"]["packageName"].value_or<std::string>("");
+    info->packageName = std::make_shared<FakeJni::JString>(pkg.c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.packageName = %s", pkg.c_str());
+
+    // Prefer the staged Unity data-pack APK. cwd is already paths.game_files
+    // after init_config, so resolve against current_path() first — joining
+    // "./gamedata" again produced the broken .../gamedata/gamedata/ path.
+    std::string code = config["paths"]["android_package_code"].value_or<std::string>("./");
+    std::string source = bd_abs_path(code);
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    std::filesystem::path staged_apk = cwd / "UnityDataAssetPack.apk";
+    if (!std::filesystem::is_regular_file(staged_apk, ec)) {
+        std::filesystem::path game_files(
+            config["paths"]["game_files"].value_or<std::string>("."));
+        staged_apk = std::filesystem::absolute(game_files) / "UnityDataAssetPack.apk";
+    }
+    if (std::filesystem::is_regular_file(staged_apk, ec)) {
+        // Android ApplicationInfo.sourceDir is the APK file path. Unity builds
+        // MountDataArchive paths as "<sourceDir>/assets/..." so the resulting
+        // string contains the ".apk/" marker ZipCentralDirectory requires.
+        source = staged_apk.lexically_normal().string();
+    } else if (auto* sources = config["paths"]["android_source_dirs"].as_array();
+               sources && !sources->empty()) {
+        if (auto* first = sources->get(0)->as_string()) {
+            std::filesystem::path cand(std::string(first->get()));
+            if (cand.is_relative())
+                cand = cwd / cand;
+            // If config repeats the game_files leaf while cwd is already there,
+            // prefer cwd instead of creating a nested duplicate.
+            if (!std::filesystem::exists(cand, ec) &&
+                cwd.filename() == cand.filename())
+                cand = cwd;
+            source = bd_abs_path(cand.string());
+        }
+    }
+    info->sourceDir = std::make_shared<FakeJni::JString>(source.c_str());
+    info->publicSourceDir = std::make_shared<FakeJni::JString>(source.c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.sourceDir = %s", source.c_str());
+
+    std::filesystem::path libdir = cwd / "lib" / "arm64-v8a";
+    if (!std::filesystem::is_directory(libdir, ec))
+        libdir = cwd / "lib";
+    info->nativeLibraryDir =
+        std::make_shared<FakeJni::JString>(libdir.lexically_normal().string().c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.nativeLibraryDir = %s",
+           info->nativeLibraryDir->asStdString().c_str());
+
+    info->metaData = std::make_shared<jnivm::android::os::Bundle>();
+    return info;
+}
 
 std::shared_ptr<FakeJni::JString>
 jnivm::android::content::pm::PackageManager::getInstallerPackageName(std::shared_ptr<FakeJni::JString> packageName)
@@ -32,6 +107,28 @@ bool jnivm::android::content::pm::PackageManager::hasSystemFeature(std::shared_p
 {
     verbose("JBRIDGE", "App asks about availability of feature: %s", feature.get()->c_str());
     return false; // We don't claim support of anything right now
+}
+
+std::shared_ptr<jnivm::android::content::pm::ApplicationInfo>
+jnivm::android::content::pm::PackageManager::getApplicationInfo(
+    std::shared_ptr<FakeJni::JString> packageName, int flags)
+{
+    BD_LOG("DATADIR", "PackageManager.getApplicationInfo(%s, 0x%x)",
+           packageName ? packageName->c_str() : "(null)", flags);
+    return bd_make_application_info();
+}
+
+std::shared_ptr<jnivm::android::content::pm::PackageInfo>
+jnivm::android::content::pm::PackageManager::getPackageInfo(
+    std::shared_ptr<FakeJni::JString> packageName, int flags)
+{
+    BD_LOG("DATADIR", "PackageManager.getPackageInfo(%s, 0x%x)",
+           packageName ? packageName->c_str() : "(null)", flags);
+    auto info = std::make_shared<PackageInfo>();
+    info->versionName = (FakeJni::JString)config["package"]["versionName"]
+                            .value_or<std::string>("0.1")
+                            .c_str();
+    return info;
 }
 
 ///// AssetManager
@@ -488,29 +585,7 @@ bool jnivm::android::content::SharedPreferencesEditor::commit()
 std::shared_ptr<jnivm::android::content::pm::ApplicationInfo>
 jnivm::android::content::Context::getApplicationInfo()
 {
-    auto info = std::make_shared<jnivm::android::content::pm::ApplicationInfo>();
-
-    // Populate dataDir = absolute path of config["paths"]["android_data"].
-    // This is what Unity reads (via reflection) to figure out where to
-    // write its PlayerPrefs xml: <dataDir>/shared_prefs/<bundle>.v2.playerprefs.xml
-    std::string dd = config["paths"]["android_data"].value_or<std::string>("../");
-    if (char* abs = realpath(dd.c_str(), nullptr)) {
-        info->dataDir = std::make_shared<FakeJni::JString>(abs);
-        free(abs);
-    } else {
-        info->dataDir = std::make_shared<FakeJni::JString>(dd.c_str());
-    }
-    BD_LOG("DATADIR", "ApplicationInfo.dataDir = %s",
-            info->dataDir->asStdString().c_str());
-
-    // Unity prefixes prefs name with applicationInfo.packageName, so we MUST
-    // populate this — otherwise PlayerPrefs file ends up named
-    // ".v2.playerprefs" (no bundle prefix) which doesn't match Android.
-    std::string pkg = config["package"]["packageName"].value_or<std::string>("");
-    info->packageName = std::make_shared<FakeJni::JString>(pkg.c_str());
-    BD_LOG("DATADIR", "ApplicationInfo.packageName = %s", pkg.c_str());
-
-    return info;
+    return bd_make_application_info();
 }
 
 std::shared_ptr<FakeJni::JObject>
@@ -568,6 +643,14 @@ jnivm::android::content::Context::getSharedPreferences(std::shared_ptr<FakeJni::
 std::shared_ptr<FakeJni::JString>
 jnivm::android::content::Context::getPackageCodePath()
 {
+    std::error_code ec;
+    const std::filesystem::path staged_apk =
+        std::filesystem::current_path() / "UnityDataAssetPack.apk";
+    if (std::filesystem::is_regular_file(staged_apk, ec)) {
+        const std::string path = staged_apk.lexically_normal().string();
+        BD_LOG("DATADIR", "getPackageCodePath -> %s", path.c_str());
+        return std::make_shared<FakeJni::JString>(path.c_str());
+    }
     return std::make_shared<FakeJni::JString>(config["paths"]["android_package_code"].value_or<std::string>("./path_not_defined_code"));
 }
 
@@ -683,15 +766,21 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ApplicationInfo) { FakeJni::Constructor<ApplicationInfo> {} },
     { FakeJni::Field<&ApplicationInfo::dataDir> {}, "dataDir", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&ApplicationInfo::nativeLibraryDir> {}, "nativeLibraryDir", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&ApplicationInfo::sourceDir> {}, "sourceDir", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&ApplicationInfo::publicSourceDir> {}, "publicSourceDir", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&ApplicationInfo::packageName> {}, "packageName", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&ApplicationInfo::metaData> {}, "metaData", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&ApplicationInfo::splitPublicSourceDirs> {}, "splitPublicSourceDirs", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::PackageManager) { FakeJni::Constructor<PackageManager> {} },
     { FakeJni::Field<&PackageManager::FEATURE_AUDIO_LOW_LATENCY> {}, "FEATURE_AUDIO_LOW_LATENCY", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&PackageManager::PERMISSION_GRANTED> {}, "PERMISSION_GRANTED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&PackageManager::GET_META_DATA> {}, "GET_META_DATA", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&PackageManager::hasSystemFeature> {}, "hasSystemFeature", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&PackageManager::getInstallerPackageName> {}, "getInstallerPackageName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PackageManager::getApplicationInfo> {}, "getApplicationInfo", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PackageManager::getPackageInfo> {}, "getPackageInfo", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::res::AssetManager) { FakeJni::Constructor<AssetManager> {} },

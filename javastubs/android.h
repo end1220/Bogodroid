@@ -754,11 +754,17 @@ namespace android {
                 // config["paths"]["android_data"].
                 std::shared_ptr<FakeJni::JString> dataDir = std::make_shared<FakeJni::JString>("");
                 std::shared_ptr<FakeJni::JString> nativeLibraryDir = std::make_shared<FakeJni::JString>("");
+                // Unity reflects sourceDir/publicSourceDir when resolving the
+                // install-time APK / data-pack zip for MountDataArchive.
+                std::shared_ptr<FakeJni::JString> sourceDir = std::make_shared<FakeJni::JString>("");
+                std::shared_ptr<FakeJni::JString> publicSourceDir = std::make_shared<FakeJni::JString>("");
                 // packageName is what Unity prefixes the prefs name with:
                 //   prefsName = applicationInfo.packageName + ".v2.playerprefs"
                 // If null/empty, prefs file becomes ".v2.playerprefs.kv" instead
                 // of "<pkg>.v2.playerprefs.kv" — same data but wrong filename.
                 std::shared_ptr<FakeJni::JString> packageName = std::make_shared<FakeJni::JString>("");
+                // PackageItemInfo.metaData — return empty bundle rather than null.
+                std::shared_ptr<FakeJni::JObject> metaData;
 
                 std::shared_ptr<jnivm::Array<FakeJni::JString>> splitPublicSourceDirs = std::make_shared<jnivm::Array<FakeJni::JString>>();
             };
@@ -768,11 +774,16 @@ namespace android {
                 DEFINE_CLASS_NAME("android/content/pm/PackageManager")
                 inline static FakeJni::JString FEATURE_AUDIO_LOW_LATENCY = (FakeJni::JString) "FEATURE_AUDIO_LOW_LATENCY";
                 inline static int PERMISSION_GRANTED = 0;
+                inline static int GET_META_DATA = 0x00000080;
                 // getPackageInfo -> registerFactory (PackageInfo).
                 bool hasSystemFeature(std::shared_ptr<FakeJni::JString> feature);
                 // Returns empty string ("no installer recorded"). Game code
                 // typically uses this for analytics/logging only.
                 std::shared_ptr<FakeJni::JString> getInstallerPackageName(std::shared_ptr<FakeJni::JString> packageName);
+                std::shared_ptr<jnivm::android::content::pm::ApplicationInfo> getApplicationInfo(
+                    std::shared_ptr<FakeJni::JString> packageName, int flags);
+                std::shared_ptr<jnivm::android::content::pm::PackageInfo> getPackageInfo(
+                    std::shared_ptr<FakeJni::JString> packageName, int flags);
             };
         }
 
