@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define BOGODROID_PLUGIN_ABI_VERSION 2u
+#define BOGODROID_PLUGIN_ABI_VERSION 3u
 
 enum BogoPluginInitResult {
     BOGO_PLUGIN_OK = 0,
@@ -17,6 +17,7 @@ enum BogoPluginInitResult {
 typedef struct so_module BogoSoModule;
 typedef void (*BogoIl2cppPostInitCallback)(void* userdata);
 typedef void (*BogoJniInitCallback)(void* jvm, void* userdata);
+typedef void (*BogoPresentCallback)(void* userdata);
 
 typedef union BogoJniValue {
     uint8_t z;
@@ -62,6 +63,8 @@ typedef struct BogoPluginApi {
     void (*hook_address_detour)(BogoSoModule* mod, uintptr_t addr, uintptr_t dst, uintptr_t* orig_out);
     int (*register_il2cpp_post_init)(BogoIl2cppPostInitCallback cb, void* userdata);
     int (*register_jni_init)(BogoJniInitCallback cb, void* userdata);
+    // Called from the render/present thread (eglSwapBuffers). Keep work small.
+    int (*register_present_callback)(BogoPresentCallback cb, void* userdata);
     int (*register_jni_class)(const char* class_name,
                               const BogoJniMethod* methods,
                               uint32_t method_count);

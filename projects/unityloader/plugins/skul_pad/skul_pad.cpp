@@ -4,10 +4,12 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unistd.h>
 
 namespace skul_pad {
 
@@ -16,6 +18,62 @@ static const BogoPluginApi* g_api = nullptr;
 static BogoSoModule* g_mod = nullptr;
 static bool g_enabled = false;
 static std::string g_asset_root;
+
+static long read_status_kb(const char* key)
+{
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f)
+        return -1;
+    char line[256];
+    const size_t key_len = std::strlen(key);
+    long value = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (std::strncmp(line, key, key_len) == 0 && line[key_len] == ':') {
+            if (std::sscanf(line + key_len + 1, "%ld", &value) == 1)
+                break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+static long read_meminfo_kb(const char* key)
+{
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return -1;
+    char line[256];
+    const size_t key_len = std::strlen(key);
+    long value = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (std::strncmp(line, key, key_len) == 0 && line[key_len] == ':') {
+            if (std::sscanf(line + key_len + 1, "%ld", &value) == 1)
+                break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+// Scene transitions (esp. gameBase) are the OOM suspects — always sample RSS.
+static void log_process_memory(const char* why)
+{
+    if (!g_api || !g_api->log)
+        return;
+    const long rss = read_status_kb("VmRSS");
+    const long hwm = read_status_kb("VmHWM");
+    const long size = read_status_kb("VmSize");
+    const long avail = read_meminfo_kb("MemAvailable");
+    const long total = read_meminfo_kb("MemTotal");
+    g_api->log("MEM", "pid=%d rss=%.1fMB hwm=%.1fMB vsz=%.1fMB sys_avail=%.1fMB/%ldMB @ %s",
+               (int)getpid(),
+               rss >= 0 ? rss / 1024.0 : -1.0,
+               hwm >= 0 ? hwm / 1024.0 : -1.0,
+               size >= 0 ? size / 1024.0 : -1.0,
+               avail >= 0 ? avail / 1024.0 : -1.0,
+               total >= 0 ? total / 1024 : -1L,
+               why ? why : "?");
+}
 
 using p_domain_get = void* (*)();
 using p_domain_get_assemblies = void** (*)(void*, size_t*);
@@ -135,6 +193,19 @@ static std::string core_asset_path()
     return std::filesystem::current_path().lexically_normal().string();
 }
 
+static std::string data_pack_assets_path()
+{
+    // Must contain ".apk/" so Unity MountDataArchive uses ZipCentralDirectory.
+    return (std::filesystem::current_path() / "UnityDataAssetPack.apk" / "assets")
+        .lexically_normal()
+        .string();
+}
+
+static std::string streaming_assets_path()
+{
+    return (std::filesystem::current_path() / "assets").lexically_normal().string();
+}
+
 static std::string custom_pack_root()
 {
     std::filesystem::path root = g_asset_root.empty()
@@ -142,8 +213,47 @@ static std::string custom_pack_root()
         : std::filesystem::path(g_asset_root);
     if (root.is_relative())
         root = std::filesystem::current_path() / root;
+    // Play Asset Delivery assetsPath points at the pack's assets/ directory.
+    // Addressables then appends "<hash>.bundle", so this must include assets/.
     return (root.lexically_normal() / "assetpacks" / "CustomFastFollow" /
-            "48" / "48").string();
+            "48" / "48" / "assets").string();
+}
+
+static std::string strip_file_uri(std::string path)
+{
+    if (path.rfind("file:///", 0) == 0)
+        return path.substr(7);
+    if (path.rfind("file://", 0) == 0)
+        return path.substr(6);
+    return path;
+}
+
+static std::string fix_custom_fast_follow_bundle_path(std::string path)
+{
+    path = strip_file_uri(std::move(path));
+    if (path.empty())
+        return path;
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec))
+        return path;
+
+    // Older transform output omitted the assets/ segment:
+    //   .../CustomFastFollow/48/48/<hash>.bundle
+    // Real files live at:
+    //   .../CustomFastFollow/48/48/assets/<hash>.bundle
+    const std::string marker = "/CustomFastFollow/48/48/";
+    const auto pos = path.find(marker);
+    if (pos == std::string::npos)
+        return path;
+    const auto after = pos + marker.size();
+    if (after >= path.size())
+        return path;
+    if (path.compare(after, 7, "assets/") == 0)
+        return path;
+    std::string candidate = path.substr(0, after) + "assets/" + path.substr(after);
+    if (std::filesystem::exists(candidate, ec))
+        return candidate;
+    return path;
 }
 
 static bool is_core_pack_name(const std::string& name)
@@ -203,6 +313,21 @@ static uint32_t g_operation_poll_calls = 0;
 static uint32_t g_transform_calls = 0;
 static float g_last_scene_progress = -1.0f;
 static bool g_activation_pulsed = false;
+static bool g_platform_loader_done = false;
+static uint32_t g_post_load_frames = 0;
+using scene_count_fn = int32_t (*)(uintptr_t);
+using scene_active_fn = void (*)(void*, uintptr_t);
+using scene_at_fn = void (*)(int32_t, void*, uintptr_t);
+using scene_name_fn = void* (*)(void*, uintptr_t);
+static scene_count_fn g_scene_count = nullptr;
+static scene_active_fn g_scene_active_injected = nullptr;
+static scene_at_fn g_scene_at_injected = nullptr;
+static scene_name_fn g_scene_get_name = nullptr;
+static uintptr_t g_scene_count_method = 0;
+static uintptr_t g_scene_active_method = 0;
+static uintptr_t g_scene_at_method = 0;
+static uintptr_t g_scene_name_method = 0;
+static std::string g_last_logged_scenes;
 
 static bool ensure_scene_load_allowed()
 {
@@ -271,10 +396,52 @@ static void poll_scene_operation(const char* source)
         g_last_scene_progress = progress;
     }
     if (done && g_scene_operation_handle) {
+        g_api->log("SKULPAD", "PlatformLoader AsyncOperation completed");
+        g_platform_loader_done = true;
+        g_post_load_frames = 0;
+        // Stop the Skul-only CPU present path once bootstrap finished so the
+        // title scene can use normal swaps and avoid an extra fullscreen copy.
+        setenv("BD_EGL_CPU_PRESENT", "0", 1);
+        setenv("BD_EGL_SWAP_PAUSE", "0", 1);
         f_gchandle_free(g_scene_operation_handle);
         g_scene_operation_handle = 0;
         g_scene_operation = 0;
     }
+}
+
+static void log_loaded_scenes(const char* source)
+{
+    if (!g_scene_count || !g_scene_get_name)
+        return;
+    if (!g_scene_active_injected && !g_scene_at_injected)
+        return;
+    const int32_t count = g_scene_count(g_scene_count_method);
+    std::string summary = "count=" + std::to_string(count);
+    if (g_scene_active_injected) {
+        alignas(8) uint8_t active_storage[16] = {};
+        g_scene_active_injected(active_storage, g_scene_active_method);
+        void* name_obj = g_scene_get_name(active_storage, g_scene_name_method);
+        summary += " active='";
+        summary += managed_string(name_obj);
+        summary += "'";
+    }
+    if (g_scene_at_injected) {
+        for (int32_t i = 0; i < count && i < 8; ++i) {
+            alignas(8) uint8_t scene_storage[16] = {};
+            g_scene_at_injected(i, scene_storage, g_scene_at_method);
+            void* name_obj = g_scene_get_name(scene_storage, g_scene_name_method);
+            summary += " [";
+            summary += std::to_string(i);
+            summary += "]='";
+            summary += managed_string(name_obj);
+            summary += "'";
+        }
+    }
+    if (summary == g_last_logged_scenes)
+        return;
+    g_last_logged_scenes = summary;
+    g_api->log("SKULPAD", "scenes source=%s %s", source ? source : "?",
+               summary.c_str());
 }
 
 static float hook_percentage(uintptr_t, uintptr_t)
@@ -389,9 +556,11 @@ static void hook_load_scene_string(uintptr_t scene_name, uintptr_t method)
     const bool was_allowed = ensure_scene_load_allowed();
     g_api->log("SKULPAD", "SceneManager.LoadScene(string) scene='%s' allowedBefore=%d",
                scene.c_str(), was_allowed ? 1 : 0);
+    log_process_memory(("LoadScene:" + scene).c_str());
     if (g_load_scene_string)
         g_load_scene_string(scene_name, method);
     g_api->log("SKULPAD", "SceneManager.LoadScene(string) returned scene='%s'", scene.c_str());
+    log_process_memory(("LoadSceneDone:" + scene).c_str());
 }
 
 static uintptr_t hook_load_scene_internal(uintptr_t scene_name,
@@ -402,14 +571,13 @@ static uintptr_t hook_load_scene_internal(uintptr_t scene_name,
 {
     ensure_scene_load_allowed();
     const std::string scene = managed_string(reinterpret_cast<void*>(scene_name));
-    // Preserve the game's synchronous next-frame scene commit now that the
-    // Skul-only CPU framebuffer presenter prevents the following fbdev flip
-    // from deadlocking.  The earlier async conversion reached 0.9 but never
-    // ran Unity's synchronous activation path. Keep it as an opt-in diagnostic
-    // switch rather than changing the title's normal bootstrap semantics.
+    // Preserve the game's synchronous next-frame scene commit for most scenes.
+    // PlatformLoader itself historically wedges on mustCompleteNextFrame=1 while
+    // the async path reaches progress 0.9 and can be finished by allowSceneActivation
+    // pulsing from the EGL present poll. Keep Title-direct as an opt-in failure.
     const bool force_async = scene == "PlatformLoader" &&
         g_api->config_get_bool(
-            "game_patches.skul_pad.force_async_platform_loader", 0);
+            "game_patches.skul_pad.force_async_platform_loader", 1);
     const uint8_t effective_complete_next_frame =
         force_async ? 0 : must_complete_next_frame;
     uintptr_t effective_scene_name = scene_name;
@@ -463,6 +631,7 @@ static uintptr_t hook_load_scene_internal(uintptr_t scene_name,
                effective_complete_next_frame ? 1 : 0,
                reinterpret_cast<void*>(operation),
                reinterpret_cast<void*>(native_operation));
+    log_process_memory(("LoadSceneAsync:" + effective_scene).c_str());
     return operation;
 }
 
@@ -473,10 +642,20 @@ static uintptr_t hook_app_bundle_transform(uintptr_t downloader,
     uintptr_t transformed = g_app_bundle_transform
         ? g_app_bundle_transform(downloader, location, method) : 0;
     ++g_transform_calls;
+    std::string path = managed_string(reinterpret_cast<void*>(transformed));
+    const std::string fixed = fix_custom_fast_follow_bundle_path(path);
+    if (fixed != path && !fixed.empty()) {
+        if (g_transform_calls <= 24) {
+            g_api->log("SKULPAD", "AppBundleTransformFunc rewrite '%s' -> '%s'",
+                       path.c_str(), fixed.c_str());
+        }
+        path = fixed;
+        transformed = reinterpret_cast<uintptr_t>(f_string_new(path.c_str()));
+    }
     if (g_transform_calls <= 24) {
-        const std::string path = managed_string(reinterpret_cast<void*>(transformed));
         std::error_code ec;
-        const bool exists = !path.empty() && std::filesystem::exists(path, ec);
+        const std::string check = strip_file_uri(path);
+        const bool exists = !check.empty() && std::filesystem::exists(check, ec);
         g_api->log("SKULPAD", "AppBundleTransformFunc call=%u path='%s' exists=%d error=%d",
                    g_transform_calls, path.c_str(), exists ? 1 : 0,
                    ec ? ec.value() : 0);
@@ -501,23 +680,30 @@ static uintptr_t hook_pack_path(uintptr_t asset_pack_name, uintptr_t, uintptr_t,
 {
     std::string name = managed_string(reinterpret_cast<void*>(asset_pack_name));
     std::string path;
-    if (is_core_pack_name(name)) {
-        path = core_asset_path();
+    if (name == "UnityDataAssetPack") {
+        path = data_pack_assets_path();
         if (!g_logged_core_pack_files) {
-            const std::filesystem::path root = path;
+            const std::filesystem::path apk =
+                std::filesystem::current_path() / "UnityDataAssetPack.apk";
             std::error_code ec;
-            const bool data_exists = std::filesystem::exists(
-                root / "bin" / "Data" / "data.unity3d", ec);
-            const bool datapack_exists = std::filesystem::exists(
-                root / "bin" / "Data" / "datapack.unity3d", ec);
-            const bool data_nested_exists = std::filesystem::exists(
-                root / "assets" / "bin" / "Data" / "data.unity3d", ec);
-            g_api->log("SKULPAD", "core pack root='%s' data=%d datapack=%d nestedData=%d",
-                       path.c_str(), data_exists ? 1 : 0,
-                       datapack_exists ? 1 : 0,
-                       data_nested_exists ? 1 : 0);
+            const bool apk_exists = std::filesystem::exists(apk, ec);
+            const bool loose_datapack = std::filesystem::exists(
+                std::filesystem::current_path() / "assets" / "bin" / "Data" /
+                    "datapack.unity3d",
+                ec);
+            g_api->log("SKULPAD",
+                       "data pack assets='%s' apkExists=%d looseDatapack=%d",
+                       path.c_str(), apk_exists ? 1 : 0,
+                       loose_datapack ? 1 : 0);
             g_logged_core_pack_files = true;
         }
+    } else if (name == "UnityStreamingAssetsPack") {
+        path = streaming_assets_path();
+        std::error_code ec;
+        const bool json_exists = std::filesystem::exists(
+            std::filesystem::path(path) / "CustomAssetPacksData.json", ec);
+        g_api->log("SKULPAD", "streaming pack root='%s' CustomAssetPacksData.json=%d",
+                   path.c_str(), json_exists ? 1 : 0);
     } else if (name == "CustomFastFollow") {
         path = custom_pack_root();
     } else {
@@ -740,6 +926,41 @@ static void install(void*)
         g_async_set_allow_method = reinterpret_cast<uintptr_t>(set_allow_method);
         g_api->log("SKULPAD", "AsyncOperation polling armed");
     }
+
+    void* scene_class = f_class_from_name(
+        core_image, "UnityEngine.SceneManagement", "Scene");
+    void* scene_count_method = g_scene_manager_class
+        ? f_get_method(g_scene_manager_class, "get_sceneCount", 0) : nullptr;
+    void* scene_active_method = g_scene_manager_class
+        ? f_get_method(g_scene_manager_class, "GetActiveScene_Injected", 1) : nullptr;
+    void* scene_at_method = g_scene_manager_class
+        ? f_get_method(g_scene_manager_class, "GetSceneAt_Injected", 2) : nullptr;
+    void* scene_name_method = scene_class
+        ? f_get_method(scene_class, "get_name", 0) : nullptr;
+    if (scene_count_method && scene_name_method &&
+        (scene_active_method || scene_at_method)) {
+        g_scene_count = reinterpret_cast<scene_count_fn>(
+            *reinterpret_cast<uintptr_t*>(scene_count_method));
+        g_scene_count_method = reinterpret_cast<uintptr_t>(scene_count_method);
+        g_scene_get_name = reinterpret_cast<scene_name_fn>(
+            *reinterpret_cast<uintptr_t*>(scene_name_method));
+        g_scene_name_method = reinterpret_cast<uintptr_t>(scene_name_method);
+        if (scene_active_method) {
+            g_scene_active_injected = reinterpret_cast<scene_active_fn>(
+                *reinterpret_cast<uintptr_t*>(scene_active_method));
+            g_scene_active_method = reinterpret_cast<uintptr_t>(scene_active_method);
+        }
+        if (scene_at_method) {
+            g_scene_at_injected = reinterpret_cast<scene_at_fn>(
+                *reinterpret_cast<uintptr_t*>(scene_at_method));
+            g_scene_at_method = reinterpret_cast<uintptr_t>(scene_at_method);
+        }
+        g_api->log("SKULPAD", "SceneManager scene diagnostics armed");
+    } else {
+        g_api->log("SKULPAD", "SceneManager scene diagnostics unavailable count=%p active=%p at=%p name=%p",
+                   scene_count_method, scene_active_method, scene_at_method,
+                   scene_name_method);
+    }
 }
 
 static bool enabled()
@@ -750,6 +971,8 @@ static bool enabled()
     return g_api->config_get_bool("game_patches.skul_pad.enabled",
            g_api->config_get_bool("skul_pad.enabled", 0)) != 0;
 }
+
+static void on_present(void* userdata);
 
 static int init(BogoSoModule* lil2cpp)
 {
@@ -832,7 +1055,27 @@ static int init(BogoSoModule* lil2cpp)
         return BOGO_PLUGIN_OK;
     }
     g_api->log("SKULPAD", "armed: asset_root=%s", g_asset_root.c_str());
+    if (g_api->register_present_callback) {
+        g_api->register_present_callback(&on_present, nullptr);
+        g_api->log("SKULPAD", "registered present callback");
+    }
     return BOGO_PLUGIN_OK;
+}
+
+static void on_present(void* /*userdata*/)
+{
+    if (!g_enabled)
+        return;
+    poll_scene_operation("egl");
+    if (g_platform_loader_done) {
+        ++g_post_load_frames;
+        if (g_post_load_frames <= 3 ||
+            g_post_load_frames == 30 ||
+            g_post_load_frames == 120 ||
+            (g_post_load_frames % 300) == 0) {
+            log_loaded_scenes("egl");
+        }
+    }
 }
 
 } // namespace skul_pad

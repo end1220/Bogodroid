@@ -35,6 +35,24 @@ backend = "auto"
 [unity]
 block_analytics = true
 
-[game_patches.skul_pad]
+[debug]
+# Process RSS sample every N ms during eglSwapBuffers (0 = off).
+mem_log_interval_ms = 2000
+
+[gpu]
+# 1 GB handheld: RGBA8 runtime box-downsample. ETC2/ASTC still need offline
+# retier via tools/unity_astc (compressed upload is not intercepted at runtime).
+textureMaxDim = 384
+
+# Archived Skul PAD layout (port stopped). Enable only to replay the case study.
+[play_asset_delivery]
 enabled = true
+default_pack = "CustomFastFollow"
+pack_version = "48"
+pack_path_template = "assetpacks/{pack}/{ver}/{ver}/assets"
+
+# Skul port stopped (OOM at gameBase). Keep plugin for reference; leave disabled
+# unless deliberately replaying the archived port.
+[game_patches.skul_pad]
+enabled = false
 direct_title_scene = false

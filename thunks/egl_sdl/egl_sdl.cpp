@@ -1,5 +1,7 @@
 #include "egl_sdl.h"
 #include "SDL2/SDL.h"
+#include "process_memory.h"
+#include "plugin_present.h"
 #include "glad_egl.h"
 #include "gles2.h"
 #include "logging.h"
@@ -327,12 +329,10 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     const bool cpu_present = cpu_present_value && *cpu_present_value &&
         strcmp(cpu_present_value, "0") != 0;
 
-    // Skul's AndroidDownloadPacks -> PlatformLoader transition can wedge the
-    // Allwinner mali-fbdev backend in sunxi_fb_pan_display.  The Skul plugin
-    // raises this process-local flag only around that bootstrap transition so
-    // Unity can keep advancing the scene without submitting the fatal flip.
-    // A bounded timeout makes the diagnostic self-clearing even if the old
-    // scene is destroyed before its AsyncOperation poll observes completion.
+    // Optional CPU framebuffer present + plugin present callbacks. Games can
+    // raise BD_EGL_CPU_PRESENT around bootstrap transitions that wedge mali
+    // fbdev (sunxi_fb_pan_display). Plugins register via
+    // register_present_callback (ABI v3) to poll AsyncOperations on this thread.
     static bool transition_pause_active = false;
     static Uint32 transition_pause_started = 0;
     static Uint32 transition_pause_ms = 0;
@@ -343,8 +343,8 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     bool skip_swap = cpu_present;
     if (cpu_present) {
         bd_cpu_present_frame();
-        // The target handheld exposes a single CPU core to the process. Keep
-        // the readback/copy fallback near 60 FPS so input, audio and the
+        bd_plugin_run_present_callbacks();
+        // Keep the readback/copy fallback near 60 FPS so input, audio and the
         // Dropbeak service are not starved by an unbounded render loop.
         SDL_Delay(16);
     } else if (pause_enabled) {
@@ -382,6 +382,21 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
 
     if (!skip_swap)
         SDL_GL_SwapWindow(sdl_win);
+
+    // Process RSS sample for OOM diagnosis (gameBase load etc.). Default 2s;
+    // set debug.mem_log_interval_ms=0 or BD_MEM_LOG_MS=0 to disable.
+    {
+        static int mem_interval_ms = -1;
+        if (mem_interval_ms < 0) {
+            const char* env = getenv("BD_MEM_LOG_MS");
+            if (env && *env)
+                mem_interval_ms = atoi(env);
+            else
+                mem_interval_ms = config["debug"]["mem_log_interval_ms"]
+                    .value_or<int>(2000);
+        }
+        bd_log_process_memory_throttled("eglSwapBuffers", mem_interval_ms);
+    }
 
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {

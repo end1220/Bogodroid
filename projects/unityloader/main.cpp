@@ -377,7 +377,9 @@ namespace il2cpp_patch {
 
 namespace plugin_host {
     struct JniInitEntry { BogoJniInitCallback cb; void* userdata; };
+    struct PresentEntry { BogoPresentCallback cb; void* userdata; };
     static std::vector<JniInitEntry> g_jni_init_callbacks;
+    static std::vector<PresentEntry> g_present_callbacks;
     static std::set<std::string> g_loaded_paths;
     static std::vector<void*> g_handles;
     static std::string g_config_path;
@@ -443,6 +445,19 @@ namespace plugin_host {
         if (!cb || !g_jvm) return 0;
         g_jni_init_callbacks.push_back({cb, userdata});
         return 1;
+    }
+
+    static int api_register_present_callback(BogoPresentCallback cb, void* userdata) {
+        if (!cb) return 0;
+        g_present_callbacks.push_back({cb, userdata});
+        return 1;
+    }
+
+    static void run_present_callbacks() {
+        for (const PresentEntry& e : g_present_callbacks) {
+            if (e.cb)
+                e.cb(e.userdata);
+        }
     }
 
     static uint32_t jni_argument_count(const char* signature) {
@@ -573,6 +588,7 @@ namespace plugin_host {
         api.hook_address_detour = &api_hook_address_detour;
         api.register_il2cpp_post_init = &api_register_il2cpp_post_init;
         api.register_jni_init = &api_register_jni_init;
+        api.register_present_callback = &api_register_present_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;
         api.jni_new_string_utf8 = &api_jni_new_string_utf8;
@@ -582,7 +598,7 @@ namespace plugin_host {
 
     static void load_one(const char* path, const BogoPluginApi& api) {
         if (!path || g_loaded_paths.count(path)) return;
-        void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
             BD_LOG("PLUGIN", "dlopen failed: %s: %s", path, dlerror());
             return;
@@ -642,6 +658,10 @@ namespace plugin_host {
         for (const auto& entry : g_jni_init_callbacks)
             entry.cb((void*)vm, entry.userdata);
     }
+}
+
+extern "C" void bd_plugin_run_present_callbacks(void) {
+    plugin_host::run_present_callbacks();
 }
 
 // ───────────────────────────────────────────────────────────────────────────

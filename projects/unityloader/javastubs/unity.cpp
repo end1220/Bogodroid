@@ -14,6 +14,60 @@
 
 extern toml::table config;
 
+namespace {
+
+bool pad_enabled()
+{
+    return config["play_asset_delivery"]["enabled"].value_or(false);
+}
+
+std::string pad_default_pack()
+{
+    return config["play_asset_delivery"]["default_pack"].value_or<std::string>("");
+}
+
+std::string pad_version()
+{
+    return config["play_asset_delivery"]["pack_version"].value_or<std::string>("");
+}
+
+// Template uses {pack} and {ver}; relative to android_files (conf).
+// Example: "assetpacks/{pack}/{ver}/{ver}/assets"
+std::string pad_path_template()
+{
+    return config["play_asset_delivery"]["pack_path_template"].value_or<std::string>(
+        "assetpacks/{pack}/{ver}/{ver}/assets");
+}
+
+std::string expand_pad_template(const std::string& tmpl,
+                                const std::string& pack,
+                                const std::string& ver)
+{
+    std::string out = tmpl;
+    auto replace_all = [](std::string& s, const std::string& from, const std::string& to) {
+        if (from.empty()) return;
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    };
+    replace_all(out, "{pack}", pack);
+    replace_all(out, "{ver}", ver);
+    return out;
+}
+
+std::shared_ptr<FakeJni::JString> pad_name_or_default(
+    std::shared_ptr<FakeJni::JString> name)
+{
+    if (name)
+        return name;
+    const std::string def = pad_default_pack();
+    return std::make_shared<FakeJni::JString>(def.c_str());
+}
+
+} // namespace
+
 ///// UnityPlayer
 std::shared_ptr<jnivm::com::unity3d::player::UnityPlayerActivity> jnivm::com::unity3d::player::UnityPlayer::currentActivity = nullptr;
 
@@ -112,20 +166,20 @@ void jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallbac
 void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::report(
     std::shared_ptr<FakeJni::JString> name, FakeJni::JInt status, FakeJni::JInt error)
 {
-    BD_LOG("SKULPAD", "status result name=%s status=%d error=%d",
+    BD_LOG("PAD", "status result name=%s status=%d error=%d",
            name ? name->c_str() : "(null)", (int)status, (int)error);
     auto callbacks = vm.findClass("com/unity3d/player/UnityCoreAssetPacksStatusCallbacks");
     if (!callbacks) {
-        BD_LOG("SKULPAD", "status result dropped: callback class not found");
+        BD_LOG("PAD", "status result dropped: callback class not found");
         return;
     }
     auto method = callbacks->getMethod("(Ljava/lang/String;II)V", "nativeStatusQueryResult");
     if (!method) {
-        BD_LOG("SKULPAD", "nativeStatusQueryResult method is not registered");
+        BD_LOG("PAD", "nativeStatusQueryResult method is not registered");
         return;
     }
     FakeJni::LocalFrame frame(vm);
-    BD_LOG("SKULPAD", "calling nativeStatusQueryResult");
+    BD_LOG("PAD", "calling nativeStatusQueryResult");
     method.invoke(frame.getJniEnv(), this, name, status, error);
 }
 
@@ -134,7 +188,7 @@ void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::onStatusRe
     std::shared_ptr<FakeJni::JIntArray> statuses, std::shared_ptr<FakeJni::JIntArray> errors)
 {
     (void)sequence;
-    BD_LOG("SKULPAD", "onStatusResult count=%d", names ? names->getSize() : 0);
+    BD_LOG("PAD", "onStatusResult count=%d", names ? names->getSize() : 0);
     if (!names || !statuses || !errors)
         return;
     const int count = std::min({ names->getSize(), statuses->getSize(), errors->getSize() });
@@ -147,7 +201,7 @@ void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::onStatusUp
     FakeJni::JLong transferred, FakeJni::JLong total, FakeJni::JInt error,
     FakeJni::JInt errorCode)
 {
-    BD_LOG("SKULPAD", "onStatusUpdate name=%s status=%d transferred=%lld total=%lld error=%d errorCode=%d",
+    BD_LOG("PAD", "onStatusUpdate name=%s status=%d transferred=%lld total=%lld error=%d errorCode=%d",
            name ? name->c_str() : "(null)", (int)status,
            (long long)transferred, (long long)total, (int)error, (int)errorCode);
     report(name, status, errorCode ? errorCode : error);
@@ -175,18 +229,17 @@ jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getInstance()
 
 bool jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::playCoreApiMissing()
 {
-    // The Linux loader supplies the PAD result through the IL2CPP hook in
-    // skul_pad.so. Treat the Java Play Core dependency as available so the
-    // managed AndroidAssetPacks path does not abort before reaching it.
-    verbose("PlayAssetDeliveryUnityWrapper", "playCoreApiMissing() -> false (native PAD shim)");
-    return false;
+    const bool missing = !pad_enabled();
+    verbose("PlayAssetDeliveryUnityWrapper", "playCoreApiMissing() -> %s",
+            missing ? "true" : "false (PAD shim)");
+    return missing;
 }
 
 void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::cancelAssetPackDownload(
     std::shared_ptr<FakeJni::JString> name)
 {
     auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
-    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    (*names)[0] = pad_name_or_default(name);
     cancelAssetPackDownloads(names);
 }
 
@@ -201,7 +254,7 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::downloadAssetPa
     std::shared_ptr<IAssetPackManagerDownloadStatusCallback> callback)
 {
     auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
-    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    (*names)[0] = pad_name_or_default(name);
     downloadAssetPacks(names, callback);
 }
 
@@ -210,7 +263,7 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::downloadAssetPa
     std::shared_ptr<IAssetPackManagerDownloadStatusCallback> callback)
 {
     verbose("PlayAssetDeliveryUnityWrapper", "downloadAssetPacks(%d) -> completed", names ? names->getSize() : 0);
-    if (!callback)
+    if (!callback || !pad_enabled())
         return;
     // An empty list is a normal success path when every custom pack is already
     // installed. AssetPackDownloader has called NotifyCustomPackDownloaded for
@@ -219,7 +272,7 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::downloadAssetPa
     // status event here would report a pack that is no longer pending and make
     // the managed callback dereference a missing list/dictionary entry.
     if (!names || names->getSize() == 0) {
-        BD_LOG("SKULPAD", "empty download list; all custom packs already installed");
+        BD_LOG("PAD", "empty download list; all custom packs already installed");
         return;
     }
     for (int i = 0; i < names->getSize(); ++i)
@@ -248,26 +301,38 @@ jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackPath(
     custom_root = custom_root.lexically_normal();
 
     std::filesystem::path path;
-    if (pack_name == "UnityDataAssetPack" ||
-        pack_name == "UnityStreamingAssetsPack") {
-        // The Android asset-pack root contains the "assets/" directory.
-        // Returning game_root/assets would make Unity look for
-        // <root>/assets/assets/bin/Data and leaves the core data pack
-        // partially mounted.
-        path = game_root;
-    } else if (pack_name.size() == 32 &&
-               std::all_of(pack_name.begin(), pack_name.end(), [](unsigned char c) {
-                   return std::isxdigit(c) != 0;
-               })) {
-        // Addressables passes the bundle hash through GetAssetPackPath.
-        path = custom_root / "assetpacks" / "CustomFastFollow" / "48" / "48" /
-               "assets" / (pack_name + ".bundle");
+    if (pack_name == "UnityDataAssetPack") {
+        // Unity's MountDataArchive only accepts paths that contain
+        // ".apk/", ".obb/", ".jar/", or ".zip/" (ZipCentralDirectory). A plain
+        // directory like game_root fails with "Path ... was not parsed" and
+        // never opens datapack.unity3d. Return an APK-style assets path whose
+        // zip payload is staged next to gamedata as UnityDataAssetPack.apk.
+        path = game_root / "UnityDataAssetPack.apk" / "assets";
+    } else if (pack_name == "UnityStreamingAssetsPack") {
+        // StreamingAssets live under assets/ in this port layout. Addressables
+        // loads CustomAssetPacksData.json from
+        // Application.streamingAssetsPath/CustomAssetPacksData.json, which is
+        // derived from this pack path.
+        path = game_root / "assets";
+    } else if (pad_enabled()) {
+        const std::string def_pack = pad_default_pack();
+        const std::string ver = pad_version();
+        const std::string pack = !def_pack.empty() ? def_pack : pack_name;
+        std::string rel = expand_pad_template(pad_path_template(), pack, ver);
+        if (pack_name.size() == 32 &&
+            std::all_of(pack_name.begin(), pack_name.end(), [](unsigned char c) {
+                return std::isxdigit(c) != 0;
+            })) {
+            path = custom_root / rel / (pack_name + ".bundle");
+        } else {
+            path = custom_root / rel;
+        }
     } else {
-        path = custom_root / "assetpacks" / "CustomFastFollow" / "48" / "48";
+        path = custom_root;
     }
 
     const std::string path_string = path.lexically_normal().string();
-    BD_LOG("SKULPAD", "getAssetPackPath(%s) -> %s",
+    BD_LOG("PAD", "getAssetPackPath(%s) -> %s",
            pack_name.empty() ? "(null)" : pack_name.c_str(), path_string.c_str());
     return std::make_shared<FakeJni::JString>(path_string);
 }
@@ -277,7 +342,7 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackSta
     std::shared_ptr<IAssetPackManagerStatusQueryCallback> callback)
 {
     auto names = std::make_shared<FakeJni::JArray<FakeJni::JString>>(1);
-    (*names)[0] = name ? name : std::make_shared<FakeJni::JString>("CustomFastFollow");
+    (*names)[0] = pad_name_or_default(name);
     getAssetPackStates(names, callback);
 }
 
@@ -286,12 +351,12 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackSta
     std::shared_ptr<IAssetPackManagerStatusQueryCallback> callback)
 {
     verbose("PlayAssetDeliveryUnityWrapper", "getAssetPackStates(%d) -> completed", names ? names->getSize() : 0);
-    if (!callback || !names)
+    if (!callback || !names || !pad_enabled())
         return;
     auto statuses = std::make_shared<FakeJni::JIntArray>(names->getSize());
     auto errors = std::make_shared<FakeJni::JIntArray>(names->getSize());
     for (int i = 0; i < names->getSize(); ++i) {
-        BD_LOG("SKULPAD", "getAssetPackStates[%d] name=%s status=4 error=0",
+        BD_LOG("PAD", "getAssetPackStates[%d] name=%s status=4 error=0",
                i, (*names)[i] ? (*names)[i]->c_str() : "(null)");
         (*statuses)[i] = 4;
         (*errors)[i] = 0;
