@@ -1,6 +1,23 @@
 # Bogodroid Agent Notes
 
-新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md)（选游戏门槛、流水线、止损判据）。Skul 已止损，勿继续深挖。
+新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)。Skul 已止损。
+
+## 日志 / 构建开关（必读）
+
+日志是**编译期**开关，不是运行时 toml。层次见 `platform/common/logging.h`：
+
+| CMake | 默认 | 作用 |
+|-------|------|------|
+| `BD_ENABLE_LOG` | **OFF** | 主开关：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG` |
+| `BD_ENABLE_TRACE` | OFF | 需 LOG：额外 `BD_DEBUG` / `BOOT_LOG` 等 |
+| `BD_ENABLE_VERBOSE` | OFF | 需 LOG：大量 `verbose()`（含 NATIVE/JNI 刷屏） |
+| `IL2CPP_TRACE` | OFF | 需 LOG：il2cpp 内部 trace |
+
+**上机默认**：`CMAKE_BUILD_TYPE=Release` + 上述全 OFF + `strip`（~5MB）。  
+**排障**：临时 `BD_ENABLE_LOG=ON`（可加 TRACE/VERBOSE）重编推送；通了再改回关日志的 Release。  
+`fatal_error` / SEGV 回溯**不依赖** `BD_ENABLE_LOG`。
+
+完整命令见 playbook §1.1；CMake 细节见 [`BUILD-DOCKER.md`](BUILD-DOCKER.md) §5–6。
 
 ## Dropbeak：大文件推送 / 拉取（掌机）
 

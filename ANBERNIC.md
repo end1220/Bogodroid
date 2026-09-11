@@ -146,23 +146,19 @@ NEO vendor 树里 **CMake 这一段已经改过一半**（pkg-config、USE_MOLD 
 
 `platform/common/logging.h` 的 `fatal_error` 打印后 `fflush` + `abort()`。`BD_LOG` 同样 `fflush`，避免崩溃前日志留在缓冲里。
 
-### 3.3.1 Release 日志策略（已真机验证）
+### 3.3.1 Release 日志策略（2026-09-11 更新）
 
-Release 部署使用 `BD_ENABLE_LOG=ON`、`BD_ENABLE_TRACE=OFF`。保留启动阶段、控制器
-识别与映射、EGL 初始化、音频后端、插件安装/失败、Unity 退出及崩溃信息。以下高频
-遥测已直接从代码删除：
+**上机默认：`BD_ENABLE_LOG=OFF` + Release + strip**（约 5MB，log 行数少）。策略入口：
+[`AGENTS.md`](AGENTS.md)、[`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) §1.1、
+[`BUILD-DOCKER.md`](BUILD-DOCKER.md) §4。
 
-- `nativeRender` 周期帧日志；
-- 每次 `eglSwapBuffers` 日志；
-- 每次 `glTexStorage2D` 日志；
-- 控制器逐键事件和临时摇杆轴诊断；
-- Hollow Knight 默认状态下的摄像机/tk2d 详细跟踪。
+排障时临时 `-DBD_ENABLE_LOG=ON`（可加 TRACE；VERBOSE 刷屏严重慎用）。以下高频遥测已从代码删除，勿再加回默认路径：
 
-不要在游戏 TOML 中增加 `[logging]` 或分类 denylist；unityloader 不实现运行时日志
-过滤。Hollow Knight 需要详细视口诊断时，临时设置
-`[game_patches.hollow_knight_viewport] debug = true`，复现结束
-后恢复 `false`。其他热路径需要诊断时，在开发分支加入限频日志并重新构建，问题解决后
-删除诊断代码。
+- `nativeRender` 周期帧日志、每次 `eglSwapBuffers` / `glTexStorage2D`；
+- 控制器逐键与临时摇杆轴诊断；
+- Hollow Knight 默认摄像机/tk2d 跟踪（需时用插件 `debug = true`）。
+
+不要在游戏 TOML 中增加 `[logging]` 过滤；unityloader 不实现运行时分类开关。
 
 ### 3.4 启动脚本与部署布局
 

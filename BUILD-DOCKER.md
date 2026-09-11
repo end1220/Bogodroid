@@ -117,11 +117,13 @@ docker run --rm --platform linux/arm64 \
 | Flag | 默认 | 作用 |
 |---|---|---|
 | `CMAKE_BUILD_TYPE=Release` | Debug | 启用 LTO + `-fvisibility=hidden` + `-Wl,--gc-sections -s`。9.5 MB → 4.9 MB |
-| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开关键启动、状态、错误、退出的 `BD_LOG` + jnivm `LOG`。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
+| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开关键启动、状态、错误、退出的 `BD_LOG` + jnivm `LOG` + `[BD-MEM]`。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
 | `BD_ENABLE_TRACE=ON` | OFF | 在 LOG 之上额外打开 `BD_DEBUG` / `warning` / `BOOT_LOG` 细节诊断行。需 `BD_ENABLE_LOG=ON` |
-| `BD_ENABLE_VERBOSE=ON` | OFF | 在 LOG 之上额外打开 `verbose()`（365 处 legacy）。需 `BD_ENABLE_LOG=ON` |
+| `BD_ENABLE_VERBOSE=ON` | OFF | 在 LOG 之上额外打开 `verbose()`（大量 legacy，含 NATIVE/JNI）。需 `BD_ENABLE_LOG=ON` |
 | `IL2CPP_TRACE=ON` | OFF | 在 LOG 之上额外打开 il2cpp 内部 trace（仅 unityloader）。需 `BD_ENABLE_LOG=ON` |
 | `BD_ENABLE_OPENSLES_SHIM=ON` | OFF | 把 `thunks/opensles/` 编进 + 暴露给 FMOD。当前 AudioTrack/fakefmod 路径已经能用，此 flag 保留为后续 A/B |
+
+**上机约定（2026-09-11）**：发布包用 Release + **保持 `BD_ENABLE_LOG=OFF`**（及 TRACE/VERBOSE OFF）再 `strip`；排障再临时开 LOG。详见根目录 `AGENTS.md` 与 `docs/PORTING_PLAYBOOK.md` §1.1。
 
 ---
 

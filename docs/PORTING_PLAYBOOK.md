@@ -1,6 +1,6 @@
 # Unity IL2CPP → Linux ARM 掌机移植 Playbook
 
-面向 1GB 级 UMA 掌机（如 Anbernic BuildRoot）。新端口**先读本文**，大文件推送细节见根目录 [`AGENTS.md`](../AGENTS.md)。
+面向 1GB 级 UMA 掌机（如 Anbernic BuildRoot）。新端口**先读本文**与 [`CASE_STUDIES.md`](CASE_STUDIES.md)；大文件推送见根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 0. 何时不要开坑（止损判据）
 
@@ -12,36 +12,51 @@
 | 单个 bundle 同时塞「全角色/全音效/全 UI」 | 无法部分卸载；缩纹理只能延缓 |
 | 运行时压 ASTC/ETC2 无效 | `textureMaxDim` **拦不住**压缩上传，必须离线 retier |
 
-**负面案例：Skul（已止损）** — 标题预加载 RSS≈785MB / avail≈72MB，进 `gameBase` 后 avail≈7MB 假死。详见  
-`D:\Locke\gitee\LinuxArmPorts\SKULL_ARM_LINUX_PORTING.md`。  
-经验已提取进核心（`[BD-MEM]`、PAD 配置、present 插件回调）；**不要**在 Skul 上继续深挖标题 unload / 更深 ASTC，除非新游戏证明 ROI。
+**负面案例：Skul（已止损）** — 摘要见 [`CASE_STUDIES.md`](CASE_STUDIES.md)。标题 RSS≈785MB 后进关无意义。
 
 ## 1. 标准流水线
 
 ```text
-APK/解包 → 本地 staging 目录
+APK/解包 → 本地 staging
     → inventory / astc_retier / shrink / audio_stream_patch
-    → Docker 编 unityloader + 所需 plugin
+    → Docker：Release + 关日志编 unityloader + plugin
     → Dropbeak push (--force --chunk --chunk-size 16m --verify)
-    → 掌机手启游戏（勿远程 Skul.sh 一类）
-    → 看 log：[BD-MEM] rss/sys_avail + 场景名
+    → 掌机 Ports 手启（勿随意远程 .sh）
+    → 看 log：退出码、prefs flush；诊断构建再开 [BD-MEM]
 ```
 
-构建（示例）：
+### 1.1 发布构建（小体积、少日志）
+
+日常上机用 **Release、关 BD 日志、strip**（约 5MB 级，而非 Debug ~90MB）。
+
+日志为**编译期**开关（见 `platform/common/logging.h` / `AGENTS.md`）：
+
+| 开关 | 上机 | 排障 |
+|------|------|------|
+| `BD_ENABLE_LOG` | OFF | ON（主开关，含 `[BD-MEM]`） |
+| `BD_ENABLE_TRACE` | OFF | 按需 ON |
+| `BD_ENABLE_VERBOSE` | OFF | 仅深挖时 ON（行数极多） |
+| `CMAKE_BUILD_TYPE` | Release + strip | Debug 或 Release+LOG |
 
 ```powershell
 docker run --rm --platform linux/amd64 `
   -v "D:\Locke\gitee\Bogodroid:/work" -w /work/build-aarch64 `
-  bogo-builder:unity2017-armv7 `
-  bash -c "cmake --build . -j2 --target unityloader plugin_<name>"
+  bogo-builder:unity2017-armv7 bash -c @"
+cmake . -DCMAKE_BUILD_TYPE=Release \
+  -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF
+cmake --build . -j2 --target unityloader plugin_<name>
+aarch64-linux-gnu-strip --strip-unneeded unityloader unityloader.d/*.so
+"@
 ```
+
+排障示例：同一目录改 `-DBD_ENABLE_LOG=ON`，可选 `-DBD_ENABLE_TRACE=ON`，重编推送；toml `[debug] mem_log_interval_ms` 仅在 LOG 打开时有输出。
 
 ## 2. 资产工具矩阵
 
 | 工具 | 用途 |
 |------|------|
 | `inventory_bundle.py` | 只读：贴图 VRAM / 音频 / 类型占比 |
-| `astc_retier.py` / `retier_all.sh` | 强制 ASTC；`--packer original` 保兼容 |
+| `astc_retier.py` / `retier_all.sh` | 强制 ASTC；`--packer original` |
 | `shrink_bundle.py --cap N` | 降长边；磁盘可能变大，看 RSS |
 | `audio_stream_patch.py` | LoadType；内嵌包加 `--allow-embedded --mode hybrid` |
 
@@ -51,21 +66,29 @@ docker run --rm --platform linux/amd64 `
 
 | 能力 | 配置 / API |
 |------|------------|
-| 进程内存 | `[debug] mem_log_interval_ms`；日志 `[BD-MEM]` |
+| 进程内存 | `[debug] mem_log_interval_ms`；需 `BD_ENABLE_LOG`；标签 `[BD-MEM]` |
 | PAD Java stub | `[play_asset_delivery] enabled/default_pack/pack_version/pack_path_template` |
-| 每帧 present 钩子 | Plugin ABI v3：`register_present_callback`（见 `platform/common/plugin_present.h`） |
-| CPU present / swap pause | 环境变量 `BD_EGL_CPU_PRESENT`、`BD_EGL_SWAP_PAUSE`（插件可 setenv） |
+| 每帧 present 钩子 | Plugin ABI v3：`register_present_callback` |
+| CPU present / swap pause | `BD_EGL_CPU_PRESENT`、`BD_EGL_SWAP_PAUSE`（插件可 setenv） |
 
-标题专属逻辑放 `unityloader.d/<game>.so`，见 [`projects/unityloader/plugins/README.md`](../projects/unityloader/plugins/README.md)。
+标题专属逻辑放 `unityloader.d/<game>.so`。
 
 ## 4. 插件约定
 
-1. 校验 `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **3**）。
-2. 需要每帧轮询时：`api->register_present_callback(...)`，不要导出供核心 `dlsym` 的游戏名符号。
-3. PAD 路径补丁、IL2CPP hook 留在插件；核心只提供可配置 stub。
+1. `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **3**）。
+2. 每帧工作用 `register_present_callback`，不要让核心 `dlsym` 游戏名符号。
+3. PAD 路径补丁 / IL2CPP hook 留在插件。
 
-## 5. 复测清单
+## 5. 选游戏与引擎初判
 
-1. `dropbeak-cli ping`；大文件 `ls -la` 与本地一致。  
-2. 日志：`[BD-MEM]` 在关键 `LoadScene*` 前后；`sys_avail` 是否见底。  
-3. 若标题阶段 avail 已 &lt;100MB → **止损或换游戏**，不要赌进关后再省。
+| 信号 | 含义 |
+|------|------|
+| `libil2cpp.so` + `global-metadata.dat` | Unity IL2CPP → 本仓库主线 |
+| `libyoyo.so` | GameMaker → **不是** unityloader 路径（另起运行时） |
+| 大 Addressables / Play Asset Delivery 包 | 先做 inventory；标题峰值近 1GB 则止损 |
+
+## 6. 复测清单
+
+1. `dropbeak-cli ping`；大文件 `ls -la` / `--verify` 一致。  
+2. 正常退出：`exited (0)` + prefs flush。  
+3. 诊断构建下看 `[BD-MEM]`；标题阶段 `sys_avail` &lt;100MB → 止损或换游戏。
