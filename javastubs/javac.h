@@ -3,6 +3,7 @@
 
 #include "baron/baron.h"
 #include <jnivm/method.h>
+#include <jnivm/throwable.h>
 #include <fstream>
 #include <thread>
 
@@ -37,6 +38,37 @@ namespace java {
             {
             }
             long longValue();
+        };
+
+        // [BD] Unity's managed-exception path constructs java/lang/Error and
+        // hands it to JNIEnv::Throw(); jnivm unpacks the handle again with
+        // UnpackJObject<jnivm::Throwable>. Registering these makes that
+        // upcast succeed. Without them a STUB-MISS handle is a generic dummy
+        // object, jnivm raises "Invalid Reference, Unexpected Type" and the
+        // process dies in terminate(). See also docs/PORTING_PLAYBOOK.md
+        // §1.2 on JNIVM_ENABLE_RETURN_NON_ZERO, which decides whether a
+        // missing stub returns null (safe) or such a dummy (fatal).
+        // jnivm::Throwable itself is codegen-blacklisted
+        // (internal/codegen/class.cpp), so these derive from it in C++ while
+        // registering their own JNI names.
+        class Error : public jnivm::Throwable {
+        public:
+            DEFINE_CLASS_NAME("java/lang/Error")
+            Error() = default;
+            Error(std::shared_ptr<FakeJni::JString> message);
+            std::shared_ptr<FakeJni::JString> getMessage();
+        private:
+            std::shared_ptr<FakeJni::JString> message_;
+        };
+
+        class Exception : public jnivm::Throwable {
+        public:
+            DEFINE_CLASS_NAME("java/lang/Exception")
+            Exception() = default;
+            Exception(std::shared_ptr<FakeJni::JString> message);
+            std::shared_ptr<FakeJni::JString> getMessage();
+        private:
+            std::shared_ptr<FakeJni::JString> message_;
         };
 
         // [BD] Shadow class providing additional methods on java/lang/String.
@@ -209,6 +241,10 @@ namespace java {
             std::shared_ptr<FakeJni::JString> path;
             File(std::shared_ptr<FakeJni::JString> path);
             std::shared_ptr<FakeJni::JString> getPath();
+            std::shared_ptr<FakeJni::JString> getAbsolutePath();
+            std::shared_ptr<FakeJni::JString> getName();
+            std::shared_ptr<FakeJni::JString> getParent();
+            std::shared_ptr<File> getParentFile();
             std::shared_ptr<FakeJni::JString> toString();
             jlong getFreeSpace();
             jlong getUsableSpace();
@@ -247,6 +283,7 @@ namespace java {
             DEFINE_CLASS_NAME("java/util/List")
             virtual std::shared_ptr<Iterator> iterator();
             virtual int size();
+            virtual bool isEmpty();
             virtual void add(std::shared_ptr<FakeJni::JObject> obj){}
             // Internal helper to get element at index, for the iterator
             virtual std::shared_ptr<FakeJni::JObject> get(int index){return 0;}
@@ -260,6 +297,7 @@ namespace java {
             DEFINE_CLASS_NAME("java/util/ArrayList", jnivm::java::util::List)
             std::shared_ptr<Iterator> iterator() override;
             int size() override;
+            bool isEmpty() override;
             void add(std::shared_ptr<FakeJni::JObject> obj) override;
             std::shared_ptr<FakeJni::JObject> get(int index) override;
         };

@@ -12,24 +12,72 @@ extern toml::table config;
 
 ///// Bundle
 
+// [package] mainIntentBundle is the only bundle source we expose.
+static toml::table* bd_bundle_table()
+{
+    toml::table* pkg = config["package"].as_table();
+    if (!pkg || !pkg->contains("mainIntentBundle"))
+        return nullptr;
+    return config["package"]["mainIntentBundle"].as_table();
+}
+
 bool jnivm::android::os::Bundle::containsKey(std::shared_ptr<FakeJni::JString> key)
 {
-
-    if (!config["package"].as_table()->contains("mainIntentBundle"))
+    toml::table* b = bd_bundle_table();
+    if (!b || !key)
         return false;
 
-    verbose("JBRIDGE", "Bundle containsKey %s %d", key.get()->c_str(), config["package"].as_table()->contains("mainIntentBundle"));
+    const bool found = b->contains(key->c_str());
+    verbose("JBRIDGE", "Bundle containsKey %s %d", key->c_str(), found);
+    return found;
+}
 
-    return config["package"]["mainIntentBundle"].as_table()->contains(key.get()->c_str());
+std::shared_ptr<FakeJni::JString> jnivm::android::os::Bundle::getString(std::shared_ptr<FakeJni::JString> key)
+{
+    toml::table* b = bd_bundle_table();
+    if (!b || !key || !b->contains(key->c_str()))
+        return nullptr;
+
+    const std::string value = (*b)[key->c_str()].value_or<std::string>("");
+    verbose("JBRIDGE", "Bundle getString %s = %s", key->c_str(), value.c_str());
+    return std::make_shared<FakeJni::JString>(value);
 }
 
 std::shared_ptr<FakeJni::JString> jnivm::android::os::Bundle::getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def)
 {
-    if (!containsKey(key))
-        return def;
+    auto value = getString(key);
+    return value ? value : def;
+}
 
-    verbose("JBRIDGE", "Bundle key %s = %s", key.get()->c_str(), config["package"]["mainIntentBundle"][key.get()->c_str()].value_or<std::string>("").c_str());
-    return std::make_shared<FakeJni::JString>(config["package"]["mainIntentBundle"][key.get()->c_str()].value_or<std::string>(""));
+int jnivm::android::os::Bundle::getInt(std::shared_ptr<FakeJni::JString> key, int def)
+{
+    toml::table* b = bd_bundle_table();
+    if (!b || !key || !b->contains(key->c_str()))
+        return def;
+    // TOML integers are 64-bit, the Java signature (I) is 32-bit.
+    // static_cast also supplies the prvalue toml++'s value_or() binds to.
+    return static_cast<int>((*b)[key->c_str()].value_or<int64_t>(static_cast<int64_t>(def)));
+}
+
+bool jnivm::android::os::Bundle::getBoolean(std::shared_ptr<FakeJni::JString> key, bool def)
+{
+    toml::table* b = bd_bundle_table();
+    if (!b || !key || !b->contains(key->c_str()))
+        return def;
+    // static_cast supplies the prvalue that toml++'s value_or() binds to.
+    return (*b)[key->c_str()].value_or<bool>(static_cast<bool>(def));
+}
+
+bool jnivm::android::os::Bundle::isEmpty()
+{
+    toml::table* b = bd_bundle_table();
+    return !b || b->empty();
+}
+
+int jnivm::android::os::Bundle::size()
+{
+    toml::table* b = bd_bundle_table();
+    return b ? static_cast<int>(b->size()) : 0;
 }
 
 ///// Process
@@ -461,6 +509,13 @@ bool jnivm::android::os::PowerManager::isSustainedPerformanceModeSupported()
 
 ///// OS Descriptors
 
+// FakeJni::Function cannot deduce an overloaded member pointer, so spell out
+// the two Bundle::getString signatures once.
+using BundleGetString1Arg = std::shared_ptr<FakeJni::JString> (jnivm::android::os::Bundle::*)(
+    std::shared_ptr<FakeJni::JString>);
+using BundleGetString2Arg = std::shared_ptr<FakeJni::JString> (jnivm::android::os::Bundle::*)(
+    std::shared_ptr<FakeJni::JString>, std::shared_ptr<FakeJni::JString>);
+
 BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build> {} },
     { FakeJni::Field<&Build::MANUFACTURER> {}, "MANUFACTURER", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Build::MODEL> {}, "MODEL", FakeJni::JFieldID::STATIC },
@@ -476,7 +531,12 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Bundle) { FakeJni::Constructor<Bundle> {} },
     { FakeJni::Function<&Bundle::containsKey> {}, "containsKey", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&Bundle::getString> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<BundleGetString1Arg>(&Bundle::getString)> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<BundleGetString2Arg>(&Bundle::getString)> {}, "getString", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::getInt> {}, "getInt", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::getBoolean> {}, "getBoolean", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::isEmpty> {}, "isEmpty", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Bundle::size> {}, "size", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Process) { FakeJni::Constructor<Process> {} },

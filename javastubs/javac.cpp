@@ -171,9 +171,59 @@ jnivm::java::io::File::File(std::shared_ptr<FakeJni::JString> path)
     this->path = path;
 }
 
+static std::string bd_file_path_str(const std::shared_ptr<FakeJni::JString>& path)
+{
+    return path ? path->c_str() : std::string{};
+}
+
+static void bd_file_strip_trailing_sep(std::string& p)
+{
+    while (p.size() > 1 && (p.back() == '/' || p.back() == '\\'))
+        p.pop_back();
+}
+
 std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getPath()
 {
     return path;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getAbsolutePath()
+{
+    return getPath();
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getName()
+{
+    std::string p = bd_file_path_str(path);
+    bd_file_strip_trailing_sep(p);
+    if (p.empty())
+        return std::make_shared<FakeJni::JString>("");
+    const auto pos = p.find_last_of("/\\");
+    if (pos == std::string::npos)
+        return std::make_shared<FakeJni::JString>(p);
+    return std::make_shared<FakeJni::JString>(p.substr(pos + 1));
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::io::File::getParent()
+{
+    std::string p = bd_file_path_str(path);
+    bd_file_strip_trailing_sep(p);
+    if (p.empty() || p == "/" || p == "\\")
+        return nullptr;
+    const auto pos = p.find_last_of("/\\");
+    if (pos == std::string::npos)
+        return nullptr;
+    if (pos == 0)
+        return std::make_shared<FakeJni::JString>("/");
+    return std::make_shared<FakeJni::JString>(p.substr(0, pos));
+}
+
+std::shared_ptr<jnivm::java::io::File> jnivm::java::io::File::getParentFile()
+{
+    auto parent = getParent();
+    if (!parent)
+        return nullptr;
+    return std::make_shared<File>(parent);
 }
 
 std::shared_ptr<FakeJni::JString> jnivm::java::io::File::toString()
@@ -197,6 +247,28 @@ jlong jnivm::java::io::File::getTotalSpace()
 }
 
 
+
+///// Throwable subclasses
+
+jnivm::java::lang::Error::Error(std::shared_ptr<FakeJni::JString> message)
+    : message_(message)
+{
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::Error::getMessage()
+{
+    return message_;
+}
+
+jnivm::java::lang::Exception::Exception(std::shared_ptr<FakeJni::JString> message)
+    : message_(message)
+{
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::Exception::getMessage()
+{
+    return message_;
+}
 
 ///// Thread
 #include <chrono>
@@ -326,6 +398,11 @@ int jnivm::java::util::List::size()
     return 0; // The list is always empty for now.
 }
 
+bool jnivm::java::util::List::isEmpty()
+{
+    return size() == 0;
+}
+
 ///// ArrayList
 
 // ArrayList Implementation
@@ -339,6 +416,8 @@ std::shared_ptr<jnivm::java::util::Iterator> jnivm::java::util::ArrayList::itera
 }
 
 int jnivm::java::util::ArrayList::size() { return elements.size(); }
+
+bool jnivm::java::util::ArrayList::isEmpty() { return elements.empty(); }
 void jnivm::java::util::ArrayList::add(std::shared_ptr<FakeJni::JObject> obj) { elements.push_back(obj); }
 std::shared_ptr<FakeJni::JObject> jnivm::java::util::ArrayList::get(int index) { return elements.at(index); }
 
@@ -504,6 +583,18 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     { FakeJni::Function<&Long::longValue> {}, "longValue", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    // Registered so defaultVal()/STUB-MISS can build a real Throwable-derived
+    // object instead of a dummy Object (see javac.h).
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Error) { FakeJni::Constructor<Error> {} },
+    { FakeJni::Constructor<Error, std::shared_ptr<FakeJni::JString>> {} },
+    { FakeJni::Function<&Error::getMessage> {}, "getMessage", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Exception) { FakeJni::Constructor<Exception> {} },
+    { FakeJni::Constructor<Exception, std::shared_ptr<FakeJni::JString>> {} },
+    { FakeJni::Function<&Exception::getMessage> {}, "getMessage", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Boolean) { FakeJni::Constructor<Boolean, jboolean> {} },
     { FakeJni::Function<&Boolean::booleanValue> {}, "booleanValue", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Boolean::valueOf> {}, "valueOf", FakeJni::JMethodID::STATIC },
@@ -521,6 +612,10 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     END_NATIVE_DESCRIPTOR
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::io::File) { FakeJni::Constructor<File, std::shared_ptr<FakeJni::JString>> {} },
     { FakeJni::Function<&File::getPath> {}, "getPath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getAbsolutePath> {}, "getAbsolutePath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getName> {}, "getName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getParent> {}, "getParent", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&File::getParentFile> {}, "getParentFile", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::getFreeSpace> {}, "getFreeSpace", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&File::getUsableSpace> {}, "getUsableSpace", FakeJni::JMethodID::PUBLIC },
@@ -540,12 +635,14 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::util::List) { FakeJni::Constructor<List> {} },
     { FakeJni::Function<&List::iterator> {}, "iterator", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&List::size> {}, "size", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&List::isEmpty> {}, "isEmpty", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::util::ArrayList) { FakeJni::Constructor<ArrayList> {} },
     { FakeJni::Function<&ArrayList::iterator> {}, "iterator", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&ArrayList::size> {}, "size", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&ArrayList::add> {}, "size", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&ArrayList::isEmpty> {}, "isEmpty", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&ArrayList::add> {}, "add", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::util::Iterator) { FakeJni::Constructor<Iterator> {} },
@@ -615,6 +712,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     verbose("JBRIDGE", "Initializing Java JNI Classes");
     vm->registerClass<jnivm::java::lang::reflect::Constructor>();
     vm->registerClass<jnivm::java::lang::Long>();
+    vm->registerClass<jnivm::java::lang::Error>();
+    vm->registerClass<jnivm::java::lang::Exception>();
     vm->registerClass<jnivm::java::lang::Boolean>();
     vm->registerClass<jnivm::java::lang::ClassLoader>();
     vm->registerClass<jnivm::java::lang::StringBuilder>();

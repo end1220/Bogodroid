@@ -620,6 +620,17 @@ jnivm::android::content::Context::getSystemService(std::shared_ptr<FakeJni::JStr
     return nullptr;
 }
 
+std::shared_ptr<jnivm::android::content::ContentResolver>
+jnivm::android::content::Context::getContentResolver()
+{
+    // Rewired's Android input helper (and Unity's proxy code) call this
+    // during startup and dereference the result. Before this existed the
+    // stub-miss path returned a dummy object, which surfaced as
+    // "System.NullReferenceException" from Rewired and then took down the
+    // process on the exception path.
+    return std::make_shared<jnivm::android::content::ContentResolver>();
+}
+
 std::shared_ptr<FakeJni::JString>
 jnivm::android::content::Context::getPackageName()
 {
@@ -828,6 +839,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&Context::WINDOW_SERVICE> {}, "WINDOW_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MODE_PRIVATE> {}, "MODE_PRIVATE", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&Context::getSystemService> {}, "getSystemService", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getApplicationInfo> {}, "getApplicationInfo", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getPackageName> {}, "getPackageName", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getPackageCodePath> {}, "getPackageCodePath", FakeJni::JMethodID::PUBLIC },

@@ -553,7 +553,15 @@ namespace android {
         public:
             DEFINE_CLASS_NAME("android/os/Bundle")
             bool containsKey(std::shared_ptr<FakeJni::JString> key);
+            // ApplicationInfo.metaData is a Bundle; Unity (2020.3) reads it
+            // through the 1-arg overload. Return null when the key is absent,
+            // same as real Android.
+            std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key);
             std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def);
+            int getInt(std::shared_ptr<FakeJni::JString> key, int def);
+            bool getBoolean(std::shared_ptr<FakeJni::JString> key, bool def);
+            bool isEmpty();
+            int size();
         };
 
         // Factory-stubbed. See android_descriptors.cpp.
@@ -763,8 +771,12 @@ namespace android {
                 // If null/empty, prefs file becomes ".v2.playerprefs.kv" instead
                 // of "<pkg>.v2.playerprefs.kv" — same data but wrong filename.
                 std::shared_ptr<FakeJni::JString> packageName = std::make_shared<FakeJni::JString>("");
-                // PackageItemInfo.metaData — return empty bundle rather than null.
-                std::shared_ptr<FakeJni::JObject> metaData;
+                // PackageItemInfo.metaData. Must stay a *native* type
+                // (Bundle, not JObject): jnivm only installs a working field
+                // getter for registered native types. A JObject-typed field
+                // resolves to a handle-less entry -> "Unknown Field Getter"
+                // -> Unity would call getString on a dummy object.
+                std::shared_ptr<jnivm::android::os::Bundle> metaData;
 
                 std::shared_ptr<jnivm::Array<FakeJni::JString>> splitPublicSourceDirs = std::make_shared<jnivm::Array<FakeJni::JString>>();
             };
@@ -883,6 +895,9 @@ namespace android {
             inline static int MODE_PRIVATE = 0;
 
             std::shared_ptr<FakeJni::JObject> getSystemService(std::shared_ptr<FakeJni::JString> service);
+            // Rewired's Android input helper dereferences this during startup;
+            // a stub-miss (dummy Object) causes System.NullReferenceException.
+            std::shared_ptr<jnivm::android::content::ContentResolver> getContentResolver();
             std::shared_ptr<jnivm::android::content::pm::ApplicationInfo> getApplicationInfo();
             std::shared_ptr<FakeJni::JString> getPackageCodePath();
             std::shared_ptr<FakeJni::JString> getPackageName();
