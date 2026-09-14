@@ -8,7 +8,7 @@
 
 | CMake | 默认 | 作用 |
 |-------|------|------|
-| `BD_ENABLE_LOG` | **OFF** | 主开关：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG` |
+| `BD_ENABLE_LOG` | **OFF** | 主开关：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG`（关闭时 `[BD-MEM]` 那段整段编译移除，不再每 2 s 读 `/proc`） |
 | `BD_ENABLE_TRACE` | OFF | 需 LOG：额外 `BD_DEBUG` / `BOOT_LOG` 等 |
 | `BD_ENABLE_VERBOSE` | OFF | 需 LOG：大量 `verbose()`（含 NATIVE/JNI 刷屏） |
 | `IL2CPP_TRACE` | OFF | 需 LOG：il2cpp 内部 trace |
@@ -17,7 +17,20 @@
 **排障**：临时 `BD_ENABLE_LOG=ON`（可加 TRACE/VERBOSE）重编推送；通了再改回关日志的 Release。  
 `fatal_error` / SEGV 回溯**不依赖** `BD_ENABLE_LOG`。
 
+toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_MEM_LOG_MS` 环境变量优先，`0` 关闭），整个 `[debug]` 表都可以不写。`[device]` 同理：`displayWidth/Height/RefreshRate` 省略或 `0` 即自动探测。铺配置只写必要项。
+
 完整命令见 playbook §1.1；CMake 细节见 [`BUILD-DOCKER.md`](BUILD-DOCKER.md) §5–6。
+
+### `JNIVM_ENABLE_RETURN_NON_ZERO`（CMake 缓存陷阱，必读）
+
+`libjnivm` 的这个选项决定 `[STUB-MISS]` 缺桩时返回什么：
+
+- **OFF**（默认，上机必须）→ `null` / 0，Unity 自己 try/catch，最好情况只丢一个 NRE；
+- **ON**（实验）→ 硬造 dummy 对象，Unity 把它 cast 成 `String`/`Throwable` → jnivm `Invalid Reference, Unexpected Type` → `terminate()` / `exited 134`。
+
+它是 **CMake 缓存项**：共用 `build-aarch64/` 时会被上一次实验遗留成 `ON`，之后即使只改无关代码，编出来的 `unityloader` 也会崩，且崩点看着落在完全不相关的桩上。**每次构建显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**，细节与判读方法见 playbook §1.2；真实案例见 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md) 的 Maximus2 一节。
+
+同类缓存项还有两个，已在 `CMakeLists.txt` 里 `FORCE` 固定，别再靠命令行覆盖：`JNIVM_ENABLE_DEBUG` **恒 ON**（不是日志开关：`JNI_DEBUG` 影响 `InternalFindClass()` 的类注册与嵌套类身份，也保留 `object is null` 诊断）；`JNIVM_ENABLE_TRACE` 跟随 `BD_ENABLE_LOG`。见 playbook §1.3。
 
 ## Dropbeak：大文件推送 / 拉取（掌机）
 
