@@ -6,6 +6,8 @@
 #include "baron/baron.h"
 #include "logging.h"
 #include "toml++/toml.hpp"
+// jnivm::NormalizeDots — Java binary names (Class.forName) -> JNI internal names.
+#include <jnivm/internal/findclass.h>
 
 extern toml::table config;
 
@@ -824,8 +826,17 @@ void HookClassExtensions(FakeJni::Jvm* vm)
 
     // Class.forName (static)
     classClass->Hook(&frame.getJniEnv(), "forName", [vm](std::shared_ptr<FakeJni::JString> name, bool b, std::shared_ptr<jnivm::java::lang::ClassLoader> loader) {
-        verbose("JBRIDGE", "Class forName %s", name.get()->c_str());
-        return vm->findClass(name.get()->c_str());
+        // Unity 6 resolves every framework class it needs through
+        // Class.forName(), with Java binary names ("android.content.Context"),
+        // and then performs all of its GetMethodID/GetFieldID calls on the
+        // returned Class. The registry is keyed by JNI internal names, so a
+        // dotted name used to fabricate an empty phantom class: every lookup on
+        // it missed and fell back to a type default, which is what turned
+        // Object.getClass() into null and made DVM::FindLibrary() give up with
+        // "Failed to load Il2CPP". Array descriptors ("[Ljava.lang.Class;")
+        // arrive through the same call; '[' and '$' are preserved.
+        const std::string internal = jnivm::NormalizeDots(name ? name->asStdString() : std::string());
+        return vm->findClass(internal.c_str());
     });
 
     // Class.getName

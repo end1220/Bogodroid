@@ -1,5 +1,6 @@
 #include "method.h"
 #include "log.h"
+#include <jnivm/internal/findclass.h>
 #include <jnivm/internal/jValuesfromValist.h>
 #include <cstdio>
 #include <mutex>
@@ -35,6 +36,13 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
     std::shared_ptr<Method> next;
     std::string sname = str0 ? str0 : "";
     std::string ssig = str1 ? str1 : "";
+    // Unity 6 builds method signatures out of the class names it got from
+    // Class.forName() ("()Ljava.lang.Class;" for Object.getClass, whose class
+    // it also forName'd), and JNI forbids '.' in a signature. Normalize before
+    // searching or rewriting so the stored signature always uses the
+    // descriptor spelling the registered stubs were declared with.
+    if (ssig.find('.') != std::string::npos)
+        ssig = NormalizeDots(std::move(ssig));
     auto cur = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);
     if(cur) {
         // Rewrite init to Static external function
@@ -70,7 +78,7 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
         if(cur && cur->baseclasses) {
             for(auto&& i : cur->baseclasses(ENV::FromJNIEnv(env))) {
                 if(i) {
-                    auto id = GetMethodID<isStatic, true, AllowNative, false>(env, (jclass)i.get(), str0, str1);
+                    auto id = GetMethodID<isStatic, true, AllowNative, false>(env, (jclass)i.get(), str0, ssig.data());
                     if(id) {
                         return id;
                     }
