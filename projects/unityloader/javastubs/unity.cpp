@@ -906,3 +906,24 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::ReflectionHelper::InvocationError) { FakeJni::Constructor<InvocationError, long, bool> {} },
     END_NATIVE_DESCRIPTOR
+
+    // ── Unity 6 (6000.x) ─────────────────────────────────────────────────
+    // Empty descriptors: these exist so libunity.so's FindClass() /
+    // RegisterNatives() from JNI_OnLoad lands on a class that inherits
+    // UnityPlayer. The player/render natives are not declared here — jnivm
+    // records them from RegisterNatives and they are invoked through the
+    // MethodProxy in main.cpp. See javastubs/unity.h.
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerForActivityOrService) { FakeJni::Constructor<UnityPlayerForActivityOrService> {} },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerForGameActivity) { FakeJni::Constructor<UnityPlayerForGameActivity> {} },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerForRenderService) { FakeJni::Constructor<UnityPlayerForRenderService> {} },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerGameActivity) { FakeJni::Constructor<UnityPlayerGameActivity> {} },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::androidgamesdk::GameActivity) { FakeJni::Constructor<GameActivity> {} },
+    END_NATIVE_DESCRIPTOR

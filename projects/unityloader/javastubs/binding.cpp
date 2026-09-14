@@ -43,6 +43,13 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayerActivity>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayer>();
+    // Unity 6 (6000.x): these are the classes libunity.so registers its
+    // player/render natives on. See projects/unityloader/javastubs/unity.h.
+    vm->registerClass<jnivm::com::unity3d::player::UnityPlayerForActivityOrService>();
+    vm->registerClass<jnivm::com::unity3d::player::UnityPlayerForGameActivity>();
+    vm->registerClass<jnivm::com::unity3d::player::UnityPlayerForRenderService>();
+    vm->registerClass<jnivm::com::unity3d::player::UnityPlayerGameActivity>();
+    vm->registerClass<jnivm::com::google::androidgamesdk::GameActivity>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper::InvocationError>();
     vm->registerClass<jnivm::bitter::jnibridge::JNIBridge>();

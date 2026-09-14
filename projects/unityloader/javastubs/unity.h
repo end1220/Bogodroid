@@ -3,6 +3,27 @@
 
 #include "android.h"
 #include "baron/baron.h"
+
+// ── Android Game SDK (AGDK) GameActivity ──────────────────────────────────
+// Unity 6's default Android entry point is a GameActivity: libgame.so
+// (System.loadLibrary("game")) owns the native app glue, and
+// com.unity3d.player.UnityPlayerGameActivity extends it. Registering the class
+// name keeps FindClass()/RegisterNatives() working for that layout. The loader
+// itself drives the ActivityOrService path today, so this is a name (plus an
+// Activity base) rather than a full reimplementation — see docs/UNITY6.md.
+namespace jnivm {
+namespace com {
+    namespace google {
+        namespace androidgamesdk {
+            class GameActivity : public jnivm::android::app::Activity {
+            public:
+                DEFINE_CLASS_NAME("com/google/androidgamesdk/GameActivity", jnivm::android::app::Activity)
+            };
+        }
+    }
+}
+}
+
 namespace jnivm {
 namespace com {
     namespace unity3d {
@@ -112,6 +133,37 @@ namespace com {
 
                 static std::shared_ptr<UnityPlayerActivity> currentActivity;
     
+            };
+
+            // ── Unity 6 (6000.x) class layout ────────────────────────────
+            // Unity 6 moved the player/render natives (nativeRender,
+            // nativeResume, nativePause, nativeRecreateGfxState, ...) off
+            // UnityPlayer onto UnityPlayerForActivityOrService, which is the
+            // class UnityPlayerActivity instantiates, and added
+            // UnityPlayerForGameActivity for the GameActivity entry point.
+            // libunity.so FindClass()es these names from its JNI_OnLoad and
+            // attaches the natives with RegisterNatives(), so the classes have
+            // to exist in our JVM for that call to land anywhere. The natives
+            // themselves come from libunity at runtime, not from here.
+            class UnityPlayerForActivityOrService : public UnityPlayer {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerForActivityOrService", UnityPlayer)
+            };
+
+            class UnityPlayerForGameActivity : public UnityPlayer {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerForGameActivity", UnityPlayer)
+            };
+
+            class UnityPlayerForRenderService : public UnityPlayerForActivityOrService {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerForRenderService", UnityPlayerForActivityOrService)
+            };
+
+            class UnityPlayerGameActivity : public jnivm::com::google::androidgamesdk::GameActivity {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerGameActivity",
+                                  jnivm::com::google::androidgamesdk::GameActivity)
             };
 
             class ReflectionHelper : public FakeJni::JObject {

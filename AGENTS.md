@@ -1,6 +1,7 @@
 # Bogodroid Agent Notes
 
 新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)。Skul 已止损。
+Unity **6000.x** 端口见 [`docs/UNITY6.md`](docs/UNITY6.md)：玩家类搬家、`initJni(Context,int,String)`、主线程 `ALooper`、`Class.forName` 的 Java 二进制名归一化。
 
 ## 日志 / 构建开关（必读）
 
