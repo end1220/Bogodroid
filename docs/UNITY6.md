@@ -11,12 +11,17 @@
 | 测试工程 | `C:\Users\Administrator\Desktop\Jump6\Unity6`（URP **2D** 模板，`Assets/Scenes/SampleScene.unity`） |
 | 构建产物 | `_Build`（APK 已摊到本地 staging，见 §4） |
 | 验证环境 | Docker + qemu-user（`--platform linux/arm64`）+ Xvfb + Mesa llvmpipe，**未上真机** |
-| 结果 | 能启动、渲染、进入 `nativeRender` 循环；无 SIGSEGV，RSS 稳定在 ~0.45 GB |
+| 结果 | 能启动、渲染、进入 `nativeRender` 循环；无 SIGSEGV，RSS 稳定在 ~0.45–0.49 GB |
+| 稳定性 | 连续 300 s 无崩溃（`timeout -s INT` 收尾，无 tombstone），帧循环持续 |
 
 判据（log）：
 
 - `NativeRender returned 1, Entering loop...` 之后 `[BD-JNIBridge] ... Choreographer$FrameCallback->doFrame` 与 `@ eglSwapBuffers` 持续增长；
-- 截图整屏纯色 `(41,41,41)`，正好等于 `SampleScene.unity` 里 Main Camera 的 `m_BackGroundColor: 0.16037738`（×255 ≈ 41）+ `m_ClearFlags: 2`（SolidColor）。即**引擎确实在按工程的相机设置渲染**，不是黑屏/未初始化。
+- 截图整屏纯色 `(41,41,41)`，正好等于 `SampleScene.unity` 里 Main Camera 的 `m_BackGroundColor: 0.16037738`（×255 ≈ 41）+ `m_ClearFlags: 2`（SolidColor）。即**引擎确实在按工程的相机设置渲染**，不是黑屏/未初始化；
+- 键鼠通路：容器里用 `xdotool`（XTEST）注入按键后出
+  `[BD-INPUT] nativeInjectEvent (Landroid/view/InputEvent;I)Z` 与
+  `[BD-INPUT] KEYDOWN scancode=4 -> KEYCODE=29`（SDL scancode → Android keycode），
+  即 SDL → InputBackend → UnityPlayer → Unity native 全通。
 
 ## 1. Unity 6 与 2020/2022 的四处硬差异
 
@@ -75,7 +80,7 @@ descriptor 全部按 **JNI internal name**（`android/content/Context`、`()Ljav
 - `Object.getClass()` 因此返回 null → `DVM::FindLibrary()`
   （`...getClass().getClassLoader().findLibrary()`）失败 → `Failed to load Il2CPP`。
 
-修复（4 处，全部走新增的 `jnivm::NormalizeDots()`，`.`→`/`，只动 `.`，保留 `[` 数组与 `$` 嵌套类）：
+修复：新增 `jnivm::NormalizeDots()`（`.`→`/`，只动 `.`，保留 `[` 数组与 `$` 嵌套类），在 4 个入口点调用：
 
 | 位置 | 作用 |
 |------|------|
@@ -123,7 +128,8 @@ native 侧多了 `libgame.so`（`System.loadLibrary("game")`，AGDK 的 app glue
 - URP 后处理几个 `Hidden/Universal Render Pipeline/*` shader 报 “not supported or has been stripped”
   （工程侧没打进变体），后处理 pass 不执行，与加载器无关。
 - 容器里 FMOD 初始化失败 → 落到 `fakemod`/SDL 音频（`[BD-AUDIO] SDL Audio device opened`）。
-- **输入未验证**：容器内没有手柄事件源，D-pad / A-B 需真机或注入 X11 事件再测。
+- **手柄未验证**：容器没有 GameController 设备，只验证了键盘/鼠标注入（见 §0 判据）；
+  D-pad / A-B / 摇杆映射需真机，或给容器挂一个虚拟手柄再测。
 - 未上真机（Anbernic，Mali-G31，640x480）。
 
 ## 4. Docker 复现（不留真机）
@@ -141,10 +147,15 @@ docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f <Dockerfile.test
 #    gamefiles/unity6  <- 摊开的 APK；-v build-unity6/unityloader:/game/unityloader
 #    Xvfb :99 + DISPLAY=:99 ./unityloader ./unity6.toml > log.txt
 #    import -window root shot.png   （ImageMagick；截图纯色 = 相机 clear color 即正常）
+
+# 4) 输入通路：容器没有手柄，用 XTEST 打键盘（SDL → Unity nativeInjectEvent）
+#    DISPLAY=:99 xdotool mousemove 320 240; DISPLAY=:99 xdotool key a
+#    期望 log 里出现 [BD-INPUT] KEYDOWN scancode=4 -> KEYCODE=29
 ```
 
 容器内没有 GPU，`SDL_VIDEODRIVER=x11` + `LIBGL_ALWAYS_SOFTWARE=1`（`BD_FAKE_EGL` 仍按默认 ON：
 Unity 自己的 EGL 调用被桩掉，实际 GLES 走 SDL 创建的 context）。
+`SDL_VIDEODRIVER=dummy` 跑不到窗口，只能在日志层面看启动流程，看不到帧。
 
 排障时把 `BD_ENABLE_LOG=ON`（可加 `TRACE`/`VERBOSE`）编一版再推，通过后记得改回关日志的 Release。
 `fatal_error` / SEGV 回溯**不依赖**日志开关。
