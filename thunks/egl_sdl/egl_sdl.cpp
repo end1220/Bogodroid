@@ -384,20 +384,13 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     if (!skip_swap)
         SDL_GL_SwapWindow(sdl_win);
 
-    // Process RSS sample for OOM diagnosis (gameBase load etc.). Default 2s;
-    // set debug.mem_log_interval_ms=0 or BD_MEM_LOG_MS=0 to disable.
-    {
-        static int mem_interval_ms = -1;
-        if (mem_interval_ms < 0) {
-            const char* env = getenv("BD_MEM_LOG_MS");
-            if (env && *env)
-                mem_interval_ms = atoi(env);
-            else
-                mem_interval_ms = config["debug"]["mem_log_interval_ms"]
-                    .value_or<int>(2000);
-        }
-        bd_log_process_memory_throttled("eglSwapBuffers", mem_interval_ms);
-    }
+#ifdef BD_ENABLE_LOG
+    // Per-frame RSS sample for OOM diagnosis (gameBase load etc.).
+    // Interval: BD_MEM_LOG_MS > [debug] mem_log_interval_ms > 2000 ms;
+    // <=0 disables. Compiled out with BD_ENABLE_LOG=OFF, which also skips
+    // the /proc reads inside bd_log_process_memory().
+    bd_log_process_memory_throttled("eglSwapBuffers", bd_mem_log_interval_ms());
+#endif
 
     auto choreographer = jnivm::android::view::Choreographer::getInstance();
     if (choreographer) {

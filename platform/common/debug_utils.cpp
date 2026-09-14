@@ -13,6 +13,10 @@
 #include <execinfo.h>
 #include <unistd.h>
 
+#include "toml++/toml.hpp"
+
+extern toml::table config;
+
 static long bd_read_status_kb(const char* key)
 {
     FILE* f = fopen("/proc/self/status", "r");
@@ -83,6 +87,20 @@ int bd_log_process_memory_throttled(const char* why, int interval_ms)
     last = now;
     bd_log_process_memory(why);
     return 1;
+}
+
+int bd_mem_log_interval_ms()
+{
+    // Resolved once, on the first swap (TOML is loaded and plugins had their
+    // chance to setenv by then). Thread-safe magic static.
+    static const int interval = [] {
+        const char* env = getenv("BD_MEM_LOG_MS");
+        if (env && *env)
+            return atoi(env);
+        // Omitted key or omitted [debug] table -> 2000 (toml++ value_or).
+        return config["debug"]["mem_log_interval_ms"].value_or<int>(2000);
+    }();
+    return interval;
 }
 
 void print_native_callbacks(ANativeActivity nActivity)
