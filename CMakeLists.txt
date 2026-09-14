@@ -18,14 +18,28 @@ endif()
 set(JNIVM_ENABLE_GC ON CACHE BOOL "Enable garbage collector in libjnivm")
 set(JNIVM_USE_FAKE_JNI_CODEGEN ON CACHE BOOL "Use fake JNI codegen in libjnivm")
 
-# Conditionally enable debug features for libjnivm only for Debug builds
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(JNIVM_ENABLE_DEBUG ON CACHE BOOL "Enable debug features in libjnivm")
-    set(JNIVM_ENABLE_TRACE ON CACHE BOOL "Enable tracing in libjnivm")
+# libjnivm's debug options. FORCE matters here: a cache entry left behind by an
+# earlier configure would otherwise survive silently and ship (same class of
+# trap as JNIVM_ENABLE_RETURN_NON_ZERO — docs/PORTING_PLAYBOOK.md §1.2).
+# Trade-off: passing -DJNIVM_ENABLE_* on the command line is ignored; change the
+# switches below instead.
+#
+# JNIVM_ENABLE_DEBUG (= JNI_DEBUG) is NOT a log switch and stays ON in every
+# build: it wraps jnivm's namespace/class registry walk in InternalFindClass()
+# and keeps the "CallMethod/GetField object is null" diagnostics. Every
+# handheld-verified build so far has it ON.
+set(JNIVM_ENABLE_DEBUG ON CACHE BOOL "Enable debug features in libjnivm" FORCE)
+# JNIVM_ENABLE_TRACE (= JNI_TRACE) adds per-call libjnivm trace logs, and every
+# such log goes through LOG(), which BD_ENABLE_LOG turns into a no-op. So follow
+# our master switch instead of the build type: with BD_ENABLE_LOG=OFF the blocks
+# it guards contain only dead logging plus side-effect-free Util::GetClass()
+# probes on the unknown-field paths, which we do not want to pay for on device.
+if(BD_ENABLE_LOG)
+    set(_JNIVM_TRACE ON)
 else()
-    set(JNIVM_ENABLE_DEBUG OFF CACHE BOOL "Enable debug features in libjnivm")
-    set(JNIVM_ENABLE_TRACE OFF CACHE BOOL "Enable tracing in libjnivm")
+    set(_JNIVM_TRACE OFF)
 endif()
+set(JNIVM_ENABLE_TRACE ${_JNIVM_TRACE} CACHE BOOL "Enable tracing in libjnivm" FORCE)
 
 option(USE_LLD "Use lld linker" OFF)
 
