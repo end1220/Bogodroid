@@ -92,6 +92,16 @@ descriptor 全部按 **JNI internal name**（`android/content/Context`、`()Ljav
 
 JNI 规范本身禁止类名/签名里出现 `.`，所以对合法输入是 no-op，不会影响老的 2020/2022 端口。
 
+判据（同一工程、同一容器，修前 → 修后）：
+
+| 现象 | 修前 | 修后 |
+|------|------|------|
+| `Device Model` / `OS` | `''` / `Android OS (null) (API 0)` | `'Allwinner h700'` / `Android OS Oreo (API 26)` |
+| `Activity.getPackageName` / `getFilesDir` / `getApplicationInfo` / `getPackageCodePath`、`Environment.getExternalStorageState`、`Process.setThreadPriority` | 清一色 `[STUB-MISS] … returning default` | 正常解析（`[BD-DATADIR] …packageName = com.LockeCP.Unity6`） |
+| `Object.getClass()` → `DVM::FindLibrary()` | null → `Failed to load Il2CPP` / 后续 SIGSEGV | 正常 |
+
+即：Unity 6 传进来的**签名**也带着 Java binary name，桩本身是好的、只是被点名的类型串对不上。
+
 ### 1.4 GameActivity（Android Game SDK）通道
 
 Unity 6 默认入口是 `com.unity3d.player.UnityPlayerGameActivity extends com.google.androidgamesdk.GameActivity`，
