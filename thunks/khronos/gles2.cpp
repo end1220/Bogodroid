@@ -18,6 +18,7 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include "device_display.h"
 #include <toml++/toml.hpp>
 extern toml::table config;
 
@@ -174,8 +175,8 @@ extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internal
     int short_side = std::min(width, height);
     int long_side  = std::max(width, height);
     bool looks_like_lut = (short_side <= 32) || (long_side > 4 * short_side);
-    int disp_w = config["device"]["displayWidth"].value_or<int>(0);
-    int disp_h = config["device"]["displayHeight"].value_or<int>(0);
+    int disp_w = bd_device_display_width();
+    int disp_h = bd_device_display_height();
     bool looks_like_rt =
         (disp_w > 0 && (int)width == disp_w && (int)height == disp_h);
 

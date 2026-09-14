@@ -103,6 +103,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     platform/common/toml_include.cpp
     platform/common/debug_utils.cpp
     platform/common/config.cpp
+    platform/common/device_display.cpp
     platform/common/input_backend.cpp
     platform/common/sys_volume.cpp
 

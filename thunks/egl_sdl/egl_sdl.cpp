@@ -1,5 +1,6 @@
 #include "egl_sdl.h"
 #include "SDL2/SDL.h"
+#include "device_display.h"
 #include "process_memory.h"
 #include "plugin_present.h"
 #include "glad_egl.h"
@@ -411,18 +412,18 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     if (egl_display)
         return egl_display;
 
-    // Initialize SDL with video, audio, joystick, and controller support
+    // Initialize SDL with video (GLEScene: then SDL_GetCurrentDisplayMode).
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fatal_error("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         // return -1;
     }
-    int requested_w = config["device"]["displayWidth"].value_or<int>(640);
-    int requested_h = config["device"]["displayHeight"].value_or<int>(480);
-    if (requested_w <= 0) requested_w = 640;
-    if (requested_h <= 0) requested_h = 480;
+    // Match GLEScene: if TOML width/height <=0, use current display mode.
+    bd_device_display_probe();
+    int requested_w = bd_device_display_width();
+    int requested_h = bd_device_display_height();
 
     const char* video_driver = SDL_GetCurrentVideoDriver();
-    BD_LOG("EGL_SDL", "SDL video_driver=%s requested=%dx%d",
+    BD_LOG("EGL_SDL", "SDL video_driver=%s using display resolution: %dx%d",
            video_driver ? video_driver : "(null)", requested_w, requested_h);
     bd_log_sdl_display_mode("before window", 0);
 
@@ -629,9 +630,9 @@ EGLSurface eglCreateWindowSurface_impl(EGLDisplay display, EGLConfig config, Nat
 EGLBoolean eglQuerySurface_impl(EGLDisplay display, EGLSurface surface, EGLint attribute, EGLint* value)
 {
     verbose("EGL_SDL", "eglQuerySurface\n");
-    // Return logical [device] size, not physical — fixes 16:9-on-4:3 stretch.
+    // Logical [device] size (TOML override or probed) — not raw drawable.
     if (attribute == EGL_WIDTH) {
-        *value = config["device"]["displayWidth"].value_or<int>(640);
+        *value = bd_device_display_width();
         static bool logged = false;
         if (!logged) {
             logged = true;
@@ -640,7 +641,7 @@ EGLBoolean eglQuerySurface_impl(EGLDisplay display, EGLSurface surface, EGLint a
         return EGL_TRUE;
     }
     if (attribute == EGL_HEIGHT) {
-        *value = config["device"]["displayHeight"].value_or<int>(480);
+        *value = bd_device_display_height();
         static bool logged = false;
         if (!logged) {
             logged = true;

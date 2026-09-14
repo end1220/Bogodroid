@@ -19,8 +19,11 @@ mainIntentBundle = { unity = "-forcegles20" }
 
 [device]
 
-displayWidth=640
-displayHeight=480
+# 0 / omit = probe SDL (after VIDEO init) or /dev/fb0; else 640x480@60.
+# Set explicit values only when logical size must differ from the panel.
+displayWidth=0
+displayHeight=0
+displayRefreshRate=0
 displayRotation=0
 
 

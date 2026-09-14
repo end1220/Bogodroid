@@ -3,6 +3,7 @@ extern toml::table config;
 
 #include "android.h"
 #include "baron/baron.h"
+#include "device_display.h"
 #include "javac.h"
 #include "logging.h"
 #include <fstream>
@@ -24,17 +25,17 @@ int jnivm::android::view::Display::getRotation()
 
 int jnivm::android::view::Display::getWidth()
 {
-    return config["device"]["displayWidth"].value_or<int>(640);
+    return bd_device_display_width();
 }
 
 int jnivm::android::view::Display::getHeight()
 {
-    return config["device"]["displayHeight"].value_or<int>(480);
+    return bd_device_display_height();
 }
 
 float jnivm::android::view::Display::getRefreshRate()
 {
-    return config["device"]["displayRefreshRate"].value_or<float>(60);
+    return bd_device_display_refresh_rate();
 }
 
 long jnivm::android::view::Display::getAppVsyncOffsetNanos() { return 0; }
@@ -42,8 +43,8 @@ long jnivm::android::view::Display::getPresentationDeadlineNanos() { return 0; }
 
 void jnivm::android::view::Display::getRealMetrics(std::shared_ptr<jnivm::android::util::DisplayMetrics> metrics)
 {
-    metrics->widthPixels = config["device"]["displayWidth"].value_or<int>(640);
-    metrics->heightPixels = config["device"]["displayHeight"].value_or<int>(480);
+    metrics->widthPixels = bd_device_display_width();
+    metrics->heightPixels = bd_device_display_height();
     metrics->densityDpi = config["device"]["displayDpi"].value_or<int>(100);
 }
 
@@ -83,17 +84,17 @@ jnivm::android::view::WindowManager::getDefaultDisplay()
 
 int jnivm::android::view::DisplayMode::getPhysicalWidth()
 {
-    return config["device"]["displayWidth"].value_or<int>(640);
+    return bd_device_display_width();
 }
 
 int jnivm::android::view::DisplayMode::getPhysicalHeight()
 {
-    return config["device"]["displayHeight"].value_or<int>(480);
+    return bd_device_display_height();
 }
 
 float jnivm::android::view::DisplayMode::getRefreshRate()
 {
-    return config["device"]["displayRefreshRate"].value_or<float>(60);
+    return bd_device_display_refresh_rate();
 }
 
 ///// InputDevice

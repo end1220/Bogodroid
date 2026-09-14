@@ -2,6 +2,7 @@
 #include "toml++/toml.hpp"
 extern toml::table config;
 #include "ndk.h"
+#include "device_display.h"
 #include "logging.h"
 #include "thunk_gen.h"
 #include "platform.h"
@@ -111,7 +112,7 @@ ABI_ATTR ANativeWindow* ANativeWindow_fromSurface(void*, void*)
 
 ABI_ATTR int32_t ANativeWindow_getWidth(ANativeWindow *window)
 {
-    int32_t width = config["device"]["displayWidth"].value_or<int>(640);
+    int32_t width = bd_device_display_width();
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -122,7 +123,7 @@ ABI_ATTR int32_t ANativeWindow_getWidth(ANativeWindow *window)
 
 ABI_ATTR int32_t ANativeWindow_getHeight(ANativeWindow *window)
 {
-    int32_t height = config["device"]["displayHeight"].value_or<int>(480);
+    int32_t height = bd_device_display_height();
     static bool logged = false;
     if (!logged) {
         logged = true;
