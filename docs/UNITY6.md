@@ -12,6 +12,7 @@
 | 构建产物 | `_Build/unity6.apk`（摊到 staging `gamefiles/unity6`，**必须与 APK 同源**，见 §0.1） |
 | 验证环境 | Docker + qemu-user（`--platform linux/arm64`）+ Xvfb + Mesa llvmpipe；真机 Anbernic（Mali-G31，640x480） |
 | 结果 | 引擎起、场景 `Stress` 加载、`Assembly-CSharp` 脚本执行并出画；RSS ~0.59 GB |
+| 真机结果 | Anbernic H700 / Mali-G31：`scene=Stress buildIndex=0` 在 **2.27 s** 达成，5 个输入设备（含 `Xbox 360 Controller` → `XboxOneGamepadAndroid`），D-pad 轴与 `B`/`Select` 按键事件全部到达；退出为 `exited (0)` |
 | 稳定性 | 容器连续 40 s 无崩溃（`timeout -s INT` 收尾，无 tombstone），帧循环持续 |
 | 缺桩 | **`[STUB-MISS]` = 0**（`adbd`/`Il2Cpp` 级路径也不缺）；只剩 2 条 `[STUB-DEFAULT]`，即已由 `vm->setDefault()` 给出目标值的那两个（§1.6） |
 
@@ -22,6 +23,9 @@
 - 场景与脚本（Stress 工程）：log 里出 `LOG[Unity]: [5.50] scene=Stress buildIndex=0` 与
   `LOG[Unity]: [Stress] spawned=40 prefabs=23` —— 这两句是 `SystemInfoDisplay.cs` /
   `MonsterStressSpawner.cs` 自己打的，等于**场景加载 + `Assembly-CSharp` 托管代码在跑**；
+  真机（Release、无 Unity 日志转发）用同一思路：游戏脚本把证据写进
+  `<端口目录>/log/unity_player.log`（`scene=`/`platform=`/`InputSystem.devices`），
+  这个文件在两种构建下都存在，是跨环境可用的判据；
 - 键鼠通路：容器里用 `xdotool`（XTEST）注入按键后出
   `[BD-INPUT] nativeInjectEvent (Landroid/view/InputEvent;I)Z` 与
   `[BD-INPUT] KEYDOWN scancode=4 -> KEYCODE=29`（SDL scancode → Android keycode），
@@ -228,10 +232,15 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
 - URP 后处理几个 `Hidden/Universal Render Pipeline/*` shader 报 “not supported or has been stripped”
   （工程侧没打进变体），后处理 pass 不执行，与加载器无关。
 - 容器里 FMOD 初始化失败 → 落到 `fakemod`/SDL 音频（`[BD-AUDIO] SDL Audio device opened`）。
-- **手柄未验证**：容器没有 GameController 设备，只验证了键盘/鼠标注入（见 §0 判据）；
-  D-pad / A-B / 摇杆映射需真机，或给容器挂一个虚拟手柄再测。
-- 真机（Anbernic H700，Mali-G31，640x480）：加载器起得来、画面出得来、`exited (0)` 干净退出
-  （`Unity6.sh` 日志见端口目录 `log.txt`）；§0.1 的数据错配修完后待复测场景与手柄。
+- **手柄已验证（真机）**：`SystemInfoDisplay.cs` 的 `log/unity_player.log` 里出现
+  `device[0]=Xbox 360 Controller layout=XboxOneGamepadAndroid`，并记录到
+  `Down: B`、`Axis: DpadX=1.00`、`Down: D-Right`、`Axis: DpadY=-1.00`、`Down: Select`
+  —— SDL（读 `gamecontrollerdb.txt`）→ `InputBackend` → Unity Input System 全通。
+  容器侧仍只有键鼠注入（没有 GameController 设备），要容器复现得挂虚拟手柄。
+- 真机（Anbernic H700，Mali-G31，640x480）：上机通过 —— 场景、渲染、手柄、干净退出都验过（§0）。
+  **注意 Release（`BD_ENABLE_LOG=OFF`）下 Unity 自己的 `LOG[Unity]:` 行不会进 `log.txt`**，
+  真机上要看"场景有没有加载"，靠的是游戏脚本自己写的 `log/unity_player.log`
+  （`SystemInfoDisplay.cs`）。`log.txt` 只剩启动头 + `exited (N)`，够看退出码。
 
 ## 4. Docker 复现（不留真机）
 
