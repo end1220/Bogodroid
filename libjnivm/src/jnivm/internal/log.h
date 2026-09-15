@@ -50,4 +50,6 @@ inline bool jnivm_log_enabled(const char* tag, const char* format)
 // Prints each unique (kind, class, name, sig) tuple via LOG once.
 namespace jnivm {
     void log_stub_miss_once(const char* kind, const char* cls, const char* meth, const char* sig);
+    // Same, for triples answered by VM::setDefault(); tagged [STUB-DEFAULT].
+    void log_stub_default_once(const char* kind, const char* cls, const char* meth, const char* sig);
 }

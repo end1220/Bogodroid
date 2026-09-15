@@ -769,6 +769,19 @@ void HookStringExtensions(FakeJni::Jvm* vm)
             return std::make_shared<jnivm::String>(result);
         });
 
+    // String.length
+    stringClass->HookInstanceFunction(&frame.getJniEnv(), "length",
+        [](jnivm::ENV*, jnivm::Object* self) -> jint {
+            // Unity 6 reads PackageInfo.versionCode/versionName and gates the
+            // latter on versionName.length() > 0. jnivm's java/lang/String is a
+            // std::string with no Java-visible members at all, so the lookup
+            // missed and answered 0 — which reads as "no version string".
+            auto string = dynamic_cast<FakeJni::JString*>(self);
+            const jint length = string ? static_cast<jint>(string->asStdString().size()) : 0;
+            verbose("JBRIDGE", "String.length -> %d", length);
+            return length;
+        });
+
     // String.getBytes with specified charset
     stringClass->HookInstanceFunction(&frame.getJniEnv(), "getBytes",
         [](jnivm::ENV* env, jnivm::Object* self, std::shared_ptr<jnivm::String> charset)

@@ -6,12 +6,15 @@ extern toml::table config;
 
 #include "android.h"
 #include "baron/baron.h"
+#include "device_display.h"
 #include "javac.h"
 #include "logging.h"
 #include <fstream>
 #include <inttypes.h>
 #include <pthread.h>
 #include <filesystem>
+#include <cerrno>
+#include <cstring>
 #include <chrono>
 #include <atomic>
 #include "json.hpp"
@@ -94,6 +97,18 @@ bd_make_application_info()
            info->nativeLibraryDir->asStdString().c_str());
 
     info->metaData = std::make_shared<jnivm::android::os::Bundle>();
+
+    // Version gates Unity reads through JNI. Default: the API level this
+    // loader claims everywhere else (Build.VERSION.SDK_INT = 26 in
+    // javastubs/android.h) — everything newer wants framework APIs
+    // (scoped storage >= 29, WindowInsetsController >= 30) that are not
+    // stubbed here. Overridable per package for a title that needs them.
+    info->minSdkVersion = static_cast<int>(
+        config["package"]["minSdkVersion"].value_or<int64_t>(26));
+    info->targetSdkVersion = static_cast<int>(
+        config["package"]["targetSdkVersion"].value_or<int64_t>(26));
+    BD_LOG("DATADIR", "ApplicationInfo minSdkVersion=%d targetSdkVersion=%d",
+           info->minSdkVersion, info->targetSdkVersion);
     return info;
 }
 
@@ -128,6 +143,8 @@ jnivm::android::content::pm::PackageManager::getPackageInfo(
     info->versionName = (FakeJni::JString)config["package"]["versionName"]
                             .value_or<std::string>("0.1")
                             .c_str();
+    info->versionCode = static_cast<FakeJni::JInt>(
+        config["package"]["versionCode"].value_or<int64_t>(1));
     return info;
 }
 
@@ -206,7 +223,18 @@ std::string bd_prefs_file_path(const std::string& name)
     std::string dir = config["paths"]["android_files"].value_or<std::string>("./");
     if (!dir.empty() && dir.back() != '/') dir.push_back('/');
     dir += "shared_prefs";
-    mkdir(dir.c_str(), 0755);
+    // Full path, not just the leaf: android_files is a TOML setting and the
+    // directory it names need not exist yet (the shipped configs point at
+    // "./conf/", which a fresh extraction does not contain). A single mkdir()
+    // fails with ENOENT there, and the only symptom is "save FAIL: cannot open
+    // .../shared_prefs/....json.tmp" at shutdown, after PlayerPrefs already
+    // reported success.
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        BD_LOG("PREFS", "cannot create %s (%s); PlayerPrefs writes will fail",
+                dir.c_str(), ec.message().c_str());
+    }
     return dir + "/" + name + ".json";
 }
 } // anon
@@ -272,7 +300,8 @@ void jnivm::android::content::SharedPreferences::save() const
 
     std::ofstream f(tmp, std::ios::trunc);
     if (!f.is_open()) {
-        BD_LOG("PREFS", "save FAIL: cannot open %s", tmp.c_str());
+        BD_LOG("PREFS", "save FAIL: cannot open %s (errno=%d %s)",
+                tmp.c_str(), errno, strerror(errno));
         return;
     }
     f << doc.dump(2);  // pretty-printed for human readability
@@ -383,7 +412,18 @@ std::shared_ptr<FakeJni::JString> jnivm::android::content::SharedPreferences::ge
     return def;
 }
 
-// getAll -> registerFactory (java/util/Map).
+// getAll() -> java.util.Map. The map is deliberately empty: making it useful
+// needs Map.Entry plus Set/Iterator over it, which nothing here has needed yet
+// (Unity's PlayerPrefs path reads keys individually through get*()). Returning
+// a real (empty) Map instead of the STUB-MISS default keeps the call honest and
+// keeps the log clean; see docs/UNITY6.md "known limitations".
+std::shared_ptr<jnivm::java::util::Map>
+jnivm::android::content::SharedPreferences::getAll()
+{
+    verbose("JBRIDGE", "SharedPreferences.getAll('%s') -> empty map "
+                       "(entries are not exposed)", name.c_str());
+    return std::make_shared<jnivm::java::util::Map>();
+}
 
 std::shared_ptr<jnivm::android::content::SharedPreferencesEditor> jnivm::android::content::SharedPreferences::edit()
 {
@@ -745,8 +785,72 @@ jnivm::android::content::Context::getExternalCacheDir()
     return std::make_shared<jnivm::java::io::File>(std::make_shared<FakeJni::JString>(config["paths"]["android_cache"].value_or<std::string>("./path_not_defined_cache")));
 }
 
-// getObbDir / getObbDirs return null — left to the STUB-MISS path
-// (defaultVal<jobject> returns nullptr by default, same as before).
+// Android exposes assets through Context.getAssets(); Unity and its plugins
+// open files under assets/ this way (the rest of Unity's IO goes straight
+// through libc on the staged game_files tree). AssetManager is the real stub.
+std::shared_ptr<jnivm::android::content::res::AssetManager>
+jnivm::android::content::Context::getAssets()
+{
+    return std::make_shared<jnivm::android::content::res::AssetManager>();
+}
+
+std::shared_ptr<jnivm::android::content::pm::PackageManager>
+jnivm::android::content::Context::getPackageManager()
+{
+    return std::make_shared<jnivm::android::content::pm::PackageManager>();
+}
+
+// Same instance the Activity path hands out, so Configuration/DisplayMetrics
+// cannot disagree between a Context-typed and an Activity-typed caller.
+static std::shared_ptr<jnivm::android::content::res::Resources> bd_resources_singleton()
+{
+    static std::shared_ptr<jnivm::android::content::res::Resources> instance =
+        std::make_shared<jnivm::android::content::res::Resources>();
+    return instance;
+}
+
+std::shared_ptr<jnivm::android::content::res::Resources>
+jnivm::android::content::Context::getResources()
+{
+    return bd_resources_singleton();
+}
+
+// [paths] android_obb_dirs mirrors what ApplicationInfo.sourceDir does for
+// android_source_dirs: first entry wins for the singular getObbDir().
+static std::vector<std::string> bd_obb_dirs()
+{
+    std::vector<std::string> out;
+    if (auto* dirs = config["paths"]["android_obb_dirs"].as_array()) {
+        for (auto&& entry : *dirs) {
+            if (auto* s = entry.as_string())
+                out.push_back(bd_abs_path(std::string(s->get())));
+        }
+    }
+    return out;
+}
+
+std::shared_ptr<jnivm::java::io::File>
+jnivm::android::content::Context::getObbDir()
+{
+    const std::vector<std::string> dirs = bd_obb_dirs();
+    if (dirs.empty())
+        return nullptr;
+    BD_LOG("DATADIR", "getObbDir -> %s", dirs.front().c_str());
+    return std::make_shared<jnivm::java::io::File>(
+        std::make_shared<FakeJni::JString>(dirs.front().c_str()));
+}
+
+std::shared_ptr<jnivm::Array<jnivm::java::io::File>>
+jnivm::android::content::Context::getObbDirs()
+{
+    const std::vector<std::string> dirs = bd_obb_dirs();
+    auto array = std::make_shared<jnivm::Array<jnivm::java::io::File>>(dirs.size());
+    for (size_t i = 0; i < dirs.size(); i++) {
+        (*array)[i] = std::make_shared<jnivm::java::io::File>(
+            std::make_shared<FakeJni::JString>(dirs[i].c_str()));
+    }
+    return array;
+}
 
 int jnivm::android::content::Context::checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission)
 {
@@ -754,7 +858,81 @@ int jnivm::android::content::Context::checkCallingOrSelfPermission(std::shared_p
     return jnivm::android::content::pm::PackageManager::PERMISSION_GRANTED; // Sure why not, what could go wrong....
 }
 
-///// Intent — getExtras migrated to registerFactory (Bundle).
+///// Intent
+
+// getExtras() is the path Unity uses to read the engine command line on
+// Android ("unity" extra). It reads through Bundle, which already serves
+// [package] mainIntentBundle, so hand back a Bundle rather than the factory's
+// blank instance — same data, but the intent of the call is explicit.
+std::shared_ptr<jnivm::android::os::Bundle>
+jnivm::android::content::Intent::getExtras()
+{
+    return std::make_shared<jnivm::android::os::Bundle>();
+}
+
+///// Configuration
+
+std::shared_ptr<jnivm::android::content::res::Configuration>
+jnivm::android::content::res::Configuration::make_current()
+{
+    auto c = std::make_shared<Configuration>();
+    const int w = bd_device_display_width();
+    const int h = bd_device_display_height();
+    c->densityDpi = bd_device_display_dpi();
+    c->fontScale = 1.0f;
+    c->orientation = w > h ? ORIENTATION_LANDSCAPE : ORIENTATION_PORTRAIT;
+    // dp == px at densityDpi 160. Scaling by dpi/160 matches what Android does
+    // and keeps Screen.width/height (px) and the dp values coherent for Unity.
+    const double dp_per_px = 160.0 / (c->densityDpi > 0 ? c->densityDpi : 160);
+    c->screenWidthDp = static_cast<int>(w * dp_per_px);
+    c->screenHeightDp = static_cast<int>(h * dp_per_px);
+    c->smallestScreenWidthDp = std::min(c->screenWidthDp, c->screenHeightDp);
+    // SCREENLAYOUT_SIZE_LARGE: no size-code / long / layoutdir bits set, which
+    // is what Android reports for a plain fullscreen activity.
+    c->screenLayout = 0x02;
+    c->uiMode = UI_MODE_TYPE_NORMAL;
+    // Input / network capabilities. Values mirror thunks/ndk/ndk.cpp's
+    // AConfiguration_* answers ([device] keyboard / displayTouchscreen), so a
+    // title that reads either view sees the same device.
+    c->mcc = 0;
+    c->mnc = 0;
+    c->keyboard = config["device"]["keyboard"].value_or<int>(static_cast<int>(KEYBOARD_QWERTY));
+    c->keyboardHidden = KEYBOARDHIDDEN_UNDEFINED;
+    c->hardKeyboardHidden = HARDKEYBOARDHIDDEN_UNDEFINED;
+    c->navigation = NAVIGATION_UNDEFINED;
+    c->navigationHidden = NAVIGATIONHIDDEN_UNDEFINED;
+    c->touchscreen = config["device"]["displayTouchscreen"].value_or<int>(static_cast<int>(TOUCHSCREEN_NOTOUCH));
+    c->colorMode = COLOR_MODE_UNDEFINED;
+    BD_DEBUG("RES", "Configuration %dx%d dp %dx%d orientation=%d densityDpi=%d touchscreen=%d keyboard=%d",
+             w, h, c->screenWidthDp, c->screenHeightDp, c->orientation, c->densityDpi,
+             c->touchscreen, c->keyboard);
+    return c;
+}
+
+std::shared_ptr<jnivm::android::content::res::Configuration>
+jnivm::android::content::res::Resources::getConfiguration()
+{
+    return jnivm::android::content::res::Configuration::make_current();
+}
+
+// The UI language. One entry (the process default locale): Unity 6 reads
+// get(0) and never checks size() first, so an empty list would leave the
+// language empty.
+std::shared_ptr<jnivm::android::os::LocaleList>
+jnivm::android::content::res::Configuration::getLocales()
+{
+    return jnivm::android::os::LocaleList::getDefault();
+}
+
+std::shared_ptr<jnivm::android::util::DisplayMetrics>
+jnivm::android::content::res::Resources::getDisplayMetrics()
+{
+    auto metrics = std::make_shared<jnivm::android::util::DisplayMetrics>();
+    metrics->widthPixels = bd_device_display_width();
+    metrics->heightPixels = bd_device_display_height();
+    metrics->densityDpi = bd_device_display_dpi();
+    return metrics;
+}
 
 ///// Content Descriptors
 
@@ -768,10 +946,18 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_USER_LANDSCAPE> {}, "SCREEN_ORIENTATION_USER_LANDSCAPE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_SENSOR> {}, "SCREEN_ORIENTATION_SENSOR", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_UNSPECIFIED> {}, "SCREEN_ORIENTATION_UNSPECIFIED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_USER> {}, "SCREEN_ORIENTATION_USER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_BEHIND> {}, "SCREEN_ORIENTATION_BEHIND", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_NOSENSOR> {}, "SCREEN_ORIENTATION_NOSENSOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_SENSOR_LANDSCAPE> {}, "SCREEN_ORIENTATION_SENSOR_LANDSCAPE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_SENSOR_PORTRAIT> {}, "SCREEN_ORIENTATION_SENSOR_PORTRAIT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_FULL_SENSOR> {}, "SCREEN_ORIENTATION_FULL_SENSOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&ActivityInfo::SCREEN_ORIENTATION_LOCKED> {}, "SCREEN_ORIENTATION_LOCKED", FakeJni::JFieldID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::PackageInfo) { FakeJni::Constructor<PackageInfo> {} },
     { FakeJni::Field<&PackageInfo::versionName> {}, "versionName", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&PackageInfo::versionCode> {}, "versionCode", FakeJni::JFieldID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ApplicationInfo) { FakeJni::Constructor<ApplicationInfo> {} },
@@ -782,6 +968,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&ApplicationInfo::packageName> {}, "packageName", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&ApplicationInfo::metaData> {}, "metaData", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&ApplicationInfo::splitPublicSourceDirs> {}, "splitPublicSourceDirs", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Field<&ApplicationInfo::minSdkVersion> {}, "minSdkVersion", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&ApplicationInfo::targetSdkVersion> {}, "targetSdkVersion", FakeJni::JFieldID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::PackageManager) { FakeJni::Constructor<PackageManager> {} },
@@ -799,8 +987,65 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Function<&AssetManager::list> {}, "list", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::res::Configuration) { FakeJni::Constructor<Configuration> {} },
+    { FakeJni::Field<&Configuration::ORIENTATION_UNDEFINED> {}, "ORIENTATION_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::ORIENTATION_PORTRAIT> {}, "ORIENTATION_PORTRAIT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::ORIENTATION_LANDSCAPE> {}, "ORIENTATION_LANDSCAPE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::ORIENTATION_SQUARE> {}, "ORIENTATION_SQUARE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::SCREENLAYOUT_SIZE_MASK> {}, "SCREENLAYOUT_SIZE_MASK", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::UI_MODE_TYPE_MASK> {}, "UI_MODE_TYPE_MASK", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::UI_MODE_TYPE_UNDEFINED> {}, "UI_MODE_TYPE_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::UI_MODE_TYPE_NORMAL> {}, "UI_MODE_TYPE_NORMAL", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::TOUCHSCREEN_NOTOUCH> {}, "TOUCHSCREEN_NOTOUCH", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::TOUCHSCREEN_STYLUS> {}, "TOUCHSCREEN_STYLUS", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::TOUCHSCREEN_FINGER> {}, "TOUCHSCREEN_FINGER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARD_NOKEYS> {}, "KEYBOARD_NOKEYS", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARD_QWERTY> {}, "KEYBOARD_QWERTY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARD_12KEY> {}, "KEYBOARD_12KEY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARDHIDDEN_UNDEFINED> {}, "KEYBOARDHIDDEN_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARDHIDDEN_NO> {}, "KEYBOARDHIDDEN_NO", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::KEYBOARDHIDDEN_YES> {}, "KEYBOARDHIDDEN_YES", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::HARDKEYBOARDHIDDEN_UNDEFINED> {}, "HARDKEYBOARDHIDDEN_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::HARDKEYBOARDHIDDEN_NO> {}, "HARDKEYBOARDHIDDEN_NO", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::HARDKEYBOARDHIDDEN_YES> {}, "HARDKEYBOARDHIDDEN_YES", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATION_UNDEFINED> {}, "NAVIGATION_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATION_NONAV> {}, "NAVIGATION_NONAV", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATION_DPAD> {}, "NAVIGATION_DPAD", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATION_TRACKBALL> {}, "NAVIGATION_TRACKBALL", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATION_WHEEL> {}, "NAVIGATION_WHEEL", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATIONHIDDEN_UNDEFINED> {}, "NAVIGATIONHIDDEN_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATIONHIDDEN_NO> {}, "NAVIGATIONHIDDEN_NO", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::NAVIGATIONHIDDEN_YES> {}, "NAVIGATIONHIDDEN_YES", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::COLOR_MODE_UNDEFINED> {}, "COLOR_MODE_UNDEFINED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::COLOR_MODE_WIDE_COLOR_GAMUT_NO> {}, "COLOR_MODE_WIDE_COLOR_GAMUT_NO", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::COLOR_MODE_HDR_NO> {}, "COLOR_MODE_HDR_NO", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Configuration::COLOR_MODE_DEFAULT> {}, "COLOR_MODE_DEFAULT", FakeJni::JFieldID::STATIC },
+    // Public instance fields: Unity reads these with GetFieldID, so they have
+    // to be registered as real fields and not just C++ members.
+    { FakeJni::Field<&Configuration::densityDpi> {}, "densityDpi", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::screenWidthDp> {}, "screenWidthDp", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::screenHeightDp> {}, "screenHeightDp", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::smallestScreenWidthDp> {}, "smallestScreenWidthDp", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::orientation> {}, "orientation", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::screenLayout> {}, "screenLayout", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::uiMode> {}, "uiMode", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::fontScale> {}, "fontScale", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::mcc> {}, "mcc", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::mnc> {}, "mnc", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::keyboard> {}, "keyboard", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::keyboardHidden> {}, "keyboardHidden", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::hardKeyboardHidden> {}, "hardKeyboardHidden", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::navigation> {}, "navigation", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::navigationHidden> {}, "navigationHidden", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::touchscreen> {}, "touchscreen", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Configuration::colorMode> {}, "colorMode", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Function<&Configuration::getLocales> {}, "getLocales", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::res::Resources) { FakeJni::Constructor<Resources> {} },
     { FakeJni::Function<&Resources::getIdentifier> {}, "getIdentifier", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Resources::getConfiguration> {}, "getConfiguration", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Resources::getDisplayMetrics> {}, "getDisplayMetrics", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::SharedPreferencesEditor) { FakeJni::Constructor<SharedPreferencesEditor> {} },
@@ -822,7 +1067,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Function<&SharedPreferences::getFloat> {}, "getFloat", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&SharedPreferences::getBoolean> {}, "getBoolean", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&SharedPreferences::getString> {}, "getString", FakeJni::JMethodID::PUBLIC },
-    // getAll -> registerFactory.
+    { FakeJni::Function<&SharedPreferences::getAll> {}, "getAll", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&SharedPreferences::edit> {}, "edit", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
@@ -837,6 +1082,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&Context::POWER_SERVICE> {}, "POWER_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::INPUT_SERVICE> {}, "INPUT_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::WINDOW_SERVICE> {}, "WINDOW_SERVICE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Context::SENSOR_SERVICE> {}, "SENSOR_SERVICE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Context::VIBRATOR_SERVICE> {}, "VIBRATOR_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MODE_PRIVATE> {}, "MODE_PRIVATE", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&Context::getSystemService> {}, "getSystemService", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },
@@ -849,12 +1096,15 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Function<&Context::getDataDir> {}, "getDataDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getCacheDir> {}, "getCacheDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getExternalCacheDir> {}, "getExternalCacheDir", FakeJni::JMethodID::PUBLIC },
-    // getAssets / getPackageManager / getResources / getWindow /
-    // getContentResolver -> registerFactory in android_descriptors.cpp.
-    // getObbDir / getObbDirs -> STUB-MISS path returns null (same as before).
+    { FakeJni::Function<&Context::getAssets> {}, "getAssets", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getPackageManager> {}, "getPackageManager", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getResources> {}, "getResources", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDir> {}, "getObbDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDirs> {}, "getObbDirs", FakeJni::JMethodID::PUBLIC },
+    // getWindow / getWindowManager -> registerFactory in android_descriptors.cpp.
     { FakeJni::Function<&Context::checkCallingOrSelfPermission> {}, "checkCallingOrSelfPermission", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::Intent) { FakeJni::Constructor<Intent> {} },
-    // getExtras -> registerFactory in android_descriptors.cpp.
+    { FakeJni::Function<&Intent::getExtras> {}, "getExtras", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR

@@ -5,6 +5,7 @@ extern toml::table config;
 #include "baron/baron.h"
 #include "javac.h"
 #include "logging.h"
+#include <algorithm>
 #include <fstream>
 #include <inttypes.h>
 #include <pthread.h>
@@ -54,6 +55,41 @@ jnivm::android::hardware::display::DisplayManager::getDisplay(int disp)
     return std::make_shared<jnivm::android::view::Display>();
 }
 
+std::shared_ptr<jnivm::Array<jnivm::android::view::Display>>
+jnivm::android::hardware::display::DisplayManager::getDisplays()
+{
+    // Exactly one built-in display, matching the single Display object the rest
+    // of the shim hands out (WindowManager.getDefaultDisplay,
+    // DisplayManager.getDisplay). Unity 6 walks this array to pick the panel it
+    // reports, so an empty array would leave it with nothing.
+    auto array = std::make_shared<jnivm::Array<jnivm::android::view::Display>>(1);
+    (*array)[0] = std::make_shared<jnivm::android::view::Display>();
+    return array;
+}
+
+void jnivm::android::hardware::display::DisplayManager::DisplayListener::onDisplayAdded(int displayId) { }
+void jnivm::android::hardware::display::DisplayManager::DisplayListener::onDisplayChanged(int displayId) { }
+void jnivm::android::hardware::display::DisplayManager::DisplayListener::onDisplayRemoved(int displayId) { }
+
+void jnivm::android::hardware::display::DisplayManager::registerDisplayListener(
+    std::shared_ptr<DisplayListener> listener, std::shared_ptr<jnivm::android::os::Handler> handler)
+{
+    // Held, never invoked: bd_device_display_* does not change at runtime, so
+    // there is no display change to report. The listener is the Java player's
+    // own class in a real APK, and the Java player is stubbed out here, so
+    // firing it would re-enter native code that expects a live UnityPlayer.
+    BD_LOG("JBRIDGE", "DisplayManager.registerDisplayListener(%s, %s)",
+           listener ? "listener" : "null", handler ? "handler" : "null");
+    if (listener)
+        listeners.push_back(listener);
+}
+
+void jnivm::android::hardware::display::DisplayManager::unregisterDisplayListener(
+    std::shared_ptr<DisplayListener> listener)
+{
+    listeners.erase(std::remove(listeners.begin(), listeners.end(), listener), listeners.end());
+}
+
 ///// InputManager
 
 std::shared_ptr<jnivm::android::view::InputDevice> jnivm::android::hardware::input::InputManager::getInputDevice(int device)
@@ -96,7 +132,10 @@ void jnivm::android::app::Activity::setRequestedOrientation(int orientation)
 
 std::shared_ptr<jnivm::android::content::res::Resources> jnivm::android::app::Activity::getResources()
 {
-    return std::make_shared<jnivm::android::content::res::Resources>();
+    // Delegate to the Context implementation so an Activity and the Context it
+    // came from hand back the same Resources (and therefore the same
+    // Configuration/DisplayMetrics). Real Android does the same.
+    return jnivm::android::content::Context::getResources();
 }
 
 std::shared_ptr<jnivm::android::view::Window> jnivm::android::app::Activity::getWindow()
@@ -153,8 +192,47 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::input::InputManager::InputDeviceListener) { FakeJni::Constructor<InputDeviceListener> {} },
     END_NATIVE_DESCRIPTOR
 
+    // Only the TYPE_* constants: Unity 6 reads them off android/hardware/Sensor
+    // after Class.forName(). No SensorManager (and therefore no sensor list) is
+    // stubbed, so no Sensor instance is ever handed out.
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::Sensor) { FakeJni::Constructor<Sensor> {} },
+    { FakeJni::Field<&Sensor::TYPE_ACCELEROMETER> {}, "TYPE_ACCELEROMETER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_MAGNETIC_FIELD> {}, "TYPE_MAGNETIC_FIELD", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_ORIENTATION> {}, "TYPE_ORIENTATION", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_GYROSCOPE> {}, "TYPE_GYROSCOPE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_LIGHT> {}, "TYPE_LIGHT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_PRESSURE> {}, "TYPE_PRESSURE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_TEMPERATURE> {}, "TYPE_TEMPERATURE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_PROXIMITY> {}, "TYPE_PROXIMITY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_GRAVITY> {}, "TYPE_GRAVITY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_LINEAR_ACCELERATION> {}, "TYPE_LINEAR_ACCELERATION", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_ROTATION_VECTOR> {}, "TYPE_ROTATION_VECTOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_RELATIVE_HUMIDITY> {}, "TYPE_RELATIVE_HUMIDITY", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_AMBIENT_TEMPERATURE> {}, "TYPE_AMBIENT_TEMPERATURE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_MAGNETIC_FIELD_UNCALIBRATED> {}, "TYPE_MAGNETIC_FIELD_UNCALIBRATED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_GAME_ROTATION_VECTOR> {}, "TYPE_GAME_ROTATION_VECTOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_GYROSCOPE_UNCALIBRATED> {}, "TYPE_GYROSCOPE_UNCALIBRATED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_SIGNIFICANT_MOTION> {}, "TYPE_SIGNIFICANT_MOTION", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_STEP_DETECTOR> {}, "TYPE_STEP_DETECTOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_STEP_COUNTER> {}, "TYPE_STEP_COUNTER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_GEOMAGNETIC_ROTATION_VECTOR> {}, "TYPE_GEOMAGNETIC_ROTATION_VECTOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_HEART_RATE> {}, "TYPE_HEART_RATE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_POSE_6DOF> {}, "TYPE_POSE_6DOF", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_STATIONARY_DETECT> {}, "TYPE_STATIONARY_DETECT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_MOTION_DETECT> {}, "TYPE_MOTION_DETECT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_HEART_BEAT> {}, "TYPE_HEART_BEAT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_LOW_LATENCY_OFFBODY_DETECT> {}, "TYPE_LOW_LATENCY_OFFBODY_DETECT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Sensor::TYPE_ACCELEROMETER_UNCALIBRATED> {}, "TYPE_ACCELEROMETER_UNCALIBRATED", FakeJni::JFieldID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::display::DisplayManager) { FakeJni::Constructor<DisplayManager> {} },
     { FakeJni::Function<&DisplayManager::getDisplay> {}, "getDisplay", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&DisplayManager::getDisplays> {}, "getDisplays", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&DisplayManager::registerDisplayListener> {}, "registerDisplayListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&DisplayManager::unregisterDisplayListener> {}, "unregisterDisplayListener", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::display::DisplayManager::DisplayListener) { FakeJni::Constructor<DisplayListener> {} },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::Activity) { FakeJni::Constructor<Activity> {} },

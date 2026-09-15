@@ -25,10 +25,13 @@ namespace bitter {
         class JNIBridgeProxy : public jnivm::java::lang::Runnable,
                                public jnivm::android::os::Handler::Callback,
                                public jnivm::android::view::Choreographer::FrameCallback,
+                               public jnivm::android::view::ViewOnLayoutChangeListener,
                                public jnivm::android::hardware::input::InputManager::InputDeviceListener,
+                               public jnivm::android::hardware::display::DisplayManager::DisplayListener,
                                public jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback,
                                public jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback,
-                               public jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback
+                               public jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback,
+                               public jnivm::com::unity3d::player::IAssetPackManagerConfirmationDialogCallback
 #ifdef BD_ENABLE_GPLAY
                                , public jnivm::com::google::android::vending::licensing::LicenseCheckerCallback
 #endif
@@ -47,6 +50,14 @@ namespace bitter {
             };
 
             long nativeHandle;
+
+            // Set by bitter.jnibridge.JNIBridge.disableInterfaceProxy() when
+            // the engine retires a proxy (it is about to drop the native handle
+            // the proxy would call back into). Java stops forwarding at that
+            // point; so do we. Each drop is logged, so a proxy that Unity
+            // retires too early is visible in a trace instead of showing up as
+            // "input/rendering silently stopped".
+            bool disabled = false;
 
         private:
             // Stores the names of the interfaces this specific instance should implement.
@@ -70,6 +81,20 @@ namespace bitter {
             // --- Implementation of android.view.Choreographer.FrameCallback ---
             void doFrame(jlong frameTimeNanos) override;
 
+            // --- android.view.View$OnLayoutChangeListener /
+            //     android.hardware.display.DisplayManager$DisplayListener ---
+            // Unity 6 forName's both interfaces and passes a JNIBridge proxy in
+            // (see registerDisplayListener / addOnLayoutChangeListener in
+            // javastubs/android_misc.cpp and android_view.cpp). The proxy has to
+            // derive from both or jnivm's parameter unpack throws
+            // "Invalid Reference, Unexpected Type" before the stub body runs.
+            void onLayoutChange(std::shared_ptr<jnivm::android::view::View> view,
+                                int left, int top, int right, int bottom,
+                                int oldLeft, int oldTop, int oldRight, int oldBottom) override;
+            void onDisplayAdded(int displayId) override;
+            void onDisplayChanged(int displayId) override;
+            void onDisplayRemoved(int displayId) override;
+
             // --- Implementation of Unity Play Asset Delivery callbacks ---
             void onStatusResult(
                 FakeJni::JLong sequence,
@@ -87,6 +112,10 @@ namespace bitter {
 
             void onMobileDataConfirmationResult(FakeJni::JBoolean accepted) override;
 
+            // Unity 6 name for the same callback (see the interface classes in
+            // unity.h); forwarded to whichever native handle this proxy holds.
+            void onConfirmationDialogResult(FakeJni::JBoolean accepted) override;
+
 #ifdef BD_ENABLE_GPLAY
             void allow(jint reason) override;
             void dontAllow(jint reason) override;
@@ -103,6 +132,11 @@ namespace bitter {
 
             // The factory function is now much simpler.
             static std::shared_ptr<jnivm::java::lang::Object> newInterfaceProxy(FakeJni::JLong j, std::shared_ptr<FakeJni::JArray<FakeJni::JClass>> classes);
+
+            // Java: static void disableInterfaceProxy(Object proxy). Unity 6
+            // calls it on a proxy it has finished with (it is Java code in the
+            // real APK, so without this stub the call is a STUB-MISS).
+            static void disableInterfaceProxy(std::shared_ptr<jnivm::Object> proxy);
 
             // The static invoker remains the same powerful, generic helper.
             template <typename... Args>

@@ -40,6 +40,14 @@ JNIBridgeProxy::JNIBridgeProxy(long handle, const std::set<std::string>& interfa
 template <typename... Args>
 void JNIBridgeProxy::invoke(const char* className, const char* methodName,
                            const char* methodSig, Args... args) {
+    if (disabled) {
+        // Unity retired this proxy (disableInterfaceProxy): the native handle
+        // it carries is no longer valid. Drop the callback instead of calling
+        // into freed memory.
+        verbose("JNIBridgeProxy", "dropped %s->%s on disabled proxy %p",
+                className ? className : "?", methodName ? methodName : "?", this);
+        return;
+    }
     if (invocationMode == InvocationMode::ManagedGCHandle) {
         JNIBridge::invokeManaged(nativeHandle, methodName, args...);
         return;
@@ -78,6 +86,48 @@ void JNIBridgeProxy::doFrame(jlong frameTimeNanos) {
         invoke("android/view/Choreographer$FrameCallback", "doFrame", "(J)V" /* Check signature! */, frameTimeNanos);
     } else {
         verbose("JNIBridgeProxy", "doFrame() called on a proxy that doesn't implement FrameCallback!");
+    }
+}
+
+// The loader stores the listeners but never fires them (see
+// registerDisplayListener in javastubs/android_misc.cpp and
+// addOnLayoutChangeListener in javastubs/android_view.cpp), so these four only
+// exist so the *interface types* are castable from the proxy. Forwarding is
+// implemented anyway: if a future path does fire a callback, the native side
+// gets it instead of silence.
+void JNIBridgeProxy::onLayoutChange(std::shared_ptr<jnivm::android::view::View> view,
+                                    int left, int top, int right, int bottom,
+                                    int oldLeft, int oldTop, int oldRight, int oldBottom) {
+    if (implementedInterfaces.count("android/view/View$OnLayoutChangeListener")) {
+        invoke("android/view/View$OnLayoutChangeListener", "onLayoutChange",
+               "(Landroid/view/View;IIIIIIII)V",
+               view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom);
+    } else {
+        verbose("JNIBridgeProxy", "onLayoutChange() called on a proxy that doesn't implement View$OnLayoutChangeListener!");
+    }
+}
+
+void JNIBridgeProxy::onDisplayAdded(int displayId) {
+    if (implementedInterfaces.count("android/hardware/display/DisplayManager$DisplayListener")) {
+        invoke("android/hardware/display/DisplayManager$DisplayListener", "onDisplayAdded", "(I)V", displayId);
+    } else {
+        verbose("JNIBridgeProxy", "onDisplayAdded() called on a proxy that doesn't implement DisplayManager$DisplayListener!");
+    }
+}
+
+void JNIBridgeProxy::onDisplayChanged(int displayId) {
+    if (implementedInterfaces.count("android/hardware/display/DisplayManager$DisplayListener")) {
+        invoke("android/hardware/display/DisplayManager$DisplayListener", "onDisplayChanged", "(I)V", displayId);
+    } else {
+        verbose("JNIBridgeProxy", "onDisplayChanged() called on a proxy that doesn't implement DisplayManager$DisplayListener!");
+    }
+}
+
+void JNIBridgeProxy::onDisplayRemoved(int displayId) {
+    if (implementedInterfaces.count("android/hardware/display/DisplayManager$DisplayListener")) {
+        invoke("android/hardware/display/DisplayManager$DisplayListener", "onDisplayRemoved", "(I)V", displayId);
+    } else {
+        verbose("JNIBridgeProxy", "onDisplayRemoved() called on a proxy that doesn't implement DisplayManager$DisplayListener!");
     }
 }
 
@@ -130,6 +180,19 @@ void JNIBridgeProxy::onMobileDataConfirmationResult(FakeJni::JBoolean accepted) 
     }
 }
 
+void JNIBridgeProxy::onConfirmationDialogResult(FakeJni::JBoolean accepted) {
+    if (implementedInterfaces.count(
+            "com/unity3d/player/IAssetPackManagerConfirmationDialogCallback")) {
+        invoke(
+            "com/unity3d/player/IAssetPackManagerConfirmationDialogCallback",
+            "onConfirmationDialogResult",
+            "(Z)V",
+            accepted);
+    } else {
+        verbose("JNIBridgeProxy", "onConfirmationDialogResult() called on a proxy that doesn't implement the PAD confirmation-dialog callback!");
+    }
+}
+
 #ifdef BD_ENABLE_GPLAY
 void JNIBridgeProxy::allow(jint reason) {
     JNIBridge::invoke(nativeHandle,
@@ -165,6 +228,18 @@ std::shared_ptr<jnivm::java::lang::Object> JNIBridge::newInterfaceProxy(FakeJni:
     // just configured with a different set of interfaces to implement.
     auto proxy = std::make_shared<JNIBridgeProxy>(j, interfaceNames);
     return proxy;
+}
+
+void JNIBridge::disableInterfaceProxy(std::shared_ptr<jnivm::Object> proxy) {
+    auto bridge = std::dynamic_pointer_cast<JNIBridgeProxy>(proxy);
+    if (!bridge) {
+        verbose("JNIBridge", "disableInterfaceProxy(%p) is not a JNIBridgeProxy",
+                proxy.get());
+        return;
+    }
+    bridge->disabled = true;
+    verbose("JNIBridge", "disableInterfaceProxy(%p): nativeHandle=%ld retired",
+            bridge.get(), bridge->nativeHandle);
 }
 
 // The generic, type-safe C++ function that calls back into the native engine.
@@ -233,6 +308,7 @@ template void JNIBridge::invoke(long, const char*, const char*, const char*, Fak
 
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::bitter::jnibridge::JNIBridge) { FakeJni::Function<&JNIBridge::newInterfaceProxy> {}, "newInterfaceProxy", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&JNIBridge::disableInterfaceProxy> {}, "disableInterfaceProxy", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::bitter::jnibridge::JNIBridgeProxy)

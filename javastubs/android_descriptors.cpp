@@ -26,7 +26,9 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::view::Surface>();
     vm->registerClass<jnivm::android::view::Window>();
     vm->registerClass<jnivm::android::view::WindowManager>();
+    vm->registerClass<jnivm::android::view::WindowManager::LayoutParams>();
     vm->registerClass<jnivm::android::view::View>();
+    vm->registerClass<jnivm::android::view::ViewOnLayoutChangeListener>();
     vm->registerClass<jnivm::android::view::SurfaceView>();
     vm->registerClass<jnivm::android::view::Choreographer>();
     vm->registerClass<jnivm::android::view::Choreographer::FrameCallback>();
@@ -39,7 +41,9 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::view::KeyCharacterMap>();
 
     // Hardware
+    vm->registerClass<jnivm::android::hardware::Sensor>();
     vm->registerClass<jnivm::android::hardware::display::DisplayManager>();
+    vm->registerClass<jnivm::android::hardware::display::DisplayManager::DisplayListener>();
     vm->registerClass<jnivm::android::hardware::input::InputManager>();
     vm->registerClass<jnivm::android::hardware::input::InputManager::InputDeviceListener>();
 
@@ -57,6 +61,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::os::BuildVersion>();
     vm->registerClass<jnivm::android::os::Process>();
     vm->registerClass<jnivm::android::os::Bundle>();
+    vm->registerClass<jnivm::android::os::LocaleList>();
     vm->registerClass<jnivm::android::os::Message>();
     vm->registerClass<jnivm::android::os::Looper>();
     vm->registerClass<jnivm::android::os::Handler>();
@@ -82,6 +87,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
 
     // Content.res
     vm->registerClass<jnivm::android::content::res::AssetManager>();
+    vm->registerClass<jnivm::android::content::res::Configuration>();
     vm->registerClass<jnivm::android::content::res::Resources>();
 
     // App

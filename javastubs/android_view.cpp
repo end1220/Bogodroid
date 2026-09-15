@@ -6,6 +6,7 @@ extern toml::table config;
 #include "device_display.h"
 #include "javac.h"
 #include "logging.h"
+#include <algorithm>
 #include <fstream>
 #include <input_backend.h>
 #include <inttypes.h>
@@ -188,6 +189,32 @@ int jnivm::android::view::InputEvent::getDeviceId()
 int jnivm::android::view::InputEvent::getSource()
 {
     return this->device.get()->getSources();
+}
+
+///// View$OnLayoutChangeListener / View listener registration
+
+void jnivm::android::view::ViewOnLayoutChangeListener::onLayoutChange(
+    std::shared_ptr<jnivm::android::view::View> view, int left, int top, int right, int bottom,
+    int oldLeft, int oldTop, int oldRight, int oldBottom)
+{
+    // Base interface is a no-op; the real implementation is the Java player's
+    // own class, which is not instantiated under this loader.
+}
+
+void jnivm::android::view::View::addOnLayoutChangeListener(
+    std::shared_ptr<jnivm::android::view::ViewOnLayoutChangeListener> listener)
+{
+    BD_DEBUG("VIEW", "View.addOnLayoutChangeListener(%s)", listener ? "listener" : "null");
+    if (listener)
+        layoutListeners.push_back(listener);
+}
+
+void jnivm::android::view::View::removeOnLayoutChangeListener(
+    std::shared_ptr<jnivm::android::view::ViewOnLayoutChangeListener> listener)
+{
+    BD_DEBUG("VIEW", "View.removeOnLayoutChangeListener(%s)", listener ? "listener" : "null");
+    layoutListeners.erase(std::remove(layoutListeners.begin(), layoutListeners.end(), listener),
+                          layoutListeners.end());
 }
 
 ///// KeyEvent
@@ -601,6 +628,38 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&WindowManager::getDefaultDisplay> {}, "getDefaultDisplay", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    // android.view.WindowManager$LayoutParams. Unity 6 forName's the nested
+    // class and reads FLAG_KEEP_SCREEN_ON (and friends) as static ints.
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::WindowManager::LayoutParams) { FakeJni::Constructor<LayoutParams> {} },
+    { FakeJni::Field<&LayoutParams::FLAG_ALLOW_LOCK_WHILE_SCREEN_ON> {}, "FLAG_ALLOW_LOCK_WHILE_SCREEN_ON", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_DIM_BEHIND> {}, "FLAG_DIM_BEHIND", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_NOT_FOCUSABLE> {}, "FLAG_NOT_FOCUSABLE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_NOT_TOUCHABLE> {}, "FLAG_NOT_TOUCHABLE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_NOT_TOUCH_MODAL> {}, "FLAG_NOT_TOUCH_MODAL", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_KEEP_SCREEN_ON> {}, "FLAG_KEEP_SCREEN_ON", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_LAYOUT_IN_SCREEN> {}, "FLAG_LAYOUT_IN_SCREEN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_LAYOUT_NO_LIMITS> {}, "FLAG_LAYOUT_NO_LIMITS", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_FULLSCREEN> {}, "FLAG_FULLSCREEN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_FORCE_NOT_FULLSCREEN> {}, "FLAG_FORCE_NOT_FULLSCREEN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_SECURE> {}, "FLAG_SECURE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_SCALED> {}, "FLAG_SCALED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_IGNORE_CHEEK_PRESSES> {}, "FLAG_IGNORE_CHEEK_PRESSES", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_LAYOUT_INSET_DECOR> {}, "FLAG_LAYOUT_INSET_DECOR", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_ALT_FOCUSABLE_IM> {}, "FLAG_ALT_FOCUSABLE_IM", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_WATCH_OUTSIDE_TOUCH> {}, "FLAG_WATCH_OUTSIDE_TOUCH", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_SHOW_WHEN_LOCKED> {}, "FLAG_SHOW_WHEN_LOCKED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_SHOW_WALLPAPER> {}, "FLAG_SHOW_WALLPAPER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_TURN_SCREEN_ON> {}, "FLAG_TURN_SCREEN_ON", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_DISMISS_KEYGUARD> {}, "FLAG_DISMISS_KEYGUARD", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_SPLIT_TOUCH> {}, "FLAG_SPLIT_TOUCH", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_HARDWARE_ACCELERATED> {}, "FLAG_HARDWARE_ACCELERATED", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_LAYOUT_IN_OVERSCAN> {}, "FLAG_LAYOUT_IN_OVERSCAN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_TRANSLUCENT_STATUS> {}, "FLAG_TRANSLUCENT_STATUS", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_TRANSLUCENT_NAVIGATION> {}, "FLAG_TRANSLUCENT_NAVIGATION", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_LOCAL_FOCUS_MODE> {}, "FLAG_LOCAL_FOCUS_MODE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&LayoutParams::FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS> {}, "FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS", FakeJni::JFieldID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::View) { FakeJni::Constructor<View> {} },
     { FakeJni::Field<&View::SYSTEM_UI_FLAG_IMMERSIVE_STICKY> {}, "SYSTEM_UI_FLAG_IMMERSIVE_STICKY", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&View::SYSTEM_UI_FLAG_LAYOUT_STABLE> {}, "SYSTEM_UI_FLAG_LAYOUT_STABLE", FakeJni::JFieldID::STATIC },
@@ -611,10 +670,14 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&View::getDisplay> {}, "getDisplay", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&View::getSystemUiVisibility> {}, "getSystemUiVisibility", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&View::setSystemUiVisibility> {}, "setSystemUiVisibility", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&View::addOnLayoutChangeListener> {}, "addOnLayoutChangeListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&View::removeOnLayoutChangeListener> {}, "removeOnLayoutChangeListener", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::ViewOnLayoutChangeListener) { FakeJni::Constructor<ViewOnLayoutChangeListener> {} },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::SurfaceView) { FakeJni::Constructor<SurfaceView> {} },
-    { FakeJni::Function<&InputDevice::getDevice> {}, "getDevice", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Choreographer) { FakeJni::Function<&Choreographer::getInstance> {}, "getInstance", FakeJni::JMethodID::STATIC },

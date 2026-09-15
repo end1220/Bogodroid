@@ -251,8 +251,65 @@ static void bd_probe_method(const char* className, const char* name, const char*
            m->nativehandle ? "REAL" : m->dynamic ? "DYNAMIC" : m->native ? "NATIVE" : "PLACEHOLDER",
            (int)m->_static, (m->native ? 1 : 0), (m->nativehandle ? 1 : 0), (m->dynamic ? 1 : 0));
 }
+
+// One line per "why is this member missing" question, so the next [STUB-MISS]
+// can be answered without recompiling:
+//   M <class>|<method-or-field>|<signature>   probe one lookup
+//   D <class>|<substring>                     dump matching members + parents
+// Set BD_JNI_PROBE_FILE to the path; BD_JNI_PROBE=1 uses the built-in Unity 6
+// set. Blank lines and '#' comments are skipped.
+static void bd_probe_script(const char* path) {
+    std::ifstream in(path);
+    if (!in) {
+        BD_LOG("JNI-PROBE", "cannot open %s", path);
+        return;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (line.back() == '\r')
+            line.pop_back();
+        const bool dump = line[0] == 'D';
+        if (line[0] != 'D' && line[0] != 'M')
+            continue;
+        // Skip the whitespace between the directive and the class name: a
+        // stray leading space makes FindClass invent a phantom class.
+        size_t start = 1;
+        while (start < line.size() && (line[start] == ' ' || line[start] == '\t'))
+            start++;
+        const std::string rest = line.substr(start);
+        const size_t bar = rest.find('|');
+        if (bar == std::string::npos)
+            continue;
+        const std::string cls = rest.substr(0, bar);
+        const std::string arg = rest.substr(bar + 1);
+        if (dump) {
+            // Same lookup the guest uses, not vm.findClass(): the two can
+            // disagree about which Class object a name resolves to.
+            JNIEnv* env = &FakeJni::JniEnvContext().getJniEnv();
+            auto viaVm = vm.findClass(cls.c_str());
+            auto viaEnv = reinterpret_cast<JClass*>(env->FindClass(cls.c_str()));
+            BD_LOG("JNI-PROBE", "%s: vm=%p threadVM=%p vmFind=%s(%zu) envFind=%s(%zu) sameObject=%d",
+                   cls.c_str(), (void*)&vm, (void*)jnivm::ENV::FromJNIEnv(env)->GetVM(),
+                   viaVm ? "hit" : "null",
+                   viaVm ? viaVm->methods.size() : 0, viaEnv ? "hit" : "null",
+                   viaEnv ? viaEnv->methods.size() : 0, viaVm.get() == viaEnv);
+            bd_dump_members(viaVm.get(), arg.c_str(), 0);
+            bd_dump_members(viaEnv, arg.c_str(), 0);
+            continue;
+        }
+        const size_t bar2 = arg.find('|');
+        if (bar2 == std::string::npos || bar2 + 1 >= arg.size()) {
+            BD_LOG("JNI-PROBE", "skipping malformed line: %s", line.c_str());
+            continue;
+        }
+        bd_probe_method(cls.c_str(), arg.substr(0, bar2).c_str(), arg.substr(bar2 + 1).c_str());
+    }
+}
 #else
 #define bd_probe_method(className, name, sig) ((void)0)
+#define bd_probe_script(path) ((void)0)
 #endif
 
 // Generic config-driven IL2CPP value patcher. Reads [[il2cpp_patch]] from the
@@ -1008,18 +1065,34 @@ int main(int argc, char* argv[])
     // java.lang.Object.getClass().getClassLoader().findLibrary(), so a
     // getClass() that does not resolve kills il2cpp loading outright. These
     // dumps are opt-in (BD_JNI_PROBE=1) because they are only useful while
-    // wiring up a new player version.
+    // wiring up a new player version; BD_JNI_PROBE=<file> answers the next
+    // [STUB-MISS] question without a rebuild (see bd_probe_script).
     if (const char* probe = getenv("BD_JNI_PROBE"); probe && *probe && *probe != '0') {
-        bd_dump_members(vm.findClass("com/unity3d/player/UnityPlayerForActivityOrService").get(),
-                        "getClass", 0);
-        bd_dump_members(vm.findClass("android/app/Activity").get(), "Service", 0);
-        bd_probe_method("java/lang/Object", "getClass", "()Ljava/lang/Class;");
-        bd_probe_method("com/unity3d/player/UnityPlayerForActivityOrService", "getClass",
-                        "()Ljava/lang/Class;");
-        bd_probe_method("android/app/Activity", "getSystemService",
-                        "(Ljava/lang/String;)Ljava/lang/Object;");
-        bd_probe_method("android/content/Context", "getSystemService",
-                        "(Ljava/lang/String;)Ljava/lang/Object;");
+        {
+            // Does re-running a registration land members on the class the VM
+            // hands back? Separates "registration never happened" from
+            // "findClass disagrees about which Class object we want".
+            auto before = vm.findClass("com/unity3d/player/UnityPlayer");
+            auto again = jnivm::com::unity3d::player::UnityPlayer::registerClass();
+            auto after = vm.findClass("com/unity3d/player/UnityPlayer");
+            BD_LOG("JNI-PROBE", "re-register UnityPlayer: before=%zu same=%d after=%zu methods=%zu",
+                   before ? before->methods.size() : 0, before.get() == again.get(),
+                   after ? after->methods.size() : 0, again->methods.size());
+        }
+        if (probe[1] != '\0') {
+            bd_probe_script(probe);
+        } else {
+            bd_dump_members(vm.findClass("com/unity3d/player/UnityPlayerForActivityOrService").get(),
+                            "getClass", 0);
+            bd_dump_members(vm.findClass("android/app/Activity").get(), "Service", 0);
+            bd_probe_method("java/lang/Object", "getClass", "()Ljava/lang/Class;");
+            bd_probe_method("com/unity3d/player/UnityPlayerForActivityOrService", "getClass",
+                            "()Ljava/lang/Class;");
+            bd_probe_method("android/app/Activity", "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;");
+            bd_probe_method("android/content/Context", "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;");
+        }
     }
 
     JClass* unityBaseClass = vm.findClass("com/unity3d/player/UnityPlayer").get();
@@ -1295,6 +1368,31 @@ int main(int argc, char* argv[])
         BOOT_LOG("calling JNI_OnLoad from libunity.so (%p)\n", (void*)unityJNI_OnLoad);
         unityJNI_OnLoad(&vm, nullptr);
         BD_TIME("after libunity JNI_OnLoad");
+    }
+
+    // Unity's Java UnityPlayer constructor news an HFPStatus, stores it in
+    // m_HFPStatus and its constructor calls the (libunity-owned) native
+    // HFPStatus.initHFPStatusJni() — that call is how libunity caches the
+    // object it later drives for Bluetooth hands-free (SCO) audio routing
+    // (clearHFPStat/getHFPStat/setHFPRecordingStat). Our Java side does not run,
+    // so both steps happen here. It has to be *after* the JNI_OnLoad above:
+    // before it, initHFPStatusJni does not exist yet and the call would resolve
+    // to nothing, leaving libunity with a null object to call clearHFPStat on
+    // ("CallMethod object is null", Class=`Invalid`).
+    if (auto hfpClass = vm.findClass("com/unity3d/player/HFPStatus")) {
+        unityPlayer->m_HFPStatus =
+            std::make_shared<jnivm::com::unity3d::player::HFPStatus>(unityActivity);
+        auto hfpObj = std::dynamic_pointer_cast<jnivm::Object>(unityPlayer->m_HFPStatus);
+        LocalFrame hfpFrame(vm);
+        if (auto initHfp = hfpClass->getMethod("()V", "initHFPStatusJni")) {
+            initHfp.invoke(hfpFrame.getJniEnv(), hfpObj.get());
+            BD_LOG("HFPStatus", "initHFPStatusJni() invoked (libunity caches the object)");
+        } else {
+            BD_LOG("HFPStatus",
+                   "initHFPStatusJni not registered by libunity; SCO audio path has no object");
+        }
+    } else {
+        BD_LOG("HFPStatus", "class not found; SCO audio path has no object");
     }
 
     bd_dump_natives(unityBaseClass, "UnityPlayer");

@@ -28,7 +28,11 @@ namespace jnivm {
 namespace com {
     namespace unity3d {
         namespace player {
+
             class UnityPlayer;
+
+            // Defined further down; UnityPlayer stores one (see m_HFPStatus).
+            class HFPStatus;
 
             class IAssetPackManagerStatusQueryCallback : public virtual FakeJni::JObject {
             public:
@@ -52,6 +56,16 @@ namespace com {
             public:
                 DEFINE_CLASS_NAME("com/unity3d/player/IAssetPackManagerMobileDataConfirmationCallback")
                 virtual void onMobileDataConfirmationResult(FakeJni::JBoolean accepted);
+            };
+
+            // Unity 6 renamed the mobile-data dialog callback and its method
+            // (see the PlayAssetDeliveryUnityWrapper overloads below). Both
+            // names stay declared so a 2020/2022 build of the same stub file
+            // still resolves.
+            class IAssetPackManagerConfirmationDialogCallback : public virtual FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/IAssetPackManagerConfirmationDialogCallback")
+                virtual void onConfirmationDialogResult(FakeJni::JBoolean accepted);
             };
 
             class UnityCoreAssetPacksStatusCallbacks
@@ -78,7 +92,16 @@ namespace com {
                 DEFINE_CLASS_NAME("com/unity3d/player/PlayAssetDeliveryUnityWrapper")
                 bool playCoreApiMissing();
                 static std::shared_ptr<PlayAssetDeliveryUnityWrapper> getInstance();
-                static std::shared_ptr<PlayAssetDeliveryUnityWrapper> init(std::shared_ptr<jnivm::android::content::Context> context);
+                // Unity 6: init(UnityPlayer, Context). The 2020/2022 build of
+                // this stub only had the Context parameter, which made every
+                // lookup miss (the JNI signature lists both arguments):
+                //   Unknown Static ... Member=init
+                //   Sig=(Lcom/unity3d/player/UnityPlayer;Landroid/content/Context;)Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;
+                static std::shared_ptr<PlayAssetDeliveryUnityWrapper> init(
+                    std::shared_ptr<UnityPlayer> player,
+                    std::shared_ptr<jnivm::android::content::Context> context);
+                static std::shared_ptr<PlayAssetDeliveryUnityWrapper> init(
+                    std::shared_ptr<jnivm::android::content::Context> context);
                 void cancelAssetPackDownload(std::shared_ptr<FakeJni::JString> name);
                 void cancelAssetPackDownloads(std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names);
                 void downloadAssetPack(std::shared_ptr<FakeJni::JString> name,
@@ -95,6 +118,13 @@ namespace com {
                 void removeAssetPack(std::shared_ptr<FakeJni::JString> name);
                 void requestToUseMobileData(std::shared_ptr<jnivm::android::app::Activity> activity,
                     std::shared_ptr<IAssetPackManagerMobileDataConfirmationCallback> callback);
+                // Unity 6 name for the same entry point (and its dialog-only
+                // twin). The callback interface is
+                // IAssetPackManagerConfirmationDialogCallback there.
+                void requestToUseMobileData(std::shared_ptr<jnivm::android::app::Activity> activity,
+                    std::shared_ptr<IAssetPackManagerConfirmationDialogCallback> callback);
+                void showConfirmationDialog(std::shared_ptr<jnivm::android::app::Activity> activity,
+                    std::shared_ptr<IAssetPackManagerConfirmationDialogCallback> callback);
                 void unregisterDownloadStatusListener(std::shared_ptr<jnivm::Object> token);
 
             private:
@@ -116,6 +146,15 @@ namespace com {
             public:
                 DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayer")
 
+                // Java keeps an HFPStatus here (UnityPlayer.m_HFPStatus) for its
+                // Bluetooth hands-free audio routing; libunity's native side
+                // caches the object when the HFPStatus constructor calls its
+                // initHFPStatusJni(). Our Java side does not run, so main.cpp
+                // fills this in and makes that call. Deliberately *not*
+                // registered as a JNI field: libunity reaches the object through
+                // its own cache, so this member only has to keep it alive.
+                std::shared_ptr<HFPStatus> m_HFPStatus;
+
                 bool initializeGoogleAr();
                 std::shared_ptr<FakeJni::JString> getLaunchURL();
                 void hideSoftInput();
@@ -131,8 +170,84 @@ namespace com {
                 void startActivityIndicator(FakeJni::JInt unused);
                 void stopActivityIndicator();
 
+                // ── Unity 6 (6000.x) UnityPlayer methods ─────────────────────
+                // libunity.so calls these on its UnityPlayerForActivityOrService
+                // instance. In a real APK they are Java-side bookkeeping (phone
+                // call listener, main-thread job queue, splash/content hiding,
+                // UaaL detection, proxy lookup, orientation listener, insets
+                // controller); the Java player is stubbed out here, so each one
+                // answers with the "Java side absent" value. Registered on
+                // UnityPlayer, not on UnityPlayerForActivityOrService, so the
+                // lookup from the Unity 6 class is satisfied by inheritance —
+                // same as getLaunchURL/hideSoftInput above.
+                void addPhoneCallListener();
+                void executeMainThreadJobs();
+                std::shared_ptr<FakeJni::JString> getNetworkProxySettings(
+                    std::shared_ptr<FakeJni::JString> url);
+                void hidePreservedContent();
+                bool isUaaLUseCase();
+                // Returns false on purpose: a "true" here tells Unity the
+                // library is already loaded into the Java classloader, and it
+                // then skips its own lookup+dlopen. The loader does the dlopen
+                // itself ([BD-DLOPEN]), which is the path that actually works.
+                bool loadLibrary(std::shared_ptr<FakeJni::JString> library);
+                bool shouldSetGameState();
+                bool startOrientationListener(FakeJni::JInt orientation);
+                bool supportsWindowInsetController();
+
                 static std::shared_ptr<UnityPlayerActivity> currentActivity;
     
+            };
+
+            // com.unity3d.player.UnityPlayerUtilities. Unity 6 reflects this
+            // class out of libunity.so and instantiates it with NewObject();
+            // without a constructor here the engine logs
+            //   Failed to create java object for com.unity3d.player.UnityPlayerUtilities
+            // and skips the (debug-only) reference table dump it drives.
+            class UnityPlayerUtilities : public FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/UnityPlayerUtilities")
+                UnityPlayerUtilities();
+                bool dumpReferenceTables();
+            };
+
+            // com.unity3d.player.HFPStatus. Unity's Java UnityPlayer news one of
+            // these and keeps it in m_HFPStatus (both names are strings in
+            // libunity.so, plus the four Java method names). The constructor is
+            // what calls the private native initHFPStatusJni(), and *that* call
+            // is how libunity caches the object it later drives for its
+            // Bluetooth hands-free (SCO) audio routing:
+            //   HFPStatus.<init> -> initHFPStatusJni()  [libunity caches this]
+            //   ...              -> clearHFPStat()/getHFPStat()/setHFPRecordingStat()
+            // None of that Java runs under this loader, so main.cpp does the
+            // construction and the initHFPStatusJni() call itself. Skip them and
+            // libunity ends up calling clearHFPStat() on a null object:
+            //   CallMethod object is null
+            //   [STUB-MISS] Unknown Member: Class=`Invalid` Member=`clearHFPStat`
+            class HFPStatus : public FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("com/unity3d/player/HFPStatus")
+
+                explicit HFPStatus(std::shared_ptr<jnivm::android::content::Context> context);
+
+                // Public Java surface (HFPStatus$1, the SCO broadcast receiver,
+                // drives a()/b() through these). The loader has no Bluetooth
+                // stack and never registers the receiver, so the cached SCO
+                // state stays "disconnected" for the life of the process.
+                void clearHFPStat();
+                bool getHFPStat();
+                void requestHFPStat();
+                void setHFPRecordingStat(FakeJni::JBoolean recording);
+
+            private:
+                std::shared_ptr<jnivm::android::content::Context> mContext;
+                // Java field d: the AudioManager the SCO calls go through.
+                std::shared_ptr<jnivm::android::media::AudioManager> mAudioManager;
+                // Java fields c/e/f: recording flag, SCO-stop-requested flag and
+                // the SCO state cached from the broadcast (0 = DISCONNECTED).
+                bool mRecording = false;
+                bool mScoStopRequested = false;
+                int mScoState = jnivm::android::media::AudioManager::SCO_AUDIO_STATE_DISCONNECTED;
             };
 
             // ── Unity 6 (6000.x) class layout ────────────────────────────

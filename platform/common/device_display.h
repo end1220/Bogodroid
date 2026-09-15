@@ -20,4 +20,9 @@ int bd_device_display_width();
 int bd_device_display_height();
 float bd_device_display_refresh_rate();
 
+// Panel density in dpi. One source for Configuration.densityDpi,
+// Resources.getDisplayMetrics().densityDpi and Display.getRealMetrics() so the
+// three never contradict each other. [device] displayDpi overrides; default 100.
+int bd_device_display_dpi();
+
 void bd_device_display_probe();

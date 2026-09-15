@@ -232,6 +232,38 @@ void jnivm::android::os::Looper::quit()
     }
 }
 
+///// LocaleList
+
+// android.os.LocaleList. Unity 6 takes Configuration.getLocales().get(0) to
+// pick the UI language and checks size()/isEmpty() around it. We expose exactly
+// one entry — the process default locale, the same value
+// java.util.Locale.getDefault() answers — so index 0 always exists and the
+// list is never reported as empty.
+std::shared_ptr<jnivm::java::util::Locale> jnivm::android::os::LocaleList::get(int index)
+{
+    if (index != 0) {
+        verbose("JBRIDGE", "LocaleList.get(%d) -> null (list holds 1 entry)", index);
+        return nullptr;
+    }
+    verbose("JBRIDGE", "LocaleList.get(0) -> default locale");
+    return jnivm::java::util::Locale::getDefault();
+}
+
+int jnivm::android::os::LocaleList::size()
+{
+    return 1;
+}
+
+bool jnivm::android::os::LocaleList::isEmpty()
+{
+    return false;
+}
+
+std::shared_ptr<jnivm::android::os::LocaleList> jnivm::android::os::LocaleList::getDefault()
+{
+    return std::make_shared<jnivm::android::os::LocaleList>();
+}
+
 ///// Message
 
 // Initialize static pool members
@@ -521,6 +553,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
     { FakeJni::Field<&Build::MODEL> {}, "MODEL", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Build::DEVICE> {}, "DEVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Build::ID> {}, "ID", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Build::TAGS> {}, "TAGS", FakeJni::JFieldID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::BuildVersion) { FakeJni::Constructor<BuildVersion> {} },
@@ -541,6 +574,13 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Process) { FakeJni::Constructor<Process> {} },
     { FakeJni::Function<&Process::setThreadPriority> {}, "setThreadPriority", FakeJni::JMethodID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::LocaleList) { FakeJni::Constructor<LocaleList> {} },
+    { FakeJni::Function<&LocaleList::get> {}, "get", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&LocaleList::size> {}, "size", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&LocaleList::isEmpty> {}, "isEmpty", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&LocaleList::getDefault> {}, "getDefault", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Message) { FakeJni::Constructor<Message> {} },

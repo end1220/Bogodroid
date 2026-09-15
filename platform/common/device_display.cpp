@@ -185,3 +185,17 @@ float bd_device_display_refresh_rate()
         bd_device_display_probe();
     return g_rr.value > 0.f ? g_rr.value : 60.f;
 }
+
+// Android exposes panel density through Configuration.densityDpi,
+// Resources.getDisplayMetrics().densityDpi and Display.getRealMetrics(). The
+// three have to agree: Unity picks its UI scale from whichever it reads first
+// and then cross-checks the others. [device] displayDpi overrides; the default
+// matches the value bogodroid has always reported from getRealMetrics().
+int bd_device_display_dpi()
+{
+    if (auto* dev = config["device"].as_table()) {
+        if (auto v = (*dev)["displayDpi"].value<int64_t>(); v && *v > 0)
+            return static_cast<int>(*v);
+    }
+    return 100;
+}

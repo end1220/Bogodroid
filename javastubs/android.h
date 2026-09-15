@@ -24,6 +24,13 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm);
 
 namespace jnivm {
 namespace android {
+    // Android's register*Listener APIs all take a java-side android.os.Handler
+    // to pick the callback thread. os/ is defined further down, so forward
+    // declare it here rather than reordering the file.
+    namespace os {
+        class Handler;
+    }
+
     namespace net {
         class Uri : public FakeJni::JObject {
         public:
@@ -44,6 +51,9 @@ namespace android {
         };
     }
     namespace view {
+        // View is defined below; View$OnLayoutChangeListener names it in its
+        // callback signature, so forward declare it here.
+        class View;
 
         class DisplayMode : public FakeJni::JObject {
         public:
@@ -74,6 +84,20 @@ namespace android {
             DEFINE_CLASS_NAME("android/view/Surface")
         };
 
+        // android.view.View$OnLayoutChangeListener. Unity 6 attaches one to the
+        // surface view and reads the settled view size out of the callback; the
+        // interface must exist as a registered class or GetMethodID cannot bind
+        // the parameter type and the call falls to the STUB-MISS path. Declared
+        // here so View can name it in the add/remove signatures, like the real
+        // class (the listener type belongs to View, not to SurfaceView).
+        class ViewOnLayoutChangeListener : public virtual FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/view/View$OnLayoutChangeListener")
+            virtual void onLayoutChange(std::shared_ptr<jnivm::android::view::View> view,
+                                        int left, int top, int right, int bottom,
+                                        int oldLeft, int oldTop, int oldRight, int oldBottom);
+        };
+
         class View : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/view/View")
@@ -86,6 +110,24 @@ namespace android {
             int getSystemUiVisibility();
             void setSystemUiVisibility(int visibility);
             std::shared_ptr<jnivm::android::view::Display> getDisplay();
+
+            // These live on View in the real framework and Unity 6 looks them
+            // up on android/view/View (not on the SurfaceView it passes), so
+            // declaring them on SurfaceView leaves the call unresolved:
+            //   Constructed Unresolved symbol, Class=`android/view/View`,
+            //   Method=`addOnLayoutChangeListener`
+            // Hold the listener (Android keeps a strong reference too) but do
+            // not fire it: the Java player is stubbed out under this loader, so
+            // the callback would re-enter native code that expects a live
+            // UnityPlayer. The size Unity cares about is already published
+            // through the EGL surface.
+            void addOnLayoutChangeListener(
+                std::shared_ptr<jnivm::android::view::ViewOnLayoutChangeListener> listener);
+            void removeOnLayoutChangeListener(
+                std::shared_ptr<jnivm::android::view::ViewOnLayoutChangeListener> listener);
+
+        private:
+            std::vector<std::shared_ptr<jnivm::android::view::ViewOnLayoutChangeListener>> layoutListeners;
         };
 
         class SurfaceView : public View {
@@ -107,6 +149,44 @@ namespace android {
         class WindowManager : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/view/WindowManager")
+
+            // android/view/WindowManager$LayoutParams. Unity 6 reads
+            // FLAG_KEEP_SCREEN_ON (and the other window flags) with
+            // GetStaticIntField after Class.forName(), so the class has to be
+            // registered with the constants as real static fields.
+            class LayoutParams : public FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("android/view/WindowManager$LayoutParams")
+
+                inline static int FLAG_ALLOW_LOCK_WHILE_SCREEN_ON = 0x00000001;
+                inline static int FLAG_DIM_BEHIND = 0x00000002;
+                inline static int FLAG_NOT_FOCUSABLE = 0x00000008;
+                inline static int FLAG_NOT_TOUCHABLE = 0x00000010;
+                inline static int FLAG_NOT_TOUCH_MODAL = 0x00000020;
+                inline static int FLAG_KEEP_SCREEN_ON = 0x00000080;
+                inline static int FLAG_LAYOUT_IN_SCREEN = 0x00000100;
+                inline static int FLAG_LAYOUT_NO_LIMITS = 0x00000200;
+                inline static int FLAG_FULLSCREEN = 0x00000400;
+                inline static int FLAG_FORCE_NOT_FULLSCREEN = 0x00000800;
+                inline static int FLAG_SECURE = 0x00002000;
+                inline static int FLAG_SCALED = 0x00004000;
+                inline static int FLAG_IGNORE_CHEEK_PRESSES = 0x00008000;
+                inline static int FLAG_LAYOUT_INSET_DECOR = 0x00010000;
+                inline static int FLAG_ALT_FOCUSABLE_IM = 0x00020000;
+                inline static int FLAG_WATCH_OUTSIDE_TOUCH = 0x00040000;
+                inline static int FLAG_SHOW_WHEN_LOCKED = 0x00080000;
+                inline static int FLAG_SHOW_WALLPAPER = 0x00100000;
+                inline static int FLAG_TURN_SCREEN_ON = 0x00200000;
+                inline static int FLAG_DISMISS_KEYGUARD = 0x00400000;
+                inline static int FLAG_SPLIT_TOUCH = 0x00800000;
+                inline static int FLAG_HARDWARE_ACCELERATED = 0x01000000;
+                inline static int FLAG_LAYOUT_IN_OVERSCAN = 0x02000000;
+                inline static int FLAG_TRANSLUCENT_STATUS = 0x04000000;
+                inline static int FLAG_TRANSLUCENT_NAVIGATION = 0x08000000;
+                inline static int FLAG_LOCAL_FOCUS_MODE = 0x10000000;
+                inline static int FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS = (int)0x80000000u;
+            };
+
             std::shared_ptr<jnivm::android::view::Display> getDefaultDisplay();
         };
 
@@ -465,11 +545,71 @@ namespace android {
         };
     }
     namespace hardware {
+        // android/hardware/Sensor. Unity 6 reads the TYPE_* constants with
+        // GetStaticIntField after Class.forName() when it enumerates the
+        // sensor list it got from SensorManager. The list itself stays empty
+        // (no SensorManager stub), so only the constants are needed here.
+        class Sensor : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/hardware/Sensor")
+
+            inline static int TYPE_ACCELEROMETER = 1;
+            inline static int TYPE_MAGNETIC_FIELD = 2;
+            inline static int TYPE_ORIENTATION = 3;
+            inline static int TYPE_GYROSCOPE = 4;
+            inline static int TYPE_LIGHT = 5;
+            inline static int TYPE_PRESSURE = 6;
+            inline static int TYPE_TEMPERATURE = 7;
+            inline static int TYPE_PROXIMITY = 8;
+            inline static int TYPE_GRAVITY = 9;
+            inline static int TYPE_LINEAR_ACCELERATION = 10;
+            inline static int TYPE_ROTATION_VECTOR = 11;
+            inline static int TYPE_RELATIVE_HUMIDITY = 12;
+            inline static int TYPE_AMBIENT_TEMPERATURE = 13;
+            inline static int TYPE_MAGNETIC_FIELD_UNCALIBRATED = 14;
+            inline static int TYPE_GAME_ROTATION_VECTOR = 15;
+            inline static int TYPE_GYROSCOPE_UNCALIBRATED = 16;
+            inline static int TYPE_SIGNIFICANT_MOTION = 17;
+            inline static int TYPE_STEP_DETECTOR = 18;
+            inline static int TYPE_STEP_COUNTER = 19;
+            inline static int TYPE_GEOMAGNETIC_ROTATION_VECTOR = 20;
+            inline static int TYPE_HEART_RATE = 21;
+            inline static int TYPE_POSE_6DOF = 28;
+            inline static int TYPE_STATIONARY_DETECT = 29;
+            inline static int TYPE_MOTION_DETECT = 30;
+            inline static int TYPE_HEART_BEAT = 31;
+            inline static int TYPE_LOW_LATENCY_OFFBODY_DETECT = 34;
+            inline static int TYPE_ACCELEROMETER_UNCALIBRATED = 35;
+        };
+
         namespace display {
             class DisplayManager : public FakeJni::JObject {
             public:
                 DEFINE_CLASS_NAME("android/hardware/display/DisplayManager")
+
+                // android.hardware.display.DisplayManager$DisplayListener.
+                // Nested here because the JNI name nests here too.
+                class DisplayListener : public virtual FakeJni::JObject {
+                public:
+                    DEFINE_CLASS_NAME("android/hardware/display/DisplayManager$DisplayListener")
+                    virtual void onDisplayAdded(int displayId);
+                    virtual void onDisplayChanged(int displayId);
+                    virtual void onDisplayRemoved(int displayId);
+                };
+
                 std::shared_ptr<jnivm::android::view::Display> getDisplay(int disp);
+                std::shared_ptr<jnivm::Array<jnivm::android::view::Display>> getDisplays();
+
+                // Registered listeners are kept (Android holds a strong ref) but
+                // never invoked: the panel geometry we report through
+                // bd_device_display_* does not change at runtime, so there is no
+                // change to report. Revisit if a hotplug/rotation path appears.
+                void registerDisplayListener(std::shared_ptr<DisplayListener> listener,
+                                             std::shared_ptr<jnivm::android::os::Handler> handler);
+                void unregisterDisplayListener(std::shared_ptr<DisplayListener> listener);
+
+            private:
+                std::vector<std::shared_ptr<DisplayListener>> listeners;
             };
         }
     }
@@ -490,6 +630,15 @@ namespace android {
             inline static FakeJni::JString PROPERTY_OUTPUT_SAMPLE_RATE = (FakeJni::JString) "PROPERTY_OUTPUT_SAMPLE_RATE";
             inline static int GET_DEVICES_OUTPUTS = 2;
             inline static int STREAM_MUSIC = 3;
+            // SCO_AUDIO_STATE_*: also declared on AudioManager (API 30+); the
+            // HFPStatus stub caches its hands-free state against these, so keep
+            // the framework values. The loader has no Bluetooth stack, so the
+            // state never leaves DISCONNECTED.
+            inline static int SCO_AUDIO_STATE_DISCONNECTED = 0;
+            inline static int SCO_AUDIO_STATE_CONNECTING = 1;
+            inline static int SCO_AUDIO_STATE_CONNECTED = 2;
+            inline static int SCO_AUDIO_STATE_ERROR = -1;
+            inline static int MODE_NORMAL = 0;
             // isBluetoothA2dpOn / getStreamVolume live in binding.cpp via vm->setDefault.
             std::shared_ptr<FakeJni::JString> getProperty(std::shared_ptr<FakeJni::JString> property);
             std::shared_ptr<jnivm::Array<jnivm::android::media::AudioDeviceInfo>> getDevices(int type);
@@ -534,6 +683,10 @@ namespace android {
             inline static FakeJni::JString MODEL = (FakeJni::JString) "h700";
             inline static FakeJni::JString DEVICE = (FakeJni::JString) "R36S";
             inline static FakeJni::JString ID = (FakeJni::JString) "0.01";
+            // Unity 6 reads Build.TAGS through JNI (it reports it as
+            // SystemInfo / Debug metadata). "release-keys" is what a production
+            // Android image reports, letting Unity take the non-debug path.
+            inline static FakeJni::JString TAGS = (FakeJni::JString) "release-keys";
         };
 
         class BuildVersion : public FakeJni::JObject {
@@ -549,6 +702,20 @@ namespace android {
             DEFINE_CLASS_NAME("android/os/Process")
             static void setThreadPriority(int i, int j);
         };
+
+        // android.os.LocaleList. Unity 6 asks Configuration.getLocales() for
+        // the device's locale list (it uses index 0 for the UI language) and
+        // then calls get(0) on it. Both lookups have to land here or the UI
+        // language degrades to empty. One entry: the process default locale.
+        class LocaleList : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/os/LocaleList")
+            std::shared_ptr<jnivm::java::util::Locale> get(int index);
+            int size();
+            bool isEmpty();
+            static std::shared_ptr<LocaleList> getDefault();
+        };
+
         class Bundle : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/os/Bundle")
@@ -743,12 +910,28 @@ namespace android {
                 inline static int SCREEN_ORIENTATION_USER_LANDSCAPE = 11;
                 inline static int SCREEN_ORIENTATION_SENSOR = 4;
                 inline static int SCREEN_ORIENTATION_UNSPECIFIED = -1;
+                // Unity 6 compares ActivityInfo.screenOrientation against these
+                // when it decides whether to start the orientation listener and
+                // how to map the panel, so they have to be the framework values.
+                inline static int SCREEN_ORIENTATION_USER = 2;
+                inline static int SCREEN_ORIENTATION_BEHIND = 3;
+                inline static int SCREEN_ORIENTATION_NOSENSOR = 5;
+                inline static int SCREEN_ORIENTATION_SENSOR_LANDSCAPE = 6;
+                inline static int SCREEN_ORIENTATION_SENSOR_PORTRAIT = 7;
+                inline static int SCREEN_ORIENTATION_FULL_SENSOR = 10;
+                inline static int SCREEN_ORIENTATION_LOCKED = 14;
             };
 
             class PackageInfo : public FakeJni::JObject {
             public:
                 DEFINE_CLASS_NAME("android/content/pm/PackageInfo")
                 FakeJni::JString versionName = (FakeJni::JString) "0.1";
+                // Unity reads versionCode before versionName (and calls
+                // versionName.length() right after — see
+                // HookStringExtensions). A missing field returns 0 through the
+                // placeholder path, which is also a legal version code, so the
+                // miss was silent apart from the JNI trace.
+                FakeJni::JInt versionCode = 1;
             };
 
             class ApplicationInfo : public FakeJni::JObject {
@@ -779,6 +962,15 @@ namespace android {
                 std::shared_ptr<jnivm::android::os::Bundle> metaData;
 
                 std::shared_ptr<jnivm::Array<FakeJni::JString>> splitPublicSourceDirs = std::make_shared<jnivm::Array<FakeJni::JString>>();
+                // Unity reads both through JNI to gate its Android version
+                // branches (runtime permissions, scoped storage, window
+                // insets). Pinned to the API level the loader claims in
+                // Build.VERSION.SDK_INT (26) in bd_make_application_info():
+                // everything newer than that expects framework APIs this
+                // loader does not implement. [package] minSdkVersion /
+                // targetSdkVersion override them.
+                int minSdkVersion = 26;
+                int targetSdkVersion = 26;
             };
 
             class PackageManager : public FakeJni::JObject {
@@ -807,10 +999,91 @@ namespace android {
                 std::shared_ptr<jnivm::Array<FakeJni::JString>> list(std::shared_ptr<FakeJni::JString> path);
             };
 
+            // android.content.res.Configuration. Unity reads panel size,
+            // density and orientation from Resources.getConfiguration() as well
+            // as from Display/DisplayMetrics; the three have to agree or Unity
+            // picks an inconsistent UI scale. Values come from the same
+            // bd_device_display_* source as the other two.
+            class Configuration : public FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("android/content/res/Configuration")
+
+                inline static int ORIENTATION_UNDEFINED = 0;
+                inline static int ORIENTATION_PORTRAIT = 1;
+                inline static int ORIENTATION_LANDSCAPE = 2;
+                inline static int ORIENTATION_SQUARE = 3;
+                inline static int SCREENLAYOUT_SIZE_MASK = 0x0f;
+                inline static int UI_MODE_TYPE_MASK = 0x0f;
+                inline static int UI_MODE_TYPE_UNDEFINED = 0;
+                inline static int UI_MODE_TYPE_NORMAL = 1;
+                inline static int TOUCHSCREEN_NOTOUCH = 1;
+                inline static int TOUCHSCREEN_STYLUS = 2;
+                inline static int TOUCHSCREEN_FINGER = 3;
+                inline static int KEYBOARD_NOKEYS = 1;
+                inline static int KEYBOARD_QWERTY = 2;
+                inline static int KEYBOARD_12KEY = 3;
+                inline static int KEYBOARDHIDDEN_UNDEFINED = 0;
+                inline static int KEYBOARDHIDDEN_NO = 1;
+                inline static int KEYBOARDHIDDEN_YES = 2;
+                inline static int HARDKEYBOARDHIDDEN_UNDEFINED = 0;
+                inline static int HARDKEYBOARDHIDDEN_NO = 1;
+                inline static int HARDKEYBOARDHIDDEN_YES = 2;
+                inline static int NAVIGATION_UNDEFINED = 0;
+                inline static int NAVIGATION_NONAV = 1;
+                inline static int NAVIGATION_DPAD = 2;
+                inline static int NAVIGATION_TRACKBALL = 3;
+                inline static int NAVIGATION_WHEEL = 4;
+                inline static int NAVIGATIONHIDDEN_UNDEFINED = 0;
+                inline static int NAVIGATIONHIDDEN_NO = 1;
+                inline static int NAVIGATIONHIDDEN_YES = 2;
+                // COLOR_MODE_HDR_* / *_WIDE_COLOR_GAMUT_* live in the high and
+                // low nibbles of colorMode; we report neither (0 = UNDEFINED).
+                inline static int COLOR_MODE_UNDEFINED = 0;
+                inline static int COLOR_MODE_WIDE_COLOR_GAMUT_NO = 1;
+                inline static int COLOR_MODE_HDR_NO = 16;
+                inline static int COLOR_MODE_DEFAULT = COLOR_MODE_WIDE_COLOR_GAMUT_NO | COLOR_MODE_HDR_NO;
+
+                // Public fields, like the real class: Unity reads them with
+                // GetFieldID, not with getters.
+                int densityDpi = 0;
+                int screenWidthDp = 0;
+                int screenHeightDp = 0;
+                int smallestScreenWidthDp = 0;
+                int orientation = 0;
+                int screenLayout = 0;
+                int uiMode = 0;
+                float fontScale = 1.0f;
+                // The rest of android.content.res.Configuration. Unity 6 reads
+                // the whole struct through JNI (input capabilities, MCC/MNC,
+                // colour mode), so a field that is not registered here comes
+                // back as 0 == *_UNDEFINED. make_current() mirrors what
+                // thunks/ndk/ndk.cpp answers for the matching AConfiguration
+                // queries, so the Java and NDK views of this device agree.
+                int mcc = 0;
+                int mnc = 0;
+                int keyboard = KEYBOARD_NOKEYS;
+                int keyboardHidden = KEYBOARDHIDDEN_UNDEFINED;
+                int hardKeyboardHidden = HARDKEYBOARDHIDDEN_UNDEFINED;
+                int navigation = NAVIGATION_UNDEFINED;
+                int navigationHidden = NAVIGATIONHIDDEN_UNDEFINED;
+                int touchscreen = TOUCHSCREEN_NOTOUCH;
+                int colorMode = COLOR_MODE_UNDEFINED;
+
+                // Fresh instance per call: the real object is mutable and Unity
+                // stores/copies it, so a shared singleton would leak state
+                // between callers.
+                static std::shared_ptr<Configuration> make_current();
+
+                // Configuration.getLocales() — see android/os/LocaleList.
+                std::shared_ptr<jnivm::android::os::LocaleList> getLocales();
+            };
+
             class Resources : public FakeJni::JObject {
             public:
                 DEFINE_CLASS_NAME("android/content/res/Resources")
                 int getIdentifier(std::shared_ptr<FakeJni::JString> name, std::shared_ptr<FakeJni::JString> defType, std::shared_ptr<FakeJni::JString> defPackage);
+                std::shared_ptr<jnivm::android::content::res::Configuration> getConfiguration();
+                std::shared_ptr<jnivm::android::util::DisplayMetrics> getDisplayMetrics();
             };
         }
 
@@ -872,7 +1145,8 @@ namespace android {
             float getFloat(std::shared_ptr<FakeJni::JString> key, float def);
             bool getBoolean(std::shared_ptr<FakeJni::JString> key, bool def);
             std::shared_ptr<FakeJni::JString> getString(std::shared_ptr<FakeJni::JString> key, std::shared_ptr<FakeJni::JString> def);
-            // getAll -> registerFactory (Map).
+            // Snapshot of every entry this prefs file holds, as a java.util.Map.
+            std::shared_ptr<jnivm::java::util::Map> getAll();
             std::shared_ptr<SharedPreferencesEditor> edit();
         };
 
@@ -891,6 +1165,13 @@ namespace android {
             inline static FakeJni::JString POWER_SERVICE = (FakeJni::JString) "power";
             inline static FakeJni::JString INPUT_SERVICE = (FakeJni::JString) "input";
             inline static FakeJni::JString WINDOW_SERVICE = (FakeJni::JString) "window";
+            // Declared for completeness: Unity reads the constant and then asks
+            // getSystemService() for it. We have no SensorManager / Vibrator
+            // stub, so both still resolve to null (getSystemService logs the
+            // unknown service) — same behaviour as before, minus the
+            // "Unknown Field Getter" noise.
+            inline static FakeJni::JString SENSOR_SERVICE = (FakeJni::JString) "sensor";
+            inline static FakeJni::JString VIBRATOR_SERVICE = (FakeJni::JString) "vibrator";
 
             inline static int MODE_PRIVATE = 0;
 
@@ -909,15 +1190,29 @@ namespace android {
             std::shared_ptr<jnivm::java::io::File> getExternalFilesDir(std::shared_ptr<FakeJni::JString> path);
             static std::shared_ptr<jnivm::java::io::File> getExternalFilesDirInternal();
             int checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission);
-            // getAssets / getPackageManager / getResources / getWindow /
-            // getContentResolver / getObbDir / getObbDirs -> STUB-MISS path
-            // (registerFactory in android_descriptors.cpp).
+
+            // These four are Context methods in the real API (Activity inherits
+            // them), so declaring them here lets both Context-typed and
+            // Activity-typed callers resolve them.
+            std::shared_ptr<jnivm::android::content::res::AssetManager> getAssets();
+            std::shared_ptr<jnivm::android::content::pm::PackageManager> getPackageManager();
+            std::shared_ptr<jnivm::android::content::res::Resources> getResources();
+            // OBB dirs come from [paths] android_obb_dirs. Unity asks for them
+            // when the game ships expansion files; returning null (the old
+            // STUB-MISS default) makes it treat the install as data-less.
+            std::shared_ptr<jnivm::java::io::File> getObbDir();
+            std::shared_ptr<jnivm::Array<jnivm::java::io::File>> getObbDirs();
+            // getContentResolver / getWindow / getWindowManager ->
+            // STUB-MISS path (registerFactory in android_descriptors.cpp).
         };
 
         class Intent : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/content/Intent")
-            // getExtras -> registerFactory (Bundle).
+            // [package] mainIntentBundle, the same table Bundle reads, so
+            // extras look identical whether read through the Intent or the
+            // Bundle Unity gets from it.
+            std::shared_ptr<jnivm::android::os::Bundle> getExtras();
         };
     }
 

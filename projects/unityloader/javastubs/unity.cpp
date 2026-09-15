@@ -163,6 +163,11 @@ void jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallbac
 {
 }
 
+void jnivm::com::unity3d::player::IAssetPackManagerConfirmationDialogCallback::onConfirmationDialogResult(
+    FakeJni::JBoolean)
+{
+}
+
 void jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks::report(
     std::shared_ptr<FakeJni::JString> name, FakeJni::JInt status, FakeJni::JInt error)
 {
@@ -215,6 +220,19 @@ std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper> jniv
     if (!instance)
         instance = std::make_shared<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
     verbose("PlayAssetDeliveryUnityWrapper", "init() -> %p", instance.get());
+    return instance;
+}
+
+std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>
+jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::init(
+    std::shared_ptr<UnityPlayer> player, std::shared_ptr<jnivm::android::content::Context> context)
+{
+    // Unity 6 passes the player it is attached to as well; the wrapper itself
+    // does not use it under this shim (asset packs come from the filesystem
+    // layout described by [play_asset_delivery]).
+    verbose("PlayAssetDeliveryUnityWrapper", "init(player=%p, context=%p)", player.get(), context.get());
+    if (!instance)
+        instance = std::make_shared<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
     return instance;
 }
 
@@ -386,6 +404,25 @@ void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::requestToUseMob
         callback->onMobileDataConfirmationResult(JNI_TRUE);
 }
 
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::requestToUseMobileData(
+    std::shared_ptr<jnivm::android::app::Activity>,
+    std::shared_ptr<IAssetPackManagerConfirmationDialogCallback> callback)
+{
+    // Unity 6 renamed the callback and its method. Answering "yes" lets a
+    // download proceed on what is, for this shim, a wired connection anyway.
+    if (callback)
+        callback->onConfirmationDialogResult(JNI_TRUE);
+}
+
+void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::showConfirmationDialog(
+    std::shared_ptr<jnivm::android::app::Activity>,
+    std::shared_ptr<IAssetPackManagerConfirmationDialogCallback> callback)
+{
+    // There is no Android dialog to show: reply immediately.
+    if (callback)
+        callback->onConfirmationDialogResult(JNI_TRUE);
+}
+
 void jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::unregisterDownloadStatusListener(
     std::shared_ptr<jnivm::Object> token)
 {
@@ -402,6 +439,177 @@ bool jnivm::com::unity3d::player::UnityPlayer::initializeGoogleAr()
 std::shared_ptr<FakeJni::JString> jnivm::com::unity3d::player::UnityPlayer::getLaunchURL()
 {
     return std::make_shared<FakeJni::JString>("");
+}
+
+///// UnityPlayer: Unity 6 (6000.x) surface
+
+void jnivm::com::unity3d::player::UnityPlayer::addPhoneCallListener()
+{
+    // Java registers a PhoneStateListener here so Unity can duck audio on a
+    // call. There is no telephony stack in the loader and the audio path is
+    // SDL's, so there is nothing to register.
+}
+
+void jnivm::com::unity3d::player::UnityPlayer::executeMainThreadJobs()
+{
+    // Drains UnityPlayer.m_MainThreadJobs, the queue invokeOnMainThread()
+    // fills. Nothing posts to it here (the Java player is stubbed out), so
+    // the queue is always empty — but the call arrives on every frame from
+    // libunity and must not fall to the STUB-MISS path.
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::com::unity3d::player::UnityPlayer::getNetworkProxySettings(
+    std::shared_ptr<FakeJni::JString> url)
+{
+    // Real Android answers with Proxy.getPreferredHttpHost() for the URL, or
+    // null when no proxy is configured. The loader runs without one.
+    verbose("UnityPlayer", "getNetworkProxySettings(%s) -> null",
+            url ? url->c_str() : "(null)");
+    return nullptr;
+}
+
+void jnivm::com::unity3d::player::UnityPlayer::hidePreservedContent()
+{
+    // Java asks the window/insets to drop the content preserved for the
+    // splash screen. There is no Java window here: BD_FAKE_EGL owns the
+    // surface and already presents whatever Unity renders.
+}
+
+bool jnivm::com::unity3d::player::UnityPlayer::isUaaLUseCase()
+{
+    // Unity as a Library: the player is hosted inside someone else's Activity.
+    // Bogodroid *is* the Activity, so this is always the plain player case.
+    return false;
+}
+
+bool jnivm::com::unity3d::player::UnityPlayer::loadLibrary(
+    std::shared_ptr<FakeJni::JString> library)
+{
+    // Deliberately false. Unity's flow is:
+    //   if (loadLibrary(name)) -> the Java classloader already has it
+    //   else                   -> findLibrary() + its own dlopen
+    // and the second branch is the one the loader implements ([BD-DLOPEN]):
+    // System.loadLibrary() is not available without ART, so claiming success
+    // would leave the module unloaded.
+    verbose("UnityPlayer", "loadLibrary(%s) -> false (loader dlopens itself)",
+            library ? library->c_str() : "(null)");
+    return false;
+}
+
+bool jnivm::com::unity3d::player::UnityPlayer::shouldSetGameState()
+{
+    // Java sets the game state through UnityGameManager when the Activity
+    // provides one. The loader drives lifecycle from main.cpp instead, so the
+    // Java-side state machine stays out of the picture.
+    return false;
+}
+
+bool jnivm::com::unity3d::player::UnityPlayer::startOrientationListener(
+    FakeJni::JInt orientation)
+{
+    // The Java listener reports *device* rotation (accelerometer). Bogodroid
+    // has no sensor stack: the panel geometry comes from [device] and is
+    // pushed to the engine through Activity.getRequestedOrientation() and
+    // nativeOrientationChanged. Reporting "started" would make Unity wait for
+    // callbacks that never come.
+    verbose("UnityPlayer", "startOrientationListener(%d) -> false (no sensor stack)",
+            (int)orientation);
+    return false;
+}
+
+bool jnivm::com::unity3d::player::UnityPlayer::supportsWindowInsetController()
+{
+    // API 30+ WindowInsetsController. The loader's fullscreen handling is the
+    // legacy setSystemUiVisibility()/Window.setFlags() path the engine
+    // already takes when this is false.
+    return false;
+}
+
+///// HFPStatus
+
+jnivm::com::unity3d::player::HFPStatus::HFPStatus(
+    std::shared_ptr<jnivm::android::content::Context> context)
+    : mContext(std::move(context))
+{
+    // Mirrors the Java constructor (com.unity3d.player.HFPStatus.<init>):
+    //   this.a = context; this.d = context.getSystemService("audio");
+    //   initHFPStatusJni();
+    // The last call is the one that matters: initHFPStatusJni is a *native*
+    // method implemented by libunity, and its implementation is what stores the
+    // object for the later clearHFPStat/getHFPStat calls. It can only be made
+    // after libunity's JNI_OnLoad has registered the natives, so main.cpp
+    // makes it explicitly — see the call site for the ordering.
+    if (mContext) {
+        try {
+            mAudioManager = std::dynamic_pointer_cast<jnivm::android::media::AudioManager>(
+                mContext->getSystemService(
+                    std::make_shared<FakeJni::JString>(
+                        jnivm::android::content::Context::AUDIO_SERVICE)));
+        } catch (...) {
+            // getSystemService can throw for a service the stub does not know;
+            // "audio" is mapped, but keep the HFPStatus construction (and with
+            // it Unity's audio init) from failing over a missing service.
+            mAudioManager = nullptr;
+        }
+    }
+    BD_LOG("HFPStatus", "constructed (context=%p audioManager=%p)",
+           mContext.get(), mAudioManager.get());
+}
+
+void jnivm::com::unity3d::player::HFPStatus::clearHFPStat()
+{
+    // Java: unregister the SCO receiver and reset the cached state. No receiver
+    // was ever registered here (no Bluetooth stack), so only the state resets —
+    // and libunity is the caller that cares, so the drop is worth a log line.
+    BD_LOG("HFPStatus", "clearHFPStat() (receiver never registered, scoState=%d -> DISCONNECTED)",
+           mScoState);
+    mScoState = jnivm::android::media::AudioManager::SCO_AUDIO_STATE_DISCONNECTED;
+    mScoStopRequested = false;
+}
+
+bool jnivm::com::unity3d::player::HFPStatus::getHFPStat()
+{
+    // Java returns `f == SCO_AUDIO_STATE_CONNECTED`, i.e. "is the hands-free
+    // link up". Nothing here can connect one, so this is always false — which
+    // is also what a handheld with no telephony stack should report.
+    return mScoState == jnivm::android::media::AudioManager::SCO_AUDIO_STATE_CONNECTED;
+}
+
+void jnivm::com::unity3d::player::HFPStatus::requestHFPStat()
+{
+    // Java registers a BroadcastReceiver for
+    // android.media.ACTION_SCO_AUDIO_STATE_UPDATED and lets the callback drive
+    // a()/b(). Registering it would mean forwarding to a Java-side receiver we
+    // do not implement, and no broadcast can arrive without a Bluetooth stack,
+    // so the state simply stays DISCONNECTED.
+    verbose("HFPStatus", "requestHFPStat() -> no Bluetooth stack, state stays DISCONNECTED");
+}
+
+void jnivm::com::unity3d::player::HFPStatus::setHFPRecordingStat(FakeJni::JBoolean recording)
+{
+    // Java: c = recording; if (!recording) audioManager.setMode(MODE_NORMAL).
+    // Unity calls this when it starts/stops recording, to hand the audio mode
+    // back to the system afterwards. The mode reset is meaningless without a
+    // framework audio policy, so only the flag is tracked.
+    mRecording = recording;
+    verbose("HFPStatus", "setHFPRecordingStat(%d)", (int)recording);
+}
+
+///// UnityPlayerUtilities
+
+jnivm::com::unity3d::player::UnityPlayerUtilities::UnityPlayerUtilities()
+{
+    verbose("UnityPlayerUtilities", "constructed");
+}
+
+bool jnivm::com::unity3d::player::UnityPlayerUtilities::dumpReferenceTables()
+{
+    // Java dumps the JNI reference tables through the (debug-only) native
+    // helper and remembers that it looked the method up. The dump is
+    // diagnostic output only; the loader has its own JNI tracing
+    // (BD_JNI_TRACE) for that.
+    verbose("UnityPlayerUtilities", "dumpReferenceTables() -> false");
+    return false;
 }
 
 static bool env_enabled(const char* name)
@@ -837,6 +1045,23 @@ void jnivm::com::unity3d::player::ReflectionHelper::setNativeExceptionOnProxy(
             proxy.get(), nativeHandle, hasException);
 }
 
+// Overloaded members need an explicit type for FakeJni::Function<>, which
+// takes a plain function pointer. Unity 6 changed both of these signatures:
+// init() gained the UnityPlayer argument, and the mobile-data confirmation
+// callback interface was renamed. Both spellings stay registered so the same
+// stub file still resolves against a 2020/2022 build.
+using PadInitWithPlayer = std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper> (*)(
+    std::shared_ptr<jnivm::com::unity3d::player::UnityPlayer>,
+    std::shared_ptr<jnivm::android::content::Context>);
+using PadInitLegacy = std::shared_ptr<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper> (*)(
+    std::shared_ptr<jnivm::android::content::Context>);
+using PadRequestMobileDataLegacy = void (jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::*)(
+    std::shared_ptr<jnivm::android::app::Activity>,
+    std::shared_ptr<jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback>);
+using PadRequestMobileDataDialog = void (jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::*)(
+    std::shared_ptr<jnivm::android::app::Activity>,
+    std::shared_ptr<jnivm::com::unity3d::player::IAssetPackManagerConfirmationDialogCallback>);
+
 BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback) { FakeJni::Constructor<IAssetPackManagerStatusQueryCallback> {} },
     { FakeJni::Function<&IAssetPackManagerStatusQueryCallback::onStatusResult> {}, "onStatusResult", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
@@ -849,13 +1074,18 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Function<&IAssetPackManagerMobileDataConfirmationCallback::onMobileDataConfirmationResult> {}, "onMobileDataConfirmationResult", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerConfirmationDialogCallback) { FakeJni::Constructor<IAssetPackManagerConfirmationDialogCallback> {} },
+    { FakeJni::Function<&IAssetPackManagerConfirmationDialogCallback::onConfirmationDialogResult> {}, "onConfirmationDialogResult", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks) { FakeJni::Constructor<UnityCoreAssetPacksStatusCallbacks> {} },
     { FakeJni::Function<&UnityCoreAssetPacksStatusCallbacks::onStatusResult> {}, "onStatusResult", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityCoreAssetPacksStatusCallbacks::onStatusUpdate> {}, "onStatusUpdate", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper) { FakeJni::Constructor<PlayAssetDeliveryUnityWrapper> {} },
-    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::init> {}, "init", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<static_cast<PadInitWithPlayer>(&PlayAssetDeliveryUnityWrapper::init)> {}, "init", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<static_cast<PadInitLegacy>(&PlayAssetDeliveryUnityWrapper::init)> {}, "init", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getInstance> {}, "getInstance", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::playCoreApiMissing> {}, "playCoreApiMissing", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::cancelAssetPackDownload> {}, "cancelAssetPackDownload", FakeJni::JMethodID::PUBLIC },
@@ -867,7 +1097,9 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::getAssetPackStates> {}, "getAssetPackStates", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::registerDownloadStatusListener> {}, "registerDownloadStatusListener", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::removeAssetPack> {}, "removeAssetPack", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::requestToUseMobileData> {}, "requestToUseMobileData", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<PadRequestMobileDataLegacy>(&PlayAssetDeliveryUnityWrapper::requestToUseMobileData)> {}, "requestToUseMobileData", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<static_cast<PadRequestMobileDataDialog>(&PlayAssetDeliveryUnityWrapper::requestToUseMobileData)> {}, "requestToUseMobileData", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::showConfirmationDialog> {}, "showConfirmationDialog", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&PlayAssetDeliveryUnityWrapper::unregisterDownloadStatusListener> {}, "unregisterDownloadStatusListener", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
@@ -892,6 +1124,34 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Function<&UnityPlayer::getKeyboardLayout> {}, "getKeyboardLayout", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::startActivityIndicator> {}, "startActivityIndicator", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&UnityPlayer::stopActivityIndicator> {}, "stopActivityIndicator", FakeJni::JMethodID::PUBLIC },
+    // Unity 6 (6000.x): looked up on UnityPlayerForActivityOrService and
+    // satisfied here through the class hierarchy — see javastubs/unity.h.
+    { FakeJni::Function<&UnityPlayer::addPhoneCallListener> {}, "addPhoneCallListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::executeMainThreadJobs> {}, "executeMainThreadJobs", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::getNetworkProxySettings> {}, "getNetworkProxySettings", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::hidePreservedContent> {}, "hidePreservedContent", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::isUaaLUseCase> {}, "isUaaLUseCase", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::loadLibrary> {}, "loadLibrary", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::shouldSetGameState> {}, "shouldSetGameState", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::startOrientationListener> {}, "startOrientationListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&UnityPlayer::supportsWindowInsetController> {}, "supportsWindowInsetController", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    // Unity 6 NewObject()s this one at startup; the constructor has to exist
+    // or the engine logs "Failed to create java object".
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::UnityPlayerUtilities) { FakeJni::Constructor<UnityPlayerUtilities> {} },
+    { FakeJni::Function<&UnityPlayerUtilities::dumpReferenceTables> {}, "dumpReferenceTables", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    // HFPStatus. Only the Java methods are registered here: initHFPStatusJni /
+    // deinitHFPStatusJni are libunity's own natives (it attaches them to this
+    // class from its JNI_OnLoad), so declaring them again would shadow the real
+    // implementation that caches the object.
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::HFPStatus) { FakeJni::Constructor<HFPStatus, std::shared_ptr<jnivm::android::content::Context>> {} },
+    { FakeJni::Function<&HFPStatus::clearHFPStat> {}, "clearHFPStat", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&HFPStatus::getHFPStat> {}, "getHFPStat", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&HFPStatus::requestHFPStat> {}, "requestHFPStat", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&HFPStatus::setHFPRecordingStat> {}, "setHFPRecordingStat", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::ReflectionHelper) { FakeJni::Constructor<ReflectionHelper> {} },

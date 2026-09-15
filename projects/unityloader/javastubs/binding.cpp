@@ -35,12 +35,21 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback>();
     vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback>();
     vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback>();
+    vm->registerClass<jnivm::com::unity3d::player::IAssetPackManagerConfirmationDialogCallback>();
     vm->registerClass<jnivm::com::unity3d::player::UnityCoreAssetPacksStatusCallbacks>();
     // vm->registerClass<jnivm::com::unity3d::player::OrientationLockListener>();
     // vm->registerClass<jnivm::com::google::androidgamesdk::ChoreographerCallback>();
     // vm->registerClass<jnivm::com::google::androidgamesdk::SwappyDisplayManager>();
 
     vm->registerClass<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
+    // Unity's Java UnityPlayer news an HFPStatus and keeps it in m_HFPStatus;
+    // main.cpp does the same so libunity's SCO/audio path has the object it
+    // expects (see the class comment in javastubs/unity.h).
+    vm->registerClass<jnivm::com::unity3d::player::HFPStatus>();
+    // Unity 6 NewObject()s this one from libunity at startup; without a
+    // registered class + constructor the engine logs
+    // "Failed to create java object for com.unity3d.player.UnityPlayerUtilities".
+    vm->registerClass<jnivm::com::unity3d::player::UnityPlayerUtilities>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayerActivity>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayer>();
     // Unity 6 (6000.x): these are the classes libunity.so registers its

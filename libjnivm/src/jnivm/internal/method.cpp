@@ -31,6 +31,57 @@ void jnivm::log_stub_miss_once(const char* kind, const char* cls, const char* me
     }
 }
 
+// Same bookkeeping as log_stub_miss_once, for the (class, method, signature)
+// triples that VM::setDefault() answers. Distinct tag on purpose: it means
+// "no C++ stub, but the intended value is already configured", which is not
+// work left to do, while [STUB-MISS] means exactly that.
+void jnivm::log_stub_default_once(const char* kind, const char* cls, const char* meth, const char* sig) {
+    static std::mutex mtx;
+    static std::unordered_set<std::string> seen;
+    std::string key = std::string(kind) + "|" + (cls?cls:"?") + "|" + (meth?meth:"?") + "|" + (sig?sig:"?");
+    std::lock_guard<std::mutex> lock(mtx);
+    if (seen.insert(key).second) {
+        LOG("JNIVM", "[STUB-DEFAULT] %s: Class=`%s` Member=`%s` Sig=`%s` -> VM::setDefault value",
+            kind, cls?cls:"???", meth?meth:"???", sig?sig:"???");
+    }
+}
+
+// VM::setDefault() registers a fixed answer for a (class, method, signature)
+// triple; the call path uses it instead of the type default (see
+// defaultValForMethod). Those are handled, not missing, so the STUB-MISS log --
+// the main triage signal for a new port -- should not fire for them. Report them
+// separately instead, so "no stub" stays greppable and the handled ones stay
+// visible.
+static bool bd_has_registered_default(JNIEnv* env, const char* cls,
+                                      const char* name, const char* sig) {
+    if (!env || !cls || !name || !sig)
+        return false;
+    auto* e = jnivm::ENV::FromJNIEnv(env);
+    if (!e)
+        return false;
+    auto& vm = *e->GetVM();
+    std::string key;
+    key.reserve(64);
+    key.append(cls);
+    key.push_back('|');
+    key.append(name);
+    key.push_back('|');
+    key.append(sig);
+    std::lock_guard<std::mutex> lock(vm.defaults_mtx);
+    return vm.default_returns.find(key) != vm.default_returns.end();
+}
+
+// Same as log_stub_miss_once, but keeps VM::setDefault() answers out of the
+// STUB-MISS list: those triples already have an intended value configured, so
+// the call is handled, not missing.
+static void log_stub_miss_or_default(JNIEnv* env, const char* kind, const char* cls,
+                                     const char* meth, const char* sig) {
+    if (bd_has_registered_default(env, cls, meth, sig))
+        jnivm::log_stub_default_once(kind, cls, meth, sig);
+    else
+        jnivm::log_stub_miss_once(kind, cls, meth, sig);
+}
+
 template<bool isStatic, bool ReturnNull, bool AllowNative, bool trace>
 jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const char *str1) {
     std::shared_ptr<Method> next;
@@ -88,7 +139,7 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
         if(ReturnNull) {
 #ifndef NDEBUG
             if(trace) {
-                log_stub_miss_once(
+                log_stub_miss_or_default(env,
                     AllowNative ? "Native MethodID" : isStatic ? "Static MethodID" : "MethodID",
                     cur ? cur->nativeprefix.data() : "(null)",
                     str0 ? str0 : "(null)",
@@ -308,7 +359,7 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
         mid = findVirtualOverload(ENV::FromJNIEnv(env), cl.get(), mid);
         if (!mid || !mid->nativehandle) {
-            log_stub_miss_once("Virtual",
+            log_stub_miss_or_default(env, "Virtual",
                 cl ? cl->nativeprefix.data() : nullptr,
                 orig_name.data(), orig_sig.data());
             return defaultValForMethod<T>(ENV::FromJNIEnv(env),
@@ -333,7 +384,7 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
         }
     } else {
         auto cl = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), env->GetObjectClass(obj));
-        log_stub_miss_once("Unknown Member",
+        log_stub_miss_or_default(env, "Unknown Member",
             cl ? cl->nativeprefix.data() : nullptr,
             mid ? mid->name.data() : nullptr,
             mid ? mid->signature.data() : nullptr);
@@ -391,7 +442,7 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
 #endif
         mid = findNonVirtualOverload(clz.get(), mid);
         if (!mid || !mid->nativehandle) {
-            log_stub_miss_once("NonVirtual",
+            log_stub_miss_or_default(env, "NonVirtual",
                 clz ? clz->nativeprefix.data() : nullptr,
                 orig_name.data(), orig_sig.data());
             return defaultValForMethod<T>(ENV::FromJNIEnv(env),
@@ -413,7 +464,7 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jobject ob
         }
     } else {
         auto clz = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);
-        log_stub_miss_once("Unknown NonVirtual",
+        log_stub_miss_or_default(env, "Unknown NonVirtual",
             clz ? clz->nativeprefix.data() : nullptr,
             mid ? mid->name.data() : nullptr,
             mid ? mid->signature.data() : nullptr);
@@ -451,7 +502,7 @@ template<class T> T jnivm::MDispatchBase2<T>::CallMethod(JNIEnv *env, jclass _cl
             return defaultVal<T>(ENV::FromJNIEnv(env), mid ? mid->signature : "");
         }
     } else {
-        log_stub_miss_once("Unknown Static",
+        log_stub_miss_or_default(env, "Unknown Static",
             cl ? cl->nativeprefix.data() : nullptr,
             mid ? mid->name.data() : nullptr,
             mid ? mid->signature.data() : nullptr);
