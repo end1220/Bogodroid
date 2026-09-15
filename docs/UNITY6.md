@@ -242,6 +242,12 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
   `Down: B`、`Axis: DpadX=1.00`、`Down: D-Right`、`Axis: DpadY=-1.00`、`Down: Select`
   —— SDL（读 `gamecontrollerdb.txt`）→ `InputBackend` → Unity Input System 全通。
   容器侧仍只有键鼠注入（没有 GameController 设备），要容器复现得挂虚拟手柄。
+- **ABXY 对调**：不是 Unity 工程的问题。`SystemInfoDisplay` / Input System 在 Android 上按
+  Xbox 语义（South=`A`、East=`B`、West=`X`、North=`Y`，见 `Gamepad.cs` 非 Switch 分支）。
+  bogodroid 默认 `toAndroidKeycode` 却把 SDL A↔B、X↔Y 对调（`1515885f`，给任天堂丝印掌机用的）。
+  本机已以 `Xbox 360`/`XboxOneGamepadAndroid` 呈现，再对调就会和屏幕上的 ABXY 标签反了。
+  修法：`configs/unity6-device.toml` 的 `[input.remap]` 把四键设回 `BUTTON_A/B/X/Y`（identity）。
+  部署时还要有 `gamecontrollerdb.txt`（`device-launcher.sh` 设 `SDL_GAMECONTROLLERCONFIG_FILE`）。
 - 真机（Anbernic H700，Mali-G31，640x480）：上机通过 —— 场景、渲染、手柄、干净退出都验过（§0）。
   **注意 Release（`BD_ENABLE_LOG=OFF`）下 Unity 自己的 `LOG[Unity]:` 行不会进 `log.txt`**，
   真机上要看"场景有没有加载"，靠的是游戏脚本自己写的 `log/unity_player.log`

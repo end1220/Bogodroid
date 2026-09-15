@@ -17,6 +17,9 @@ projects/unityloader/monocompat/il2cpp_log_shim.cpp
 __pycache__/
 tools/unity_astc/.cache/
 tools/unity_astc/bin/
+# .NET / MSBuild intermediates (csharp-godot probe etc.); source stays tracked
+tools/**/obj/
+tools/**/bin/
 pocs/
 build-local/
 output/
