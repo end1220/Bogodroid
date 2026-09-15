@@ -221,7 +221,8 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
 | `javastubs/android_content.cpp` | `SharedPreferences` 目录用 `create_directories()` 建全路径（`android_files` 指向的目录可能还不存在，单层 `mkdir` 会 ENOENT → 存盘静默失败）；`AssetManager::list()` 的 `catch` 补回漏写的 `return`（原来构造了空数组却不返回，函数落到末尾是 UB） |
 | `platform/common/choreographer_bridge.h` + `thunks/egl_sdl/egl_sdl.cpp` + `javastubs/android_view.cpp` | EGL swap 路径要驱动 Java Choreographer，但 `egl_sdl.cpp` **不能**包含 `android.h`：`glad_egl.h` → `EGL/eglplatform.h` → `X11/Xlib.h` 把 `None` 定义成 `0L`，撞 `jnivm::FunctionType::None`（这也是它被排除在 PCH 之外的原因）。原先在该文件里手抄了一份同名 `class Choreographer`，属 ODR 违规（只表现为 `-Wlto-type-mismatch`，且真类一旦有基类/虚函数就会真崩）；现改为 `extern "C"` 桥 `bd_choreographer_signal_vsync()`（§1.6 同类思路） |
 | `javastubs/javac.cpp` | `Class.forName` 归一化 |
-| `configs/unity6.toml` / `configs/unity6-device.toml` | 容器布局 / 掌机布局（`game_files="./gamedata/"`、`conf/` 上一层、`[input] controller` 手柄） |
+| `configs/unity6.toml` / `configs/unity6-device.toml` | 容器布局 / 掌机布局（`game_files="./gamedata/"`、`conf/` 上一层、`[input] controller` + `[input.remap]` ABXY identity） |
+| `configs/gamecontrollerdb.txt` | SDL 社区手柄库；**必须推到** `<PORTS>/Unity6/gamecontrollerdb.txt`（§5） |
 | `Dockerfile.test` + `scripts/unity6/*.sh` | 容器运行镜像与复现脚本（构建、跑局、抓帧、掌机启动脚本），见 §4 |
 
 诊断开关：`BD_JNI_PROBE=1` 打印 Java 成员链（含 `<null baseclass>` 与 `[H]/[D]/[N]/[NO-HANDLE]` 标记），
@@ -342,11 +343,24 @@ grep -c 'CallMethod object is null' log.txt           # native 拿着 null 对�
 ├── Unity6.sh              <- scripts/unity6/device-launcher.sh（菜单项名 = 文件名）
 └── Unity6/
     ├── unityloader        <- scripts/unity6/build-rel.sh 产物
-    ├── unity.toml         <- configs/unity6-device.toml
+    ├── unity.toml         <- configs/unity6-device.toml（含 [input.remap] ABXY identity）
+    ├── gamecontrollerdb.txt  <- configs/gamecontrollerdb.txt（**必须推到掌机**，见下）
     ├── gamedata/          <- 摊开的 APK（assets/ + lib/），game_files 指向它
     ├── conf/ cache/       <- 运行期生成（prefs、il2cpp 缓存、tombstone）
     ├── log/               <- 游戏脚本自己写的 unity_player.log（§0 判据）
     └── log.txt            <- 启动头 + exited (N)
+```
+
+- **`gamecontrollerdb.txt` 必须推到端口目录**：源文件是仓库里的 `configs/gamecontrollerdb.txt`
+  （SDL 2.0.16 社区手柄库）。`device-launcher.sh` 若发现该文件会设
+  `SDL_GAMECONTROLLERCONFIG_FILE`，没有则只靠 SDL 内置 + bogodroid 两条 Anbernic 内置 map，
+  GUID 对不上时按键会丢或 ABXY 错乱。推送示例：
+
+```powershell
+$env:DROPBEAK_HOST = '172.16.7.55'
+& '...\dropbeak-cli.exe' push configs/gamecontrollerdb.txt `
+  /mnt/mmc/Roms/PORTS/Unity6/gamecontrollerdb.txt `
+  --force --chunk --chunk-size 16m --verify
 ```
 
 - 大文件用 `dropbeak-cli push --force --chunk --chunk-size 16m --verify`，推完**必须**核对
