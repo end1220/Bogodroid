@@ -192,7 +192,7 @@ jnivm::android::content::res::AssetManager::list(std::shared_ptr<FakeJni::JStrin
     }
     catch (const std::filesystem::filesystem_error& e) {
         verbose("JBRIDGE", "Error listing files in '%s': %s", relPath.c_str(), e.what());
-        std::make_shared<jnivm::Array<jnivm::java::lang::String>>(0);
+        return std::make_shared<jnivm::Array<jnivm::java::lang::String>>(0);
     }
 }
 

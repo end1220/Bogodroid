@@ -3,6 +3,7 @@
 #include "device_display.h"
 #include "process_memory.h"
 #include "plugin_present.h"
+#include "choreographer_bridge.h"
 #include "glad_egl.h"
 #include "gles2.h"
 #include "logging.h"
@@ -194,16 +195,8 @@ static void bd_log_sdl_display_mode(const char* label, int display_index)
     }
 }
 
-namespace jnivm::android::view {
-class Choreographer;
-
-class Choreographer {
-public:
-    static std::shared_ptr<Choreographer> getInstance();
-    void signalVSync();
-};
-}
-
+// Android's Choreographer lives in javastubs and cannot be included here (see
+// choreographer_bridge.h for why); this bridge is the one way in.
 static int egl_ext_blocked(const char* sym)
 {
     // Mali / SDL 2.0.10 没有这些；转发给真 libEGL 会在 Anbernic 上崩。
@@ -392,10 +385,7 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     bd_log_process_memory_throttled("eglSwapBuffers", bd_mem_log_interval_ms());
 #endif
 
-    auto choreographer = jnivm::android::view::Choreographer::getInstance();
-    if (choreographer) {
-        choreographer->signalVSync();
-    }
+    bd_choreographer_signal_vsync();
     return EGL_TRUE;
 }
 

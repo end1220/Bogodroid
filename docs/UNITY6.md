@@ -19,7 +19,10 @@
 判据（log）：
 
 - `NativeRender returned 1, Entering loop...` 之后 `[BD-JNIBridge] ... Choreographer$FrameCallback->doFrame` 与 `@ eglSwapBuffers` 持续增长；
-- 截图整屏纯色 `(41,41,41)`，正好等于 `SampleScene.unity` 里 Main Camera 的 `m_BackGroundColor: 0.16037738`（×255 ≈ 41）+ `m_ClearFlags: 2`（SolidColor）。即**引擎确实在按工程的相机设置渲染**，不是黑屏/未初始化；
+- 截图判据：**纯色 = 相机 clear color**，不是黑屏/未初始化。早期工程（`SampleScene`）整屏
+  `(41,41,41)` 正好是 Main Camera 的 `m_BackGroundColor: 0.16037738`（×255≈41）+ `m_ClearFlags: 2`；
+  `Stress` 工程则在 splash 底色 `(35,31,32)` 之后出真实场景（单帧 1.8 万种颜色）。脚本化判读用
+  `frames.sh`：PNG 几百字节 = 均匀色，几十 kB = 有内容，且帧间有变化 = 画面在动；
 - 场景与脚本（Stress 工程）：log 里出 `LOG[Unity]: [5.50] scene=Stress buildIndex=0` 与
   `LOG[Unity]: [Stress] spawned=40 prefabs=23` —— 这两句是 `SystemInfoDisplay.cs` /
   `MonsterStressSpawner.cs` 自己打的，等于**场景加载 + `Assembly-CSharp` 托管代码在跑**；
@@ -215,9 +218,11 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
 | `libjnivm/...`（见 §1.3） | `NormalizeDots` 归一化 |
 | `libjnivm/src/jnivm/internal/method.cpp` | `[STUB-MISS]` 与 `[STUB-DEFAULT]` 分流（§1.6） |
 | `javastubs/android.h` / `android_view.cpp` / `android_content.cpp` / `android_os.cpp` / `android_misc.cpp` | Unity 6 读到的 Java 常量/字段补齐：`ApplicationInfo.minSdkVersion`/`targetSdkVersion`、`Configuration` 全字段、`WindowManager$LayoutParams.FLAG_*`、`Sensor.TYPE_*`、`Context.SENSOR_SERVICE`/`VIBRATOR_SERVICE`、`Build.TAGS` |
-| `javastubs/android_content.cpp` | `SharedPreferences` 目录用 `create_directories()` 建全路径（`android_files` 指向的目录可能还不存在，单层 `mkdir` 会 ENOENT → 存盘静默失败） |
+| `javastubs/android_content.cpp` | `SharedPreferences` 目录用 `create_directories()` 建全路径（`android_files` 指向的目录可能还不存在，单层 `mkdir` 会 ENOENT → 存盘静默失败）；`AssetManager::list()` 的 `catch` 补回漏写的 `return`（原来构造了空数组却不返回，函数落到末尾是 UB） |
+| `platform/common/choreographer_bridge.h` + `thunks/egl_sdl/egl_sdl.cpp` + `javastubs/android_view.cpp` | EGL swap 路径要驱动 Java Choreographer，但 `egl_sdl.cpp` **不能**包含 `android.h`：`glad_egl.h` → `EGL/eglplatform.h` → `X11/Xlib.h` 把 `None` 定义成 `0L`，撞 `jnivm::FunctionType::None`（这也是它被排除在 PCH 之外的原因）。原先在该文件里手抄了一份同名 `class Choreographer`，属 ODR 违规（只表现为 `-Wlto-type-mismatch`，且真类一旦有基类/虚函数就会真崩）；现改为 `extern "C"` 桥 `bd_choreographer_signal_vsync()`（§1.6 同类思路） |
 | `javastubs/javac.cpp` | `Class.forName` 归一化 |
-| `configs/unity6.toml` | 该工程的配置（铺最小项：`[unity] cmdline` 等） |
+| `configs/unity6.toml` / `configs/unity6-device.toml` | 容器布局 / 掌机布局（`game_files="./gamedata/"`、`conf/` 上一层、`[input] controller` 手柄） |
+| `Dockerfile.test` + `scripts/unity6/*.sh` | 容器运行镜像与复现脚本（构建、跑局、抓帧、掌机启动脚本），见 §4 |
 
 诊断开关：`BD_JNI_PROBE=1` 打印 Java 成员链（含 `<null baseclass>` 与 `[H]/[D]/[N]/[NO-HANDLE]` 标记），
 用来判定“缺桩”还是“父类链接断了”；`bd_dump_natives` 在 `initJni` 前后各打一次，能把
@@ -244,24 +249,36 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
 
 ## 4. Docker 复现（不留真机）
 
-```powershell
-# 1) 构建加载器（Debug 友好：BD_ENABLE_LOG/TRACE=ON，Release 体积）
-docker run --rm -v "D:\Locke\gitee\Bogodroid:/work" -w /work/build-unity6 `
-  bogo-builder:unity2017-armv7 ninja unityloader
-# 每次显式带上 -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF（见 AGENTS.md；缓存陷阱）
+仓库里的这套脚本就是本节的命令行，别再手敲：
+
+| 文件 | 作用 |
+|------|------|
+| `Dockerfile.test` | 运行镜像 `bogo-arm64-test:20.04`（aarch64 + qemu binfmt；Xvfb + Mesa llvmpipe 顶替 Mali/EGL；带 `xdpyinfo`/`import`/`xdotool`） |
+| `scripts/unity6/build-rel.sh` | 上机用：Release + LOG/TRACE/VERBOSE OFF + `strip`（~6 MB） |
+| `scripts/unity6/build-log.sh [TRACE]` | 排障用：Release 优化级 + LOG ON，**不 strip**（回溯可用） |
+| `scripts/unity6/run.sh` | 容器跑一局（起 Xvfb、跑加载器、截一张图），`SECS`/`JTRACE` 可调 |
+| `scripts/unity6/frames.sh` | 逐秒抓帧时间线：黑 → splash → 首场景，证明"真的在渲染" |
+| `scripts/unity6/device-launcher.sh` | 掌机启动脚本，部署为 `<PORTS>/Unity6.sh` |
+| `configs/unity6.toml` / `configs/unity6-device.toml` | 容器布局 / 掌机布局（`gamedata/` 子目录 + `[input]` 手柄） |
+
+```bash
+# 1) 构建加载器（两种配置各一条命令；都显式带 RETURN_NON_ZERO=OFF）
+scripts/unity6/build-rel.sh            # 上机
+scripts/unity6/build-log.sh TRACE      # 排障
 
 # 2) 运行镜像（aarch64 + qemu binfmt；Xvfb + llvmpipe 顶替 Mali/EGL）
-docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f <Dockerfile.test> .
+docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f Dockerfile.test .
 
 # 3) 跑一局并截图
-#    gamefiles/unity6  <- 摊开的 APK；-v build-unity6/unityloader:/game/unityloader
-#    Xvfb :99 + DISPLAY=:99 ./unityloader ./unity6.toml > log.txt
-#    import -window root shot.png   （ImageMagick；截图纯色 = 相机 clear color 即正常）
-#    ⚠ Xvfb 必须等 socket 出来再启加载器：只 sleep 会在 qemu 下随机踩到
-#      "SDL could not initialize! x11 not available" → unrelated-looking SIGABRT
-#      （tombstone + exit 134，浪费一整轮）。见 §4.1。
-#    命令：SECONDS=40 JTRACE=1 bash run.sh   （JTRACE=1 打开 JNI trace，只在排障时开）
+docker run --rm --platform linux/arm64 \
+  -v "<repo>/gamefiles/unity6:/game" \
+  -v "<repo>/build-unity6/unityloader:/game/unityloader" \
+  -v "<repo>/configs/unity6.toml:/game/unity6.toml" \
+  -v "<repo>/scripts/unity6:/work/scripts" \
+  -e SECS=40 bogo-arm64-test:20.04 bash /work/scripts/run.sh
 #    判据：grep -c '\[STUB-MISS\]' log.txt  -> 0；grep -c 'Invalid Reference' -> 0
+#    只看一张图不够 → frames.sh：单帧几百字节=纯色（splash 也是纯色），几万字节=真实场景
+#    截图在临结束前 2 s 抓；进程退出后再抓只会拍到空 root 窗口（读成"黑屏"）
 
 # 4) 输入通路：容器没有手柄，用 XTEST 打键盘（SDL → Unity nativeInjectEvent）
 #    DISPLAY=:99 xdotool mousemove 320 240; DISPLAY=:99 xdotool key a
@@ -284,23 +301,17 @@ Unity 自己的 EGL 调用被桩掉，实际 GLES 走 SDL 创建的 context）�
 `fatal_error` → `SIGABRT`。日志尾部看起来完全是 Unity 崩了（tombstone、`signal 6`、
 `exit 134`、崩溃点落在刚读完的 JNI 调用后面），实际与 JNI 无关。
 
-`tmp/unity6/run.sh` 改成轮询 socket 并保留 Xvfb 自己的 stderr：
+`scripts/unity6/run.sh` 轮询 socket、保留 Xvfb 自己的 stderr；**之后又发现 socket 存在也不够**，
+必须等真正的 X 客户端能连上（否则同样的 `SIGABRT` 会再来一次）：
 
 ```bash
-Xvfb :99 -screen 0 640x480x24 > /game/xvfb.log 2>&1 &
-for i in $(seq 1 100); do [ -e /tmp/.X11-unix/X99 ] && break; kill -0 "$XVFB" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$XVFB" 2>/dev/null || { echo "Xvfb died:"; cat /game/xvfb.log; exit 1; }
-```
-
-**socket 文件存在仍然不够**：后来又踩一次 —— 上面那段以 200 ms 通过，加载器依旧报
-`x11 not available` 然后 `SIGABRT`。必须等**真正的 X 客户端能连上**（镜像里有 `xdpyinfo`）：
-
-```bash
+Xvfb :99 -screen 0 640x480x24 -ac > /game/xvfb.log 2>&1 &
 for i in $(seq 1 200); do
     [ -e /tmp/.X11-unix/X99 ] || { kill -0 "$XVFB" 2>/dev/null || break; sleep 0.1; continue; }
-    xdpyinfo -display :99 >/dev/null 2>&1 && break
+    xdpyinfo -display :99 >/dev/null 2>&1 && break    # 关键：不是只看 socket 文件
     sleep 0.1
 done
+kill -0 "$XVFB" 2>/dev/null || { echo "Xvfb died:"; cat /game/xvfb.log; exit 1; }
 ```
 
 **判据**：日志里出现 `SDL could not initialize! SDL_Error: x11 not available` ⇒ 先怀疑 Xvfb/显示，
@@ -309,7 +320,7 @@ done
 **2）trace 日志的量级**
 
 `JTRACE=1`（JNI trace）下 40 s ≈ 25k 行，且 `doFrame`/`handleMessage` 会刷屏；
-`run.sh` 已对这两个热点方法做了抽样打印（`hot invoke #N`）。定桩清单只 grep 两种标签：
+`libjnivm` 已对这两个热点方法做了抽样打印（`hot invoke #N`）。定桩清单只 grep 两种标签：
 
 ```bash
 grep -o '\[STUB-MISS\].*' log.txt | sort | uniq -c   # 真缺桩
@@ -317,3 +328,24 @@ grep -o '\[STUB-DEFAULT\].*' log.txt | sort | uniq -c # 已由 setDefault 处理
 grep -c 'Invalid Reference' log.txt                   # 代理基类没继承全（§1.6）
 grep -c 'CallMethod object is null' log.txt           # native 拿着 null 对象调用（§1.5）
 ```
+
+## 5. 掌机部署（Anbernic H700 / Mali-G31）
+
+```
+/mnt/mmc/Roms/PORTS/
+├── Unity6.sh              <- scripts/unity6/device-launcher.sh（菜单项名 = 文件名）
+└── Unity6/
+    ├── unityloader        <- scripts/unity6/build-rel.sh 产物
+    ├── unity.toml         <- configs/unity6-device.toml
+    ├── gamedata/          <- 摊开的 APK（assets/ + lib/），game_files 指向它
+    ├── conf/ cache/       <- 运行期生成（prefs、il2cpp 缓存、tombstone）
+    ├── log/               <- 游戏脚本自己写的 unity_player.log（§0 判据）
+    └── log.txt            <- 启动头 + exited (N)
+```
+
+- 大文件用 `dropbeak-cli push --force --chunk --chunk-size 16m --verify`，推完**必须**核对
+  `find gamedata -type f -exec md5sum {} +` 与本机一致（见 AGENTS.md）。
+- **起游戏必须走菜单**（或 `/tmp/.next` 契约）：前台 `dmenu.bin` 持有 `/dev/fb0`，直接跑加载器会
+  `mali-fbdev: Can't create EGL window surface` → `exit 134`。这是显示归属问题，不是 Unity 崩溃。
+- Release 加载器（LOG OFF）不转发 Unity 日志，看"场景是否加载"靠 `log/unity_player.log`。
+- `data.unity3d` / `global-metadata.dat` 一类的判据见 §0.1：换 APK 后没重摊就会静默跑旧数据。

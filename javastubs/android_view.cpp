@@ -4,6 +4,7 @@ extern toml::table config;
 #include "android.h"
 #include "baron/baron.h"
 #include "device_display.h"
+#include "choreographer_bridge.h"
 #include "javac.h"
 #include "logging.h"
 #include <algorithm>
@@ -483,6 +484,16 @@ void jnivm::android::view::Choreographer::signalVSync()
     mHandler->post(java::lang::LambdaRunnable::Create([this]() {
         this->dispatchFrameCallbacks(true);
     }));
+}
+
+// Bridge for the EGL swap path, which cannot reach this class itself; see
+// platform/common/choreographer_bridge.h.
+extern "C" void bd_choreographer_signal_vsync(void)
+{
+    auto choreographer = jnivm::android::view::Choreographer::getInstance();
+    if (choreographer) {
+        choreographer->signalVSync();
+    }
 }
 
 // The core dispatch logic, with the critical isRealVSync flag.

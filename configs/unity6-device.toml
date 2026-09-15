@@ -1,0 +1,40 @@
+[paths]
+# unity.toml 与 unityloader、gamedata/ 同位于 PORTS/Unity6/
+# game_files 是 init_config 的 chdir 目标，其余相对路径都相对它解析。
+game_files="./gamedata/"
+support_files="./gamedata/"
+
+android_package_code="./"
+android_external_files="../conf/"
+android_files="../conf/"
+android_cache="../cache/"
+android_obb_dirs=["./gamedata/"]
+android_source_dirs=["./gamedata/"]
+
+
+[package]
+# Jump6/Unity6 → com.LockeCP.Unity6（Unity 6000.6.0f1，GameActivity 构建）
+packageName="com.LockeCP.Unity6"
+versionName="1.0"
+# Unity 6 读两遍：Intent extra "unity"（引擎命令行）+ initJni(Context, type, cmdline) 的 String。
+# Mali-G31 只有 GLES，命令行再压一道。
+mainIntentBundle = { unity = "-force-gles32" }
+
+
+[device]
+displayWidth=640
+displayHeight=480
+displayRotation=0
+
+
+[input]
+controller=true
+dpad_synthesize_hat=true
+
+
+[audio]
+backend = "auto"
+
+
+[gpu]
+textureMaxDim = 512
