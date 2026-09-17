@@ -25,6 +25,7 @@ namespace bitter {
         class JNIBridgeProxy : public jnivm::java::lang::Runnable,
                                public jnivm::android::os::Handler::Callback,
                                public jnivm::android::view::Choreographer::FrameCallback,
+                               public jnivm::android::graphics::SurfaceTexture::OnFrameAvailableListener,
                                public jnivm::android::hardware::input::InputManager::InputDeviceListener,
                                public jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback,
                                public jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback,
@@ -69,6 +70,14 @@ namespace bitter {
 
             // --- Implementation of android.view.Choreographer.FrameCallback ---
             void doFrame(jlong frameTimeNanos) override;
+
+            // --- Implementation of android.graphics.SurfaceTexture.OnFrameAvailableListener ---
+            // Without this override jnivm cannot turn the guest's proxy into the
+            // interface type that setOnFrameAvailableListener() expects, throws
+            // "Invalid Reference, Unexpected Type", and AndroidVideoMedia reports
+            // "surface creation stalled." - a permanently black video texture.
+            void onFrameAvailable(
+                std::shared_ptr<jnivm::android::graphics::SurfaceTexture>) override;
 
             // --- Implementation of Unity Play Asset Delivery callbacks ---
             void onStatusResult(

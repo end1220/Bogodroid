@@ -24,6 +24,52 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm);
 
 namespace jnivm {
 namespace android {
+    namespace graphics {
+        class SurfaceTexture : public FakeJni::JObject {
+        public:
+            // Unity's native video decoder implements this interface through
+            // bitter/jnibridge: the object Unity passes to
+            // setOnFrameAvailableListener() is a JNIBridgeProxy. It is NOT
+            // dynamic_cast-able to a C++ class unless JNIBridgeProxy actually
+            // inherits the interface (see jnibridge.h), so declaring
+            // onFrameAvailable() as an abstract method is what makes the body
+            // of AndroidVideoMedia's setOnFrameAvailableListener() call
+            // succeed instead of throwing "Invalid Reference, Unexpected Type"
+            // and leaving Unity's surface creation stalled.
+            class OnFrameAvailableListener : public virtual FakeJni::JObject {
+            public:
+                DEFINE_CLASS_NAME("android/graphics/SurfaceTexture$OnFrameAvailableListener")
+                virtual ~OnFrameAvailableListener() = default;
+                // Deliberately NOT pure virtual. jnivm can reach this through an
+                // auto-stubbed implementation of the interface, and a pure
+                // virtual there aborts the process with "Pure virtual function
+                // called!". A default body costs nothing and JNIBridgeProxy
+                // overrides it anyway - the override is what makes the guest's
+                // proxy castable to this interface.
+                virtual void onFrameAvailable(std::shared_ptr<SurfaceTexture>) {}
+            };
+
+            DEFINE_CLASS_NAME("android/graphics/SurfaceTexture")
+            explicit SurfaceTexture(int texture_name);
+            void setOnFrameAvailableListener(
+                std::shared_ptr<OnFrameAvailableListener> listener);
+            void setDefaultBufferSize(int width, int height);
+            // Unity multiplies its video UVs with this matrix. A STUB-MISS
+            // hands back a zeroed array and the video quad samples nothing.
+            void getTransformMatrix(std::shared_ptr<FakeJni::JFloatArray> matrix);
+            long getTimestamp();
+            void attachToGLContext(int texture_name);
+            void detachFromGLContext();
+            void updateTexImage();
+            void release();
+
+            int texture_name = 0;
+            int width = 0;
+            int height = 0;
+            std::shared_ptr<OnFrameAvailableListener> listener;
+        };
+    }
+
     namespace net {
         class Uri : public FakeJni::JObject {
         public:
@@ -72,6 +118,8 @@ namespace android {
         class Surface : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/view/Surface")
+            Surface() = default;
+            explicit Surface(std::shared_ptr<jnivm::android::graphics::SurfaceTexture>);
         };
 
         class View : public FakeJni::JObject {
@@ -523,6 +571,11 @@ namespace android {
         public:
             DEFINE_CLASS_NAME("android/media/MediaCodec")
         };
+        class MediaCodecInfoCodecCapabilities : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/media/MediaCodecInfo$CodecCapabilities")
+            inline static int COLOR_FormatYUV420Planar = 19;
+        };
     }
 
     namespace os {
@@ -539,8 +592,12 @@ namespace android {
         class BuildVersion : public FakeJni::JObject {
         public:
             DEFINE_CLASS_NAME("android/os/Build$VERSION");
-            inline static int SDK_INT = 26;
-            inline static FakeJni::JString RELEASE = (FakeJni::JString) "Oreo";
+            // Unity VideoPlayer needs API 29+ to stream VideoClips out of
+            // LZ4/LZMA AssetBundles via AMediaDataSource. API 28 and below
+            // try to remap archive:/...resource to a plain file, fail, and
+            // leave a black RenderTexture with UI still drawing on top.
+            inline static int SDK_INT = 29;
+            inline static FakeJni::JString RELEASE = (FakeJni::JString) "10";
             inline static FakeJni::JString INCREMENTAL = (FakeJni::JString) "Bogodroid";
         };
 
@@ -675,6 +732,7 @@ namespace android {
             bool postDelayed(std::shared_ptr<java::lang::Runnable> runnable, long delayMillis);
             bool sendMessageAtTime(std::shared_ptr<jnivm::android::os::Message> message, long long uptimeMillis);
             std::shared_ptr<Message> obtainMessage(int what);
+            std::shared_ptr<Message> obtainMessage(int what, int arg1, int arg2);
         };
 
         class HandlerThread : public java::lang::Thread {

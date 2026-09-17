@@ -20,6 +20,11 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     // Util
     vm->registerClass<jnivm::android::util::DisplayMetrics>();
 
+    // Graphics
+    vm->registerClass<jnivm::android::graphics::SurfaceTexture>();
+    vm->registerClass<
+        jnivm::android::graphics::SurfaceTexture::OnFrameAvailableListener>();
+
     // View
     vm->registerClass<jnivm::android::view::DisplayMode>();
     vm->registerClass<jnivm::android::view::Display>();
@@ -51,6 +56,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::media::MediaExtractor>();
     vm->registerClass<jnivm::android::media::MediaFormat>();
     vm->registerClass<jnivm::android::media::MediaCodec>();
+    vm->registerClass<jnivm::android::media::MediaCodecInfoCodecCapabilities>();
 
     // OS
     vm->registerClass<jnivm::android::os::Build>();

@@ -11,6 +11,7 @@
 #include <csignal>
 #include <ctime>
 #include <execinfo.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
@@ -60,8 +61,8 @@ void bd_log_process_memory(const char* why)
     const long size = bd_read_status_kb("VmSize");
     const long avail = bd_read_meminfo_kb("MemAvailable");
     const long total = bd_read_meminfo_kb("MemTotal");
-    BD_LOG("MEM", "pid=%d rss=%.1fMB hwm=%.1fMB vsz=%.1fMB sys_avail=%.1fMB/%ldMB%s%s",
-           (int)getpid(),
+    BD_LOG("MEM", "pid=%d tid=%d rss=%.1fMB hwm=%.1fMB vsz=%.1fMB sys_avail=%.1fMB/%ldMB%s%s",
+           (int)getpid(), (int)syscall(SYS_gettid),
            rss >= 0 ? rss / 1024.0 : -1.0,
            hwm >= 0 ? hwm / 1024.0 : -1.0,
            size >= 0 ? size / 1024.0 : -1.0,

@@ -81,6 +81,20 @@ void JNIBridgeProxy::doFrame(jlong frameTimeNanos) {
     }
 }
 
+void JNIBridgeProxy::onFrameAvailable(
+    std::shared_ptr<jnivm::android::graphics::SurfaceTexture> surfaceTexture) {
+    if (implementedInterfaces.count(
+            "android/graphics/SurfaceTexture$OnFrameAvailableListener")) {
+        invoke("android/graphics/SurfaceTexture$OnFrameAvailableListener",
+               "onFrameAvailable",
+               "(Landroid/graphics/SurfaceTexture;)V",
+               surfaceTexture);
+    } else {
+        verbose("JNIBridgeProxy",
+                "onFrameAvailable() called on a proxy that doesn't implement OnFrameAvailableListener!");
+    }
+}
+
 void JNIBridgeProxy::onStatusResult(
     FakeJni::JLong sequence,
     std::shared_ptr<FakeJni::JArray<FakeJni::JString>> names,
@@ -160,6 +174,18 @@ std::shared_ptr<jnivm::java::lang::Object> JNIBridge::newInterfaceProxy(FakeJni:
         interfaceNames.insert(name);
         verbose("JBRIDGE", "Requesting proxy to implement: %s", name.c_str());
     }
+    // One line per proxy creation tells us exactly which Java interfaces the
+    // guest expects us to be able to cast to - the video path needs
+    // android/graphics/SurfaceTexture$OnFrameAvailableListener in this set.
+    {
+        std::string joined;
+        for (const auto& name : interfaceNames) {
+            if (!joined.empty()) joined += ",";
+            joined += name;
+        }
+        BD_LOG("JBRIDGE", "newInterfaceProxy(handle=%ld) implements [%s]", (long)j,
+               joined.c_str());
+    }
 
     // The factory is now trivial. It always creates the same C++ type,
     // just configured with a different set of interfaces to implement.
@@ -216,6 +242,8 @@ void JNIBridge::invokeManaged(long nativeHandle, const char* methodName, Args...
 template void JNIBridge::invoke(long, const char*, const char*, const char*); // For Runnable.run()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, std::shared_ptr<jnivm::android::os::Message>); // For Handler.Callback.handleMessage()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, jlong); // for FrameCallback.doFrame()
+template void JNIBridge::invoke(long, const char*, const char*, const char*,
+                                std::shared_ptr<jnivm::android::graphics::SurfaceTexture>); // for SurfaceTexture.OnFrameAvailableListener.onFrameAvailable()
 template void JNIBridge::invoke(long, const char*, const char*, const char*, jint);
 template void JNIBridge::invoke(long, const char*, const char*, const char*,
                                 FakeJni::JLong,

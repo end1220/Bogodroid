@@ -95,6 +95,9 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 message(STATUS "SDL2 ${SDL2_VERSION} libs=${SDL2_LIBRARIES} inc=${SDL2_INCLUDE_DIRS}")
+pkg_check_modules(FFMPEG REQUIRED
+    libavformat libavcodec libavutil libswresample libswscale)
+message(STATUS "FFmpeg libs=${FFMPEG_LIBRARIES}")
 
 # Add the libjnivm directory as a subproject
 add_subdirectory(libjnivm ${CMAKE_CURRENT_BINARY_DIR}/libjnivm_build)
@@ -113,12 +116,14 @@ add_executable(${CMAKE_PROJECT_NAME}
     javastubs/android_media.cpp
     javastubs/android_misc.cpp
     javastubs/android_descriptors.cpp
+    javastubs/bd_video.cpp
     javastubs/javac.cpp
     platform/common/toml_include.cpp
     platform/common/debug_utils.cpp
     platform/common/config.cpp
     platform/common/device_display.cpp
     platform/common/input_backend.cpp
+    platform/common/shader_cache.cpp
     platform/common/sys_volume.cpp
 
     loader/so_util.cpp
@@ -141,6 +146,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     thunks/ndk/ndk.cpp
     thunks/ndk/alooper.c
     thunks/ndk/asset_manager.c
+    thunks/ndk/media.cpp
 
     thunks/khronos/egl.cpp
     thunks/khronos/gles2.cpp
@@ -193,6 +199,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     baron
     jnivm
     ${SDL2_LIBRARIES}
+    ${FFMPEG_LIBRARIES}
     dl
     pthread
     -Wl,-Bstatic
@@ -206,6 +213,12 @@ if(SDL2_LIBRARY_DIRS)
 endif()
 if(SDL2_CFLAGS_OTHER)
     target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${SDL2_CFLAGS_OTHER})
+endif()
+if(FFMPEG_LIBRARY_DIRS)
+    target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
+endif()
+if(FFMPEG_CFLAGS_OTHER)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${FFMPEG_CFLAGS_OTHER})
 endif()
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)

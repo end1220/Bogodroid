@@ -197,6 +197,12 @@ void jnivm::android::os::Looper::loop()
                 break; // No more due messages
             }
 
+            if (message->what != 0) {
+                BD_LOG("HANDLER", "dispatch what=%d arg1=%d arg2=%d target=%p callback=%p",
+                       message->what, message->arg1, message->arg2,
+                       (void*)message->target,
+                       message->target ? (void*)message->target->mCallback.get() : nullptr);
+            }
             bool handled = false;
             // First, see if the Handler has a specific Callback object.
             // This takes precedence over everything else.
@@ -327,6 +333,28 @@ std::shared_ptr<jnivm::android::os::Message> jnivm::android::os::Handler::obtain
     return msg;
 }
 
+std::shared_ptr<jnivm::android::os::Message>
+jnivm::android::os::Handler::obtainMessage(int what, int arg1, int arg2)
+{
+    std::shared_ptr<Message> msg = obtainMessage(what);
+    msg->arg1 = arg1;
+    msg->arg2 = arg2;
+    BD_LOG("HANDLER", "obtain what=%d arg1=%d arg2=%d handler=%p callback=%p",
+           what, arg1, arg2, (void*)this, (void*)mCallback.get());
+    // Unity's AndroidVideoMedia waits synchronously for its SurfaceTexture
+    // handler after obtainMessage(what, textureId, 0). Our emulated UI looper
+    // is not tied to Android's main thread, so queueing this message makes the
+    // native video thread time out before it is dispatched. Run callback-backed
+    // messages now; clear target when handled so sendToTarget becomes a no-op.
+    if (mCallback) {
+        bool handled = mCallback->handleMessage(msg);
+        BD_LOG("HANDLER", "sync callback what=%d handled=%d", what, handled);
+        if (handled)
+            msg->target = nullptr;
+    }
+    return msg;
+}
+
 bool jnivm::android::os::Handler::post(std::shared_ptr<java::lang::Runnable> runnable)
 {
     if (!runnable)
@@ -371,8 +399,10 @@ bool jnivm::android::os::Handler::sendMessage(std::shared_ptr<Message> message)
 
 void jnivm::android::os::Handler::handleMessage(std::shared_ptr<Message> message)
 {
-    // Default implementation does nothing. Subclasses should override this.
-    // The code in FrameTimeTracker that inherits from Handler will have its own version.
+    if (message && message->what != 0) {
+        BD_LOG("HANDLER", "default handleMessage what=%d arg1=%d arg2=%d",
+               message->what, message->arg1, message->arg2);
+    }
 }
 
 ///// Handler.Callback
@@ -545,6 +575,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Message) { FakeJni::Constructor<Message> {} },
     { FakeJni::Field<&Message::what> {}, "what", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Message::arg1> {}, "arg1", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Field<&Message::arg2> {}, "arg2", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Function<&Message::obtain> {}, "obtain", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&Message::recycle> {}, "recycle", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Message::sendToTarget> {}, "sendToTarget", FakeJni::JMethodID::PUBLIC },
@@ -565,7 +597,12 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Build) { FakeJni::Constructor<Build>
     { FakeJni::Function<&Handler::postDelayed> {}, "postDelayed", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Handler::sendMessage> {}, "sendMessage", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Handler::handleMessage> {}, "handleMessage", FakeJni::JMethodID::PUBLIC },
-    { FakeJni::Function<&Handler::obtainMessage> {}, "obtainMessage", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<
+        static_cast<std::shared_ptr<Message> (Handler::*)(int)>(&Handler::obtainMessage)
+      > {}, "obtainMessage", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<
+        static_cast<std::shared_ptr<Message> (Handler::*)(int, int, int)>(&Handler::obtainMessage)
+      > {}, "obtainMessage", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Handler::Callback) { FakeJni::Constructor<Callback> {} },

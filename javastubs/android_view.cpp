@@ -3,13 +3,114 @@ extern toml::table config;
 
 #include "android.h"
 #include "baron/baron.h"
+#include "bd_video.h"
 #include "device_display.h"
 #include "javac.h"
 #include "logging.h"
+#include <chrono>
 #include <fstream>
 #include <input_backend.h>
 #include <inttypes.h>
 #include <pthread.h>
+
+///// SurfaceTexture / Surface
+//
+// Unity renders Android video through a SurfaceTexture feeding a
+// GL_TEXTURE_EXTERNAL_OES texture. Nothing on this device fills that buffer
+// queue, so javastubs/bd_video.cpp publishes the frames the MediaCodec thunk
+// decodes and the GL layer redirects the external bind to its own
+// GL_TEXTURE_2D. Everything below is bookkeeping for that bridge.
+
+jnivm::android::graphics::SurfaceTexture::SurfaceTexture(int texture)
+    : texture_name(texture)
+{
+    bd_video::surface_texture_created(texture);
+}
+
+void jnivm::android::graphics::SurfaceTexture::setOnFrameAvailableListener(
+    std::shared_ptr<OnFrameAvailableListener> value)
+{
+    listener = std::move(value);
+    // Hand the bridge a closure rather than a raw pointer: jnivm's Object is
+    // enable_shared_from_this, so this is a real shared_ptr and the media thread
+    // can keep it for as long as it needs.
+    if (listener) {
+        auto self = std::static_pointer_cast<SurfaceTexture>(weak_from_this().lock());
+        auto callback = listener;
+        bd_video::register_sink(texture_name,
+                                [self, callback]() { callback->onFrameAvailable(self); });
+    } else {
+        // Unity nulls the listener when it retires a clip's video pipeline. Drop
+        // the sink with it: the bridge must not call onFrameAvailable on a proxy
+        // whose owner is being destroyed (that lands as a pure virtual call).
+        bd_video::clear_sink(texture_name);
+    }
+}
+
+void jnivm::android::graphics::SurfaceTexture::setDefaultBufferSize(
+    int value_width, int value_height)
+{
+    width = value_width;
+    height = value_height;
+    bd_video::surface_texture_buffer_size(texture_name, value_width, value_height);
+}
+
+void jnivm::android::graphics::SurfaceTexture::getTransformMatrix(
+    std::shared_ptr<FakeJni::JFloatArray> matrix)
+{
+    // Identity: a decoder-filled SurfaceTexture without crop has an identity
+    // transform. The STUB-MISS default is a zeroed array, which collapses every
+    // UV onto one texel - a black or single-colour video quad.
+    if (!matrix)
+        return;
+    for (int i = 0; i < 16; i++)
+        (*matrix)[i] = (i % 5) == 0 ? 1.0f : 0.0f;
+    static uint64_t calls = 0;
+    if (++calls <= 3 || (calls % 300) == 0)
+        BD_LOG("VIDEO", "getTransformMatrix #%llu -> identity (size=%d)",
+               (unsigned long long)calls, matrix->getSize());
+}
+
+long jnivm::android::graphics::SurfaceTexture::getTimestamp()
+{
+    // Unity uses this as the presented-frame time; frames are published as fast
+    // as they decode, so a monotonic microsecond clock is the honest answer.
+    static const auto start = std::chrono::steady_clock::now();
+    return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - start)
+        .count();
+}
+
+void jnivm::android::graphics::SurfaceTexture::attachToGLContext(int texture)
+{
+    BD_LOG("VIDEO", "attachToGLContext(%d) texture=%d", texture, texture_name);
+    texture_name = texture;
+}
+
+void jnivm::android::graphics::SurfaceTexture::detachFromGLContext()
+{
+    BD_LOG("VIDEO", "detachFromGLContext texture=%d", texture_name);
+}
+
+void jnivm::android::graphics::SurfaceTexture::updateTexImage()
+{
+    bd_video::surface_texture_update_tex_image(texture_name);
+}
+
+void jnivm::android::graphics::SurfaceTexture::release()
+{
+    bd_video::surface_texture_released(texture_name);
+    listener.reset();
+}
+
+jnivm::android::view::Surface::Surface(
+    std::shared_ptr<jnivm::android::graphics::SurfaceTexture> texture)
+{
+    BD_LOG("VIDEO", "Surface(SurfaceTexture=%p texture=%d)",
+           (void*)texture.get(), texture ? texture->texture_name : 0);
+    if (texture)
+        bd_video::surface_texture_attached(texture->texture_name);
+}
 
 ///// Display
 
@@ -524,7 +625,36 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&DisplayMode::getRefreshRate> {}, "getRefreshRate", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
-    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Surface) { FakeJni::Constructor<Surface> {} },
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::graphics::SurfaceTexture)
+    { FakeJni::Constructor<SurfaceTexture, int> {} },
+    { FakeJni::Function<&SurfaceTexture::setOnFrameAvailableListener> {},
+      "setOnFrameAvailableListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::setDefaultBufferSize> {},
+      "setDefaultBufferSize", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::getTransformMatrix> {},
+      "getTransformMatrix", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::getTimestamp> {},
+      "getTimestamp", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::attachToGLContext> {},
+      "attachToGLContext", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::detachFromGLContext> {},
+      "detachFromGLContext", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::updateTexImage> {},
+      "updateTexImage", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&SurfaceTexture::release> {},
+      "release", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(
+        jnivm::android::graphics::SurfaceTexture::OnFrameAvailableListener)
+    { FakeJni::Function<&OnFrameAvailableListener::onFrameAvailable> {},
+      "onFrameAvailable", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Surface)
+    { FakeJni::Constructor<Surface> {} },
+    { FakeJni::Constructor<
+        Surface, std::shared_ptr<jnivm::android::graphics::SurfaceTexture>> {} },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::InputDevice) { FakeJni::Constructor<InputDevice> {} },

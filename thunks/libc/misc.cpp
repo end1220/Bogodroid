@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <elf.h>
+#include <execinfo.h>
 #include <inttypes.h>
 #include <link.h>
 #include <stdbool.h>
@@ -130,7 +131,10 @@ extern "C" ABI_ATTR int dladdr_impl(const void* addr, Dl_info* info)
 
 extern "C" ABI_ATTR void* dlsym_impl(void* handle, const char* name)
 {
-    return (void*)so_resolve_link((so_module*)handle, name);
+    void* result = (void*)so_resolve_link((so_module*)handle, name);
+    if (name && strncmp(name, "AMedia", 6) == 0)
+        BD_LOG("DLSYM", "%s -> %p", name, result);
+    return result;
 }
 
 extern "C" ABI_ATTR const void*
@@ -200,15 +204,188 @@ extern "C" ABI_ATTR const char* __strchr_chk(const char* __s, int __ch, size_t _
 extern "C" ABI_ATTR const char* __strrchr_chk(const char* __s, int __ch, size_t __n) { return strrchr(__s, __ch); }
 extern "C" ABI_ATTR size_t __strlen_chk(const char* __s, size_t __n) { return strnlen(__s, __n); }
 
+// Resolve one address to "module+offset" for the abort backtrace below.
+//
+// dladdr() only knows about libraries the dynamic loader mapped; the game's .so
+// files are mapped by hand (so_util) and are invisible to it, so fall back to
+// so_util's own module list. An offset is all that is needed: the symbols stay
+// in the local unstripped build, and addr2line/llvm-symbolizer turn
+// "libunity.so+0xcbe1bc" back into a function name offline.
+static void bd_describe_address(void* address, char* out, size_t out_size)
+{
+    const uintptr_t addr = (uintptr_t)address;
+
+    Dl_info info;
+    if (dladdr(address, &info) && info.dli_fname && info.dli_fbase &&
+        (uintptr_t)info.dli_fbase <= addr) {
+        snprintf(out, out_size, "%s+0x%zx", info.dli_fname,
+                 (size_t)(addr - (uintptr_t)info.dli_fbase));
+        return;
+    }
+
+    so_module* best = nullptr;
+    for (so_module* mod = so_get_head(); mod; mod = mod->next) {
+        if (mod->base && mod->base <= addr && (!best || mod->base > best->base))
+            best = mod;
+    }
+    if (best)
+        snprintf(out, out_size, "%s+0x%zx",
+                 best->path ? best->path : "(game module)",
+                 (size_t)(addr - best->base));
+    else
+        snprintf(out, out_size, "0x%" PRIxPTR, addr);
+}
+
+// Bionic's abort-message hook - the last thing a C++ runtime says before it
+// aborts. Unity's own libc++_shared answers a virtual call that lands on a pure
+// virtual slot here ("Pure virtual function called!"), and by the time the
+// tombstone is written the interesting frame is gone: the dump then reads
+// "abort somewhere", with the loader's abort hook as the topmost symbol and no
+// hint of which interface or which caller. Unwind while it is still on the
+// stack instead, and print module+offset per frame.
+// Upper bound of a module's mapping, used to decide whether a stray stack word
+// can possibly be a return address into it.
+static uintptr_t bd_module_end(const so_module* mod)
+{
+    uintptr_t end = mod->base;
+    if (mod->text_base) {
+        const uintptr_t e = mod->text_base + mod->text_size;
+        if (e > end) end = e;
+    }
+    if (mod->patch_base) {
+        const uintptr_t e = mod->patch_base + mod->patch_size;
+        if (e > end) end = e;
+    }
+    if (mod->cave_base) {
+        const uintptr_t e = mod->cave_base + mod->cave_size;
+        if (e > end) end = e;
+    }
+    for (int i = 0; i < mod->n_data; ++i) {
+        const uintptr_t e = mod->data_base[i] + mod->data_size[i];
+        if (e > end) end = e;
+    }
+    return end;
+}
+
+static so_module* bd_find_module(uintptr_t addr)
+{
+    so_module* best = nullptr;
+    for (so_module* mod = so_get_head(); mod; mod = mod->next) {
+        if (!mod->base || mod->base > addr) continue;
+        if (addr >= bd_module_end(mod)) continue;
+        if (!best || mod->base > best->base) best = mod;
+    }
+    return best;
+}
+
+// Is *insn the call-site encoding that could branch to `scan`? On AArch64 a
+// return address is preceded by BL (direct) or BLR (indirect virtual call).
+// Requiring this filters out the majority of stack noise (saved vtable/data
+// pointers that happen to land inside a mapping).
+static bool bd_is_call_site(const uint32_t* insn)
+{
+    const uint32_t v = *insn;
+    if ((v & 0xFC000000u) == 0x94000000u) return true;  // bl  #imm26
+    if ((v & 0xFFFFFC1Fu) == 0xD63F0000u) return true;  // blr xn
+    if ((v & 0xFE000000u) == 0x14000000u) return true;  // b   #imm26 (tail call)
+    return false;
+}
+
+// The unwinder gives up one frame short of the interesting one: the pure virtual
+// call is the frame *above* libc++'s __cxa_pure_virtual, and it is that caller
+// (a virtual dispatch on a destroyed object inside libunity) we need to name.
+//
+// The C++ backtrace() walk stops there because libunity's own frames carry no
+// unwind info our runtime can use, so rebuild the chain by hand: first walk the
+// aarch64 frame-pointer chain (Unity is built with frame pointers on), then fall
+// back to a conservative stack scan for words that look like return addresses.
+static void bd_scan_caller_frames()
+{
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    char where[512];
+
+    fprintf(stderr, "BD-ABORT: -- fp chain from 0x%zx --\n", (size_t)fp);
+    int shown = 0;
+    for (int i = 0; i < 64 && fp && (fp & 7) == 0; ++i) {
+        const uintptr_t* frame = (const uintptr_t*)fp;
+        const uintptr_t next = frame[0];
+        const uintptr_t ret = frame[1];
+        if (ret) {
+            bd_describe_address((void*)ret, where, sizeof(where));
+            fprintf(stderr, "BD-ABORT:   fp#%02d %s\n", i, where);
+            ++shown;
+        }
+        if (next <= fp || next - fp > 1u << 20) break;
+        fp = next;
+        if (shown >= 40) break;
+    }
+
+    // Conservative scan: any word in the first 48 KB of stack that points into a
+    // loaded module and sits right after a call instruction is a candidate.
+    fprintf(stderr, "BD-ABORT: -- stack scan --\n");
+    const uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+    shown = 0;
+    for (uintptr_t p = sp; p < sp + (48u << 10) && shown < 40; p += sizeof(uintptr_t)) {
+        const uintptr_t value = *(const uintptr_t*)p;
+        so_module* mod = bd_find_module(value);
+        if (!mod || value < 8 || (value & 3)) continue;
+        if (!bd_find_module(value - 4)) continue;  // call site must be in a module too
+        if (!bd_is_call_site((const uint32_t*)(value - 4))) continue;
+        bd_describe_address((void*)value, where, sizeof(where));
+        fprintf(stderr, "BD-ABORT:   @%04zx %s\n", (size_t)(p - sp), where);
+        ++shown;
+    }
+    fflush(stderr);
+}
+
+static void bd_dump_abort_backtrace()
+{
+    void* frames[48];
+    const int count = backtrace(frames, 48);
+    fprintf(stderr, "BD-ABORT: tid=%d frames=%d\n", (int)syscall(__NR_gettid), count);
+    for (int i = 0; i < count; ++i) {
+        char where[512];
+        bd_describe_address(frames[i], where, sizeof(where));
+        fprintf(stderr, "BD-ABORT:   #%02d %s\n", i, where);
+    }
+    bd_scan_caller_frames();
+    fflush(stderr);
+}
+
 extern "C" ABI_ATTR void android_set_abort_message_impl(const char* msg)
 {
+    bd_dump_abort_backtrace();
     fatal_error("%s", msg);
     //   abort();
 }
 
 extern "C" ABI_ATTR int __system_property_get_impl(const char* name, char* value)
 {
-    WARN_STUB;
+    if (!value) return 0;
+    // Unity VideoPlayer gates compressed AssetBundle clips on API 29+ and
+    // reads this property (not only Build.VERSION.SDK_INT).
+    static const struct { const char* key; const char* val; } kProps[] = {
+        {"ro.build.version.sdk", "29"},
+        {"ro.build.version.release", "10"},
+        {"ro.product.model", "h700"},
+        {"ro.product.manufacturer", "Allwinner"},
+        {"ro.hardware", "sun50iw9"},
+        {"ro.product.cpu.abi", "arm64-v8a"},
+        {"ro.product.cpu.abilist", "arm64-v8a"},
+        {"ro.product.cpu.abilist64", "arm64-v8a"},
+        {"ro.product.cpu.abilist32", ""},
+    };
+    if (name) {
+        for (const auto& prop : kProps) {
+            if (strcmp(name, prop.key) == 0) {
+                size_t len = strlen(prop.val);
+                memcpy(value, prop.val, len + 1);
+                BD_LOG("PROP", "%s=%s", name, prop.val);
+                return static_cast<int>(len);
+            }
+        }
+        BD_LOG("PROP", "%s=(empty)", name);
+    }
     value[0] = 0;
     return 0;
 }

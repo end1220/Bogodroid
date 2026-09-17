@@ -15,9 +15,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include "bd_video.h"
 #include "device_display.h"
 #include <toml++/toml.hpp>
 extern toml::table config;
@@ -149,11 +151,1362 @@ struct BD_ScaleInfo {
 };
 static std::unordered_map<unsigned, BD_ScaleInfo> g_tex_scales;
 static unsigned g_bound_tex_2d = 0;
+// GL enums we need without dragging a second copy of the ES headers in.
+static const GLenum BD_GL_TEXTURE_2D = 0x0DE1;
+static const GLenum BD_GL_TEXTURE_EXTERNAL_OES = 0x8D65;
+static const GLenum BD_GL_RGBA = 0x1908;
+static const GLenum BD_GL_UNSIGNED_BYTE = 0x1401;
+static const GLenum BD_GL_TEXTURE_MIN_FILTER = 0x2801;
+static const GLenum BD_GL_TEXTURE_MAG_FILTER = 0x2800;
+static const GLenum BD_GL_TEXTURE_WRAP_S = 0x2802;
+static const GLenum BD_GL_TEXTURE_WRAP_T = 0x2803;
+static const GLenum BD_GL_LINEAR = 0x2601;
+static const GLenum BD_GL_CLAMP_TO_EDGE = 0x812F;
+
+static uint64_t g_video_uploads = 0;
+static uint64_t g_video_redirects = 0;
+// Binds of the guest's video texture name to the 2D target that had to be
+// swapped for the backing texture (see bd_video_bind_swap).
+static uint64_t g_video_swaps = 0;
+// Size the video texture was last allocated at, and the accumulated upload cost.
+// Re-allocating per frame is not needed while the clip's size is unchanged, and
+// the cost has to be visible in the log: on the handheld the upload runs on the
+// guest's video thread, so it is on the critical path of every video frame.
+static int g_video_tex_w = 0;
+static int g_video_tex_h = 0;
+static uint32_t g_upload_ms = 0;
+
+// True once a decoded frame has been uploaded into the backing texture
+// (bd_video_present). The UI geometry census (BD_VIDEO_TRACE_UI=2) starts from
+// that moment rather than from a recognised video program, because a program
+// served by Unity's shader cache never goes through glShaderSource.
+static bool g_video_frame_uploaded = false;
+
+// Attribute GL errors to the loader's own calls. Unity reports the errors it
+// sees ("OPENGL NATIVE PLUG-IN ERROR: GL_INVALID_ENUM") without saying which
+// call produced them, and this code sits exactly on the video path that is
+// under suspicion, so drain the error queue after each redirect/upload and log
+// the first few occurrences with the call that caused them.
+void log_gl_error(const char* what)
+{
+    if (!glad_glGetError)
+        return;
+    static int logged = 0;
+    GLenum error = glad_glGetError();
+    if (error == 0 || logged >= 12)
+        return;
+    ++logged;
+    BD_LOG("VIDEO", "GL error 0x%x after %s", (unsigned)error, what);
+}
+
+// Unity's video blit samples a GL_TEXTURE_EXTERNAL_OES texture, but on this
+// device nothing ever queues a buffer into it (no BufferQueue, no gralloc - see
+// javastubs/bd_video.h). Two observations drove this design:
+//
+//   * Unity binds its video texture once and keeps the binding (the external
+//     bind happens a handful of times per clip, not per frame), so the frame
+//     upload cannot live on the bind path;
+//   * the GL texture name Unity binds (176) is not the handle it passed to
+//     SurfaceTexture (22), so the bridge cannot match on the id either.
+//
+// So: every external bind during playback is redirected to one loader-owned
+// GL_TEXTURE_2D, and the upload happens from SurfaceTexture.updateTexImage(),
+// which is the guest's per-frame "new frame is ready" moment and runs with the
+// GL context current. bd_glShaderSource rewrote the blit shader's
+// samplerExternalOES to sampler2D, so that is the texture the shader reads.
+
+// Creates the loader-owned GL_TEXTURE_2D that stands in for Unity's external
+// texture. Must run with the GL context current. This can happen either from the
+// first external bind or from an earlier updateTexImage(), so both paths call it.
+static GLuint bd_ensure_backing_texture()
+{
+    GLuint backing = bd_video::backing_texture();
+    if (backing != 0)
+        return backing;
+    if (!glad_glGenTextures || !glad_glBindTexture || !glad_glTexParameteri)
+        return 0;
+    glad_glGenTextures(1, &backing);
+    glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER, BD_GL_LINEAR);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER, BD_GL_LINEAR);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_S, BD_GL_CLAMP_TO_EDGE);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_T, BD_GL_CLAMP_TO_EDGE);
+    bd_video::set_backing_texture(backing);
+    g_bound_tex_2d = backing;
+    // New texture: nothing is allocated yet, so the next upload must be a full
+    // glTexImage2D, not a glTexSubImage2D into nothing.
+    g_video_tex_w = 0;
+    g_video_tex_h = 0;
+    return backing;
+}
+
+static bool bd_redirect_video_bind(GLuint texture)
+{
+    const GLuint backing = bd_ensure_backing_texture();
+    if (backing == 0)
+        return false;
+    glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+    g_bound_tex_2d = backing;
+    if (++g_video_redirects <= 5 || (g_video_redirects % 600) == 0)
+        BD_LOG("VIDEO",
+               "redirect external bind %u -> GL_TEXTURE_2D %u (redirect #%llu)",
+               texture, backing, (unsigned long long)g_video_redirects);
+    log_gl_error("redirect bind");
+    return true;
+}
+
+// Uploads the newest decoded frame into the backing texture. Installed into the
+// video bridge, which calls it from SurfaceTexture.updateTexImage().
+extern "C" void bd_video_present()
+{
+    if (!bd_video::has_sink())
+        return;
+    // updateTexImage() can run before Unity ever binds the external texture, so
+    // create the backing texture on demand rather than waiting for the bind.
+    const GLuint backing = bd_ensure_backing_texture();
+    if (backing == 0 || !glad_glBindTexture || !glad_glTexImage2D)
+        return;
+
+    int width = 0;
+    int height = 0;
+    uint64_t serial = 0;
+    const uint8_t* pixels = bd_video::begin_upload(&width, &height, &serial);
+    if (!pixels)
+        return;
+    glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+    // glTexSubImage2D in the steady state: same pixels, but it does not ask the
+    // driver to re-allocate/re-layout the texture. glTexImage2D is only needed
+    // when the size changes (the bridge can downscale a new clip differently).
+    const Uint32 start_ms = SDL_GetTicks();
+    if (width != g_video_tex_w || height != g_video_tex_h) {
+        glad_glTexImage2D(BD_GL_TEXTURE_2D, 0, BD_GL_RGBA, width, height, 0,
+                          BD_GL_RGBA, BD_GL_UNSIGNED_BYTE, pixels);
+        g_video_tex_w = width;
+        g_video_tex_h = height;
+        BD_LOG("VIDEO", "video texture (re)allocated %dx%d", width, height);
+    } else {
+        glad_glTexSubImage2D(BD_GL_TEXTURE_2D, 0, 0, 0, width, height,
+                             BD_GL_RGBA, BD_GL_UNSIGNED_BYTE, pixels);
+    }
+    g_bound_tex_2d = backing;
+    bd_video::end_upload();
+    g_video_frame_uploaded = true;
+    g_upload_ms += SDL_GetTicks() - start_ms;
+    if (++g_video_uploads <= 3 || (g_video_uploads % 60) == 0)
+        BD_LOG("VIDEO", "uploaded frame #%llu %dx%d -> texture %u (%.2f ms avg)",
+               (unsigned long long)g_video_uploads, width, height, backing,
+               (double)g_upload_ms / (double)g_video_uploads);
+    log_gl_error("TexImage2D (video upload)");
+}
+
+#include <map>
+
+static std::map<GLuint, GLuint> g_shader_to_program;
+static std::set<GLuint> g_rewritten_shaders;
+static std::set<GLuint> g_video_programs;
+// True while the guest's current program is one built from a rewritten video
+// shader. Draw calls consult it to re-assert the video texture binding.
+static bool g_video_program_active = false;
+
+// Debug switches for the video GL path, read once:
+//   1 = full program/attribute dump for draws that sample the video RT
+//   2 = one compact census line per draw (see bd_quad_summary)
+//   3 = also log which texture each unit holds, and the bind sequence
+static int bd_trace_ui_mode()
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char* value = getenv("BD_VIDEO_TRACE_UI");
+        mode = value && *value ? atoi(value) : 0;
+    }
+    return mode;
+}
+
+static bool bd_trace_ui_enabled()
+{
+    return bd_trace_ui_mode() > 0;
+}
+
+// Which texture is bound to each unit, tracked from the calls the guest makes.
+// The question "does the video draw sample the loader's texture?" can only be
+// answered at draw time, and the answer is the binding at the unit the shader
+// samples - not the binding we set when we redirected the guest's external bind
+// (that may be a different unit, or may have been overwritten since).
+#define BD_MAX_UNITS 8
+static GLenum g_active_unit = 0x84C0; // GL_TEXTURE0
+static GLuint g_unit_2d[BD_MAX_UNITS] = {};
+static GLuint g_unit_ext[BD_MAX_UNITS] = {};
+
+static int unit_index(GLenum unit)
+{
+    const int index = (int)unit - 0x84C0;
+    return (index >= 0 && index < BD_MAX_UNITS) ? index : -1;
+}
+
+// Names the guest has bound as GL_TEXTURE_EXTERNAL_OES while a video sink was
+// live: its own handle on the video texture. Unity keeps using that name for the
+// 2D target too (its state cache "restores" it), so it has to be recognised by
+// name, not by the shader that is about to sample it.
+static std::set<GLuint> g_guest_video_names;
+
+// Is this the guest's name for the video texture? Both the name it binds as
+// GL_TEXTURE_EXTERNAL_OES and the one the SurfaceTexture stub reports qualify:
+// Unity uses them interchangeably depending on which cache it is reading.
+static bool bd_is_guest_video_texture(GLuint texture)
+{
+    if (texture == 0)
+        return false;
+    if (g_guest_video_names.count(texture))
+        return true;
+    const int name = bd_video::video_texture_name();
+    return name > 0 && (GLuint)name == texture;
+}
+
+// Unity binds its own (empty) video texture to GL_TEXTURE_2D right before the
+// blit draw, which is what leaves the video black once the shader has been
+// rewritten to sample a normal texture - and it is exactly the bind that has to
+// be caught when the program came from the shader cache, because then no
+// glShaderSource/glLinkProgram ever runs and fixup_video_bindings() has no
+// program to key on. Swapping the name here makes the video independent of both
+// Unity's state cache and its program cache.
+static bool bd_video_bind_swap(GLuint texture)
+{
+    if (!bd_is_guest_video_texture(texture))
+        return false;
+    const GLuint backing = bd_ensure_backing_texture();
+    if (backing == 0)
+        return false;
+    if (glad_glBindTexture)
+        glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+    g_bound_tex_2d = backing;
+    const int index = unit_index(g_active_unit);
+    if (index >= 0)
+        g_unit_2d[index] = backing;
+    if (++g_video_swaps <= 5 || (g_video_swaps % 600) == 0)
+        BD_LOG("VIDEO",
+               "video texture bind %u -> GL_TEXTURE_2D %u (bind swap #%llu)",
+               texture, backing, (unsigned long long)g_video_swaps);
+    return true;
+}
+
+static void track_texture_binding(GLenum target, GLuint texture)
+{
+    const int index = unit_index(g_active_unit);
+    if (index < 0)
+        return;
+    if (target == BD_GL_TEXTURE_2D)
+        g_unit_2d[index] = texture;
+    else if (target == BD_GL_TEXTURE_EXTERNAL_OES)
+        g_unit_ext[index] = texture;
+}
+
+extern "C" void bd_glActiveTexture(GLenum texture)
+{
+    g_active_unit = texture;
+    if (glad_glActiveTexture)
+        glad_glActiveTexture(texture);
+}
 
 extern "C" void bd_glBindTexture(GLenum target, GLuint texture)
 {
-    if (target == 0x0DE1 /*GL_TEXTURE_2D*/) g_bound_tex_2d = texture;
+    if (target == BD_GL_TEXTURE_2D) g_bound_tex_2d = texture;
+    track_texture_binding(target, texture);
+    // BD_VIDEO_TRACE_BINDS=1: a video frame's texture setup is a handful of
+    // binds, and the order decides whether "the unit whose last bind was an
+    // external texture" is a usable way to recognise a video draw. Unity's
+    // shader cache can hand back a pre-compiled program, so recognising the
+    // draw by shader source alone is not enough.
+    if (bd_trace_ui_mode() >= 3 && bd_video::has_sink()) {
+        static int logged = 0;
+        if (logged < 40) {
+            ++logged;
+            BD_LOG("VIDEO", "bind #%d target=0x%x texture=%u unit=0x%x", logged,
+                   (unsigned)target, texture, (unsigned)g_active_unit);
+        }
+    }
+    // A GL_TEXTURE_EXTERNAL_OES cannot receive decoder output on this device,
+    // so while a video sink is live, send it to the texture we can fill.
+    if (target == BD_GL_TEXTURE_EXTERNAL_OES && bd_video::has_sink()) {
+        // Remember the guest's own name for the video texture. Unity's GL state
+        // cache re-binds that name to GL_TEXTURE_2D shortly before it draws the
+        // video, which would undo the redirect below; knowing the name lets
+        // bd_video_bind_swap() catch that bind as well.
+        g_guest_video_names.insert(texture);
+        if (bd_redirect_video_bind(texture)) {
+            // The guest asked for the external target and got a 2D bind, so the
+            // unit bookkeeping has to say so too: everything downstream (the
+            // draw census, fixup_video_bindings) reads it as "what GL holds".
+            const int index = unit_index(g_active_unit);
+            if (index >= 0)
+                g_unit_2d[index] = bd_video::backing_texture();
+            return;
+        }
+    }
+    // The same texture bound to the 2D target: Unity's state cache believes the
+    // unit still holds the empty external texture and "restores" it. This is the
+    // one case that has to work without knowing which program is about to draw:
+    // with a cached (pre-compiled) video program there is no glShaderSource and
+    // no glLinkProgram to key on, so fixup_video_bindings() never runs, and the
+    // blit ends up sampling an empty texture - a black video with a healthy
+    // decode. Substituting the backing texture here is what makes playback
+    // independent of Unity's shader cache.
+    if (target == BD_GL_TEXTURE_2D && bd_video::has_sink() &&
+        bd_video_bind_swap(texture)) {
+        return;
+    }
     if (glad_glBindTexture) glad_glBindTexture(target, texture);
+}
+
+// Unity wraps its video texture around an EGLImage on real devices. There is no
+// gralloc here, so the call can only make the texture unusable - and it would
+// fight the GL_TEXTURE_2D we upload into. Report it and swallow it.
+extern "C" void bd_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image)
+{
+    BD_LOG("VIDEO", "glEGLImageTargetTexture2DOES(target=0x%x image=%p)",
+           (unsigned)target, (void*)image);
+    if (glad_glEGLImageTargetTexture2DOES)
+        glad_glEGLImageTargetTexture2DOES(target, image);
+}
+
+// Unity's video blit shader is compiled for samplerExternalOES, which only reads
+// a BufferQueue-backed external texture. Rewriting the sampler type makes the
+// same shader read the GL_TEXTURE_2D that bd_glBindTexture installs above.
+// ---------------------------------------------------------------------------
+// Blit-program tracking.
+//
+// Rewriting the shader source only helps if the program built from it is the
+// one Unity draws with, and if that program actually links. Both are invisible
+// from the source-side log, so follow the shader through attach/link/use:
+//
+//   * glShaderSource rewrite   -> remember the shader object
+//   * glAttachShader           -> remember which program took it
+//   * glLinkProgram            -> report status and the info log for those
+//                                 programs, and mark them as video programs
+//   * glUseProgram             -> report the first uses of a marked program
+//
+// A marked program that is never used, or one whose link failed, explains a
+// black video quad far more directly than any amount of texture-side logging.
+#include <map>
+
+extern "C" void bd_glShaderSource(GLuint shader, GLsizei count,
+                                  const GLchar* const* string, const GLint* length)
+{
+    if (!glad_glShaderSource)
+        return;
+    if (!string || count <= 0 || shader == 0) {
+        glad_glShaderSource(shader, count, string, length);
+        return;
+    }
+
+    const char* needle = "samplerExternalOES";
+    const size_t needle_len = strlen(needle);
+    bool found = false;
+    for (GLsizei i = 0; i < count && !found; i++) {
+        if (string[i] && (!length || length[i] != 0) &&
+            strstr(string[i], needle))
+            found = true;
+    }
+    if (!found) {
+        glad_glShaderSource(shader, count, string, length);
+        return;
+    }
+
+    std::string source;
+    for (GLsizei i = 0; i < count; i++) {
+        if (!string[i])
+            continue;
+        if (length && length[i] >= 0)
+            source.append(string[i], (size_t)length[i]);
+        else
+            source.append(string[i]);
+    }
+    unsigned replacements = 0;
+    size_t pos = 0;
+    while ((pos = source.find(needle, pos)) != std::string::npos) {
+        source.replace(pos, needle_len, "sampler2D");
+        pos += strlen("sampler2D");
+        ++replacements;
+    }
+    const GLchar* ptr = source.c_str();
+    GLint len = (GLint)source.size();
+    g_rewritten_shaders.insert(shader);
+    BD_LOG("VIDEO",
+           "shader %u: samplerExternalOES -> sampler2D x%u (%zu bytes)",
+           shader, replacements, source.size());
+    // The video blit shader comes from the game's shader assets, not from
+    // libunity.so, so dump it once to see how it samples the texture.
+    static bool dumped = false;
+    if (!dumped) {
+        dumped = true;
+        std::string snippet = source.substr(0, 2048);
+        for (auto& ch : snippet) {
+            if (ch == '\n') ch = ' ';
+        }
+        BD_LOG("VIDEO", "video shader source: %s", snippet.c_str());
+    }
+    glad_glShaderSource(shader, 1, &ptr, &len);
+}
+
+extern "C" void bd_glAttachShader(GLuint program, GLuint shader)
+{
+    if (glad_glAttachShader)
+        glad_glAttachShader(program, shader);
+    if (g_rewritten_shaders.count(shader)) {
+        g_shader_to_program[shader] = program;
+        BD_LOG("VIDEO", "attach: rewritten shader %u -> program %u", shader,
+               program);
+    }
+}
+
+extern "C" void bd_glLinkProgram(GLuint program)
+{
+    if (!glad_glLinkProgram)
+        return;
+    bool video_program = false;
+    for (const auto& entry : g_shader_to_program) {
+        if (entry.second == program) {
+            video_program = true;
+            break;
+        }
+    }
+    glad_glLinkProgram(program);
+    if (!video_program)
+        return;
+    GLint status = 0;
+    glad_glGetProgramiv(program, GL_LINK_STATUS, &status);
+    GLint log_len = 0;
+    glad_glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
+    std::string info;
+    if (log_len > 1 && glad_glGetProgramInfoLog) {
+        info.resize((size_t)log_len);
+        GLsizei written = 0;
+        glad_glGetProgramInfoLog(program, log_len, &written, &info[0]);
+        info.resize((size_t)(written > 0 ? written : 0));
+        for (auto& ch : info) {
+            if (ch == '\n') ch = ' ';
+        }
+    }
+    BD_LOG("VIDEO", "link program %u (video) status=%d log=\"%s\"", program,
+           (int)status, info.c_str());
+    if (status == 0)
+        return;
+    g_video_programs.insert(program);
+}
+
+// Unity's video draw samples the texture bound at whichever unit it bound its
+// external texture to. Keep the loader's texture in place there, at the last
+// moment before the draw: Unity's GL state cache believes that unit holds its
+// own texture name (176) and re-binds it, silently undoing the redirect we did
+// when the guest bound the external texture. Observed right before the draw:
+//
+//   video draw #1 program=33 unit_2d=[176 0 0 0] unit_ext=[179 0 0 0] backing=177
+//
+// A shader rewritten from samplerExternalOES to sampler2D then samples that
+// empty texture, which is exactly the "black video, healthy decode" symptom.
+// Any unit where the guest bound an external texture is a video unit, so the
+// backing texture is always the intended binding there.
+static int fixup_video_bindings()
+{
+    const GLuint backing = bd_video::backing_texture();
+    if (backing == 0 || !glad_glBindTexture || !glad_glActiveTexture)
+        return 0;
+    int rebound = 0;
+    for (int unit = 0; unit < BD_MAX_UNITS; unit++) {
+        if (g_unit_ext[unit] == 0 || g_unit_2d[unit] == backing)
+            continue;
+        glad_glActiveTexture((GLenum)(0x84C0 + unit));
+        glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+        g_unit_2d[unit] = backing;
+        ++rebound;
+    }
+    if (rebound)
+        glad_glActiveTexture(g_active_unit);
+    return rebound;
+}
+
+// ---------------------------------------------------------------------------
+// Draw-time diagnostic: BD_VIDEO_DUMP_DRAW=1
+//
+// "The video quad shows the wrong part of the frame" cannot be answered from
+// the texture side - the pixels, the binding and the shader rewrite are all
+// correct - so the only remaining unknowns are the geometry and the texture
+// coordinates the guest submits, plus the uniforms the program reads. Dump
+// them for the first few video draws. Read-only: the array buffer binding is
+// saved and restored, nothing else is touched.
+// ---------------------------------------------------------------------------
+static bool bd_dump_draw_enabled()
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_VIDEO_DUMP_DRAW");
+        enabled = value && *value && strcmp(value, "0") != 0;
+    }
+    return enabled == 1;
+}
+
+// GL_FLOAT_VEC2..GL_FLOAT_MAT4 and friends -> element count, and whether the
+// uniform has to be read with glGetUniformiv instead of glGetUniformfv.
+static void bd_uniform_shape(GLenum type, int* elements, bool* integer)
+{
+    *integer = false;
+    switch (type) {
+        case 0x8B50: *elements = 2; break;  // FLOAT_VEC2
+        case 0x8B51: *elements = 3; break;  // FLOAT_VEC3
+        case 0x8B52: *elements = 4; break;  // FLOAT_VEC4
+        case 0x8B5A: *elements = 4; break;  // FLOAT_MAT2
+        case 0x8B5B: *elements = 9; break;  // FLOAT_MAT3
+        case 0x8B5C: *elements = 16; break; // FLOAT_MAT4
+        case 0x8B53: case 0x8B57: *elements = 2; *integer = true; break;
+        case 0x8B54: case 0x8B58: *elements = 3; *integer = true; break;
+        case 0x8B55: case 0x8B59: *elements = 4; *integer = true; break;
+        case 0x8B5E: case 0x8B60: case 0x8B5F: case 0x8B62: case 0x8D66:
+            *elements = 1; *integer = true; break;
+        case 0x1404: case 0x8B56: *elements = 1; *integer = true; break;
+        default: *elements = 1; break;      // FLOAT and anything unexpected
+    }
+}
+
+static void bd_dump_program(GLint program)
+{
+    if (!glad_glGetProgramiv || !glad_glGetActiveAttrib ||
+        !glad_glGetAttribLocation)
+        return;
+    GLint attribs = 0;
+    glad_glGetProgramiv(program, 0x8B89 /*ACTIVE_ATTRIBUTES*/, &attribs);
+    for (GLint i = 0; i < attribs && i < 12; i++) {
+        char name[128] = {};
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glad_glGetActiveAttrib(program, (GLuint)i, sizeof(name) - 1, &length,
+                               &size, &type, name);
+        BD_LOG("VIDEO", "  program %d attribute[%d] %s type=0x%x size=%d location=%d",
+               program, i, name, (unsigned)type, size,
+               glad_glGetAttribLocation(program, name));
+    }
+    if (!glad_glGetActiveUniform || !glad_glGetUniformfv ||
+        !glad_glGetUniformLocation)
+        return;
+    GLint uniforms = 0;
+    glad_glGetProgramiv(program, 0x8B86 /*ACTIVE_UNIFORMS*/, &uniforms);
+    for (GLint i = 0; i < uniforms && i < 24; i++) {
+        char name[128] = {};
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glad_glGetActiveUniform(program, (GLuint)i, sizeof(name) - 1, &length,
+                                &size, &type, name);
+        GLint location = glad_glGetUniformLocation(program, name);
+        if (location < 0)
+            continue;
+        int elements = 1;
+        bool integer = false;
+        bd_uniform_shape(type, &elements, &integer);
+        float floats[16] = {};
+        GLint ints[16] = {};
+        // Unity's hlslcc matrices are declared as `vec4 name[4]`, so
+        // glGetActiveUniform reports FLOAT_VEC4 with size 4 and reading the
+        // location of "name[0]" returns only the first column. The translation
+        // lives in the last column, so a half-dumped matrix cannot answer the
+        // only question worth asking - where the quad actually lands. Read every
+        // element when the name is an array.
+        const std::string base(name, (size_t)length);
+        const bool array_uniform =
+            base.size() > 3 && base.compare(base.size() - 3, 3, "[0]") == 0;
+        if (!integer && array_uniform && size > 1 && size <= 4) {
+            elements = size * 4;
+            for (GLint e = 0; e < size; e++) {
+                const std::string element =
+                    base.substr(0, base.size() - 3) + "[" + std::to_string(e) + "]";
+                const GLint element_loc =
+                    glad_glGetUniformLocation(program, element.c_str());
+                if (element_loc >= 0)
+                    glad_glGetUniformfv(program, element_loc, floats + e * 4);
+            }
+        } else if (integer) {
+            if (glad_glGetUniformiv)
+                glad_glGetUniformiv(program, location, ints);
+        } else {
+            glad_glGetUniformfv(program, location, floats);
+        }
+        std::string values;
+        for (int e = 0; e < elements; e++) {
+            char piece[32];
+            if (integer)
+                snprintf(piece, sizeof(piece), " %d", ints[e]);
+            else
+                snprintf(piece, sizeof(piece), " %.5f", floats[e]);
+            values += piece;
+        }
+        BD_LOG("VIDEO", "  program %d uniform[%d] %s type=0x%x size=%d loc=%d ->%s",
+               program, i, name, (unsigned)type, size, location, values.c_str());
+    }
+}
+
+// Bytes of one component for the vertex attribute types GLES actually uses.
+static int bd_component_bytes(GLenum type)
+{
+    switch (type) {
+        case 0x1400: case 0x1401: return 1;               // BYTE / UNSIGNED_BYTE
+        case 0x1402: case 0x1403: case 0x140B: return 2;  // SHORT / USHORT / HALF
+        case 0x1404: case 0x1405: case 0x1406: return 4;  // INT / UINT / FLOAT
+        case 0x140C: return 4;                            // FIXED
+        default: return 4;
+    }
+}
+
+// One vertex attribute, read straight out of whatever storage backs it. The
+// quad Unity submits for the video blit is small enough that the interesting
+// values (positions and texture coordinates) can be printed verbatim, which is
+// the only way to tell "quad sized for another resolution" apart from "quad
+// fine, viewport wrong".
+//
+// pnames matter: VERTEX_ATTRIB_ARRAY_STRIDE is 0x8624 and ..._TYPE is 0x8625
+// (not the other way round), and the buffer binding is 0x889F, not 0x8869.
+static void bd_dump_attribute(GLint index)
+{
+    GLint enabled = 0;
+    if (!glad_glGetVertexAttribiv)
+        return;
+    glad_glGetVertexAttribiv(index, 0x8622 /*ENABLED*/, &enabled);
+    if (!enabled)
+        return;
+    GLint size = 0;
+    GLint type = 0;
+    GLint stride = 0;
+    GLint normalized = 0;
+    GLint buffer = 0;
+    glad_glGetVertexAttribiv(index, 0x8623 /*SIZE*/, &size);
+    glad_glGetVertexAttribiv(index, 0x8625 /*TYPE*/, &type);
+    glad_glGetVertexAttribiv(index, 0x8624 /*STRIDE*/, &stride);
+    glad_glGetVertexAttribiv(index, 0x886A /*NORMALIZED*/, &normalized);
+    glad_glGetVertexAttribiv(index, 0x889F /*BUFFER_BINDING*/, &buffer);
+    void* pointer = nullptr;
+    if (glad_glGetVertexAttribPointerv)
+        glad_glGetVertexAttribPointerv(index, 0x8645 /*POINTER*/, &pointer);
+    const int packed = size * bd_component_bytes((GLenum)type);
+    const int step = stride > 0 ? stride : packed;
+    BD_LOG("VIDEO",
+           "  attrib[%d] size=%d type=0x%x normalized=%d stride=%d buffer=%d offset=%ld",
+           index, size, (unsigned)type, normalized, stride, buffer,
+           (long)(intptr_t)pointer);
+    if (step <= 0 || step > 4096)
+        return;
+
+    const GLsizeiptr span = (GLsizeiptr)step * 4;
+    uint8_t* base = nullptr;
+    GLint previous = 0;
+    const bool mapped = buffer != 0;
+    if (mapped) {
+        if (!glad_glMapBufferRange || !glad_glBindBuffer ||
+            !glad_glGetIntegerv)
+            return;
+        glad_glGetIntegerv(0x8894 /*ARRAY_BUFFER_BINDING*/, &previous);
+        glad_glBindBuffer(0x8892 /*ARRAY_BUFFER*/, (GLuint)buffer);
+        base = (uint8_t*)glad_glMapBufferRange(0x8892, 0, span,
+                                               0x0001 /*MAP_READ_BIT*/);
+    } else {
+        // GLES2 style client-side array: the pointer is a real host address.
+        base = (uint8_t*)pointer;
+    }
+    if (!base) {
+        if (mapped)
+            glad_glBindBuffer(0x8892, (GLuint)previous);
+        return;
+    }
+
+    for (int vertex = 0; vertex < 4; vertex++) {
+        const uint8_t* record = base + (size_t)vertex * (size_t)step;
+        std::string values;
+        for (GLint c = 0; c < size; c++) {
+            char piece[48];
+            if (type == 0x1406 /*FLOAT*/) {
+                if (normalized)
+                    snprintf(piece, sizeof(piece), " %.5f",
+                             ((const float*)record)[c]);
+                else
+                    snprintf(piece, sizeof(piece), " %.5f",
+                             ((const float*)record)[c]);
+            } else {
+                int raw = 0;
+                if (type == 0x1400 /*BYTE*/) raw = ((const int8_t*)record)[c];
+                else if (type == 0x1401 /*U_BYTE*/) raw = record[c];
+                else if (type == 0x1402 /*SHORT*/) raw = ((const int16_t*)record)[c];
+                else if (type == 0x1403 /*U_SHORT*/) raw = ((const uint16_t*)record)[c];
+                else if (type == 0x1405 /*U_INT*/) raw = (int)((const uint32_t*)record)[c];
+                else if (type == 0x1404 /*INT*/) raw = ((const int32_t*)record)[c];
+                else {
+                    // Unknown layout: show the raw bytes so it is still readable.
+                    snprintf(piece, sizeof(piece), " [%02x%02x%02x%02x]",
+                             record[c * 4], record[c * 4 + 1], record[c * 4 + 2],
+                             record[c * 4 + 3]);
+                    values += piece;
+                    continue;
+                }
+                snprintf(piece, sizeof(piece), " %d", raw);
+            }
+            values += piece;
+        }
+        BD_LOG("VIDEO", "    attrib[%d] vertex[%d]:%s", index, vertex,
+               values.c_str());
+    }
+
+    if (mapped) {
+        glad_glUnmapBuffer(0x8892);
+        glad_glBindBuffer(0x8892, (GLuint)previous);
+    }
+}
+
+// A UI draw is usually one batched call for dozens of widgets, so the first
+// four vertices say nothing about where the video quad is. Scan the whole
+// scanned range instead and print the extent: the batch's bounding box in its
+// own space, which together with the MVP says where the batch lands on screen.
+static void bd_dump_attribute_bounds(GLint index, GLsizei draw_vertices)
+{
+    GLint enabled = 0;
+    GLint size = 0;
+    GLint type = 0;
+    GLint stride = 0;
+    GLint buffer = 0;
+    if (!glad_glGetVertexAttribiv || !glad_glMapBufferRange || !glad_glBindBuffer ||
+        !glad_glGetIntegerv)
+        return;
+    glad_glGetVertexAttribiv(index, 0x8622 /*ENABLED*/, &enabled);
+    if (!enabled)
+        return;
+    glad_glGetVertexAttribiv(index, 0x8623 /*SIZE*/, &size);
+    glad_glGetVertexAttribiv(index, 0x8625 /*TYPE*/, &type);
+    glad_glGetVertexAttribiv(index, 0x8624 /*STRIDE*/, &stride);
+    glad_glGetVertexAttribiv(index, 0x889F /*BUFFER_BINDING*/, &buffer);
+    if (type != 0x1406 /*FLOAT*/ || buffer == 0 || size <= 0 || size > 4)
+        return;
+    const int step = stride > 0 ? stride : size * 4;
+    if (step <= 0 || step > 4096)
+        return;
+    GLsizei vertices = draw_vertices;
+    if (vertices <= 0)
+        vertices = 64;
+    if (vertices > 4096)
+        vertices = 4096;
+
+    GLint previous = 0;
+    glad_glGetIntegerv(0x8894 /*ARRAY_BUFFER_BINDING*/, &previous);
+    glad_glBindBuffer(0x8892 /*ARRAY_BUFFER*/, (GLuint)buffer);
+    // The draw's vertex count can exceed what the bound buffer holds (an
+    // indexed draw only needs one vertex per index), and a map bigger than the
+    // buffer just fails. Clamp to the buffer size so a batch of 43 quads still
+    // reports its bounding box.
+    GLint buffer_size = 0;
+    if (glad_glGetBufferParameteriv)
+        glad_glGetBufferParameteriv(0x8892, 0x8764 /*BUFFER_SIZE*/, &buffer_size);
+    if (buffer_size > 0 && (GLsizeiptr)step * vertices > buffer_size)
+        vertices = (GLsizei)(buffer_size / step);
+    if (vertices <= 0) {
+        glad_glBindBuffer(0x8892, (GLuint)previous);
+        return;
+    }
+    const uint8_t* base = (const uint8_t*)glad_glMapBufferRange(
+        0x8892, 0, (GLsizeiptr)step * vertices, 0x0001 /*MAP_READ_BIT*/);
+    if (base) {
+        float lo[4] = {1e30f, 1e30f, 1e30f, 1e30f};
+        float hi[4] = {-1e30f, -1e30f, -1e30f, -1e30f};
+        for (GLsizei vertex = 0; vertex < vertices; vertex++) {
+            const float* record = (const float*)(base + (size_t)vertex * step);
+            for (GLint c = 0; c < size; c++) {
+                if (record[c] < lo[c]) lo[c] = record[c];
+                if (record[c] > hi[c]) hi[c] = record[c];
+            }
+        }
+        BD_LOG("VIDEO", "  attrib[%d] bounds over %d verts: min=(%.3f,%.3f,%.3f) "
+                        "max=(%.3f,%.3f,%.3f)",
+               index, vertices, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+        glad_glUnmapBuffer(0x8892);
+    }
+    glad_glBindBuffer(0x8892, (GLuint)previous);
+}
+
+// The element buffer of an indexed draw: without it we know the vertex records
+// but not which four of them the two triangles actually use.
+static void bd_dump_indices(GLenum type, GLsizei count, const void* indices)
+{
+    if (!glad_glGetIntegerv || !glad_glBindBuffer || !glad_glMapBufferRange)
+        return;
+    GLint binding = 0;
+    glad_glGetIntegerv(0x8895 /*ELEMENT_ARRAY_BUFFER_BINDING*/, &binding);
+    const int width = type == 0x1405 /*UNSIGNED_INT*/ ? 4 : 2;
+    const int shown = count < 12 ? (int)count : 12;
+    std::string values;
+    if (binding == 0) {
+        // No element buffer: `indices` is a client array (already shown).
+        BD_LOG("VIDEO", "  element buffer: none (client indices=%p)", indices);
+        return;
+    }
+    glad_glBindBuffer(0x8893 /*ELEMENT_ARRAY_BUFFER*/, (GLuint)binding);
+    uint8_t* base = (uint8_t*)glad_glMapBufferRange(
+        0x8893, 0, (GLsizeiptr)width * shown, 0x0001 /*MAP_READ_BIT*/);
+    if (base) {
+        for (int i = 0; i < shown; i++) {
+            const int value = width == 4 ? (int)((const uint32_t*)base)[i]
+                                         : (int)((const uint16_t*)base)[i];
+            char piece[16];
+            snprintf(piece, sizeof(piece), " %d", value);
+            values += piece;
+        }
+        BD_LOG("VIDEO", "  element buffer %d indices[%d]:%s", binding, shown,
+               values.c_str());
+        glad_glUnmapBuffer(0x8893);
+    }
+    glad_glBindBuffer(0x8893, (GLuint)binding);
+}
+
+static void bd_dump_video_draw(const char* kind, GLenum mode, GLsizei count,
+                               GLenum type, const void* indices, GLint first,
+                               GLsizei instances)
+{
+    static int dumps = 0;
+    if (!bd_dump_draw_enabled() || dumps >= 3)
+        return;
+    ++dumps;
+    GLint program = 0;
+    GLint viewport[4] = {};
+    GLint scissor[4] = {};
+    GLint fbo = 0;
+    glad_glGetIntegerv(0x8B8D /*CURRENT_PROGRAM*/, &program);
+    glad_glGetIntegerv(0x0BA2 /*VIEWPORT*/, viewport);
+    glad_glGetIntegerv(0x0C10 /*SCISSOR_BOX*/, scissor);
+    glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
+    // The viewport is the whole story for "the video only shows in one corner":
+    // a quad built for 1280x720 drawn into a 640x480 viewport, or the reverse,
+    // both look like a cropped image. fbo=0 means the real window; anything
+    // else is a RenderTexture Unity blits from later.
+    BD_LOG("VIDEO",
+           "draw dump #%d %s mode=0x%x count=%d first=%d type=0x%x instances=%d "
+           "indices=%p fbo=%d viewport=[%d %d %d %d] scissor=[%d %d %d %d] "
+           "scissor_test=%d",
+           dumps, kind, (unsigned)mode, count, first, (unsigned)type, instances,
+           indices, fbo, viewport[0], viewport[1], viewport[2], viewport[3],
+           scissor[0], scissor[1], scissor[2], scissor[3],
+           glad_glIsEnabled ? (int)glad_glIsEnabled(0x0C11 /*SCISSOR_TEST*/) : -1);
+    bd_dump_program(program);
+    for (GLint i = 0; i < 8; i++)
+        bd_dump_attribute(i);
+    if (type == 0x1401 || type == 0x1403 || type == 0x1405)
+        bd_dump_indices(type, count, indices);
+}
+
+// ---------------------------------------------------------------------------
+// Where the video lands on screen: BD_VIDEO_TRACE_UI=1
+//
+// Unity's video pipeline draws twice. First the decode shader blits the decoder
+// texture into the game's RenderTexture (that draw is the "video program", and
+// the viewport dump shows the RT is 1280x720). Then the game shows that RT with
+// a RawImage under UIIntro/Video/Video1, and at that point only the UI layer
+// decides whether the clip is fitted or cropped.
+//
+// So remember the texture the decode blit rendered into, and when some later
+// draw samples it, dump that draw's geometry: a quad whose clip-space extent
+// leaves [-1, 1] is a quad larger than the screen, and on a 640x480 panel a
+// 1280x720-sized quad anchored bottom-left shows exactly the bottom-left
+// 640x480 of the clip - i.e. "the video is cropped", with the decoder innocent.
+// ---------------------------------------------------------------------------
+static GLuint g_video_rt_texture = 0;
+static uint64_t g_ui_dumps = 0;
+
+// Called for the decode blit: the currently bound framebuffer's colour
+// attachment is the RenderTexture the game will sample later.
+static void bd_remember_video_rt()
+{
+    if (!glad_glGetIntegerv) {
+        BD_LOG("VIDEO", "video RT probe: glGetIntegerv unavailable");
+        return;
+    }
+    GLint fbo = 0;
+    glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
+    BD_LOG("VIDEO", "video blit fbo=%d attachment-query=%s", fbo,
+           glad_glGetFramebufferAttachmentParameteriv ? "yes" : "no");
+    if (fbo == 0 || !glad_glGetFramebufferAttachmentParameteriv)
+        return;
+    GLint texture = 0;
+    glad_glGetFramebufferAttachmentParameteriv(
+        0x8D40 /*FRAMEBUFFER*/, 0x8CE0 /*COLOR_ATTACHMENT0*/,
+        0x8CD1 /*FRAMEBUFFER_ATTACHMENT_OBJECT_NAME*/, &texture);
+    // A renderbuffer attachment answers here too (with its own name), so this
+    // is "the attachment", not necessarily a texture.
+    if (texture == 0) {
+        BD_LOG("VIDEO", "video blit attachment 0 has no name");
+        return;
+    }
+    GLint viewport[4] = {};
+    glad_glGetIntegerv(0x0BA2 /*VIEWPORT*/, viewport);
+    // The blit covers the viewport, so a viewport smaller than the RT leaves the
+    // clip in one corner of it - and every later draw of that RT (the RawImage)
+    // then shows a cropped picture even though its own quad is the right size.
+    // Log both numbers together to tell that apart from a mis-sized UI quad.
+    GLint rt_w = 0;
+    GLint rt_h = 0;
+    if (glad_glActiveTexture && glad_glGetTexLevelParameteriv) {
+        GLint previous_unit = 0;
+        GLint previous_tex = 0;
+        glad_glGetIntegerv(0x84E0 /*ACTIVE_TEXTURE*/, &previous_unit);
+        glad_glActiveTexture(0x84C0 /*TEXTURE0*/);
+        glad_glGetIntegerv(0x8069 /*TEXTURE_BINDING_2D*/, &previous_tex);
+        glad_glBindTexture(0x0DE1 /*TEXTURE_2D*/, (GLuint)texture);
+        glad_glGetTexLevelParameteriv(0x0DE1, 0, 0x1000, &rt_w);
+        glad_glGetTexLevelParameteriv(0x0DE1, 0, 0x1001, &rt_h);
+        glad_glBindTexture(0x0DE1, (GLuint)previous_tex);
+        glad_glActiveTexture((GLenum)previous_unit);
+    }
+    if ((GLuint)texture == g_video_rt_texture)
+        return;
+    g_video_rt_texture = (GLuint)texture;
+    BD_LOG("VIDEO", "video blit target attachment 0 is object %u size=%dx%d "
+                    "viewport=[%d %d %d %d]",
+           g_video_rt_texture, rt_w, rt_h, viewport[0], viewport[1], viewport[2],
+           viewport[3]);
+}
+
+// A draw that samples the video RT: dump it once so the mapping is on record.
+static void bd_maybe_dump_ui_draw(const char* kind, GLenum mode, GLsizei count,
+                                  GLenum type, const void* indices, GLint first,
+                                  GLsizei instances)
+{
+    if (!bd_trace_ui_enabled() || g_video_rt_texture == 0 || g_ui_dumps >= 4)
+        return;
+    bool samples_video = false;
+    for (int unit = 0; unit < BD_MAX_UNITS; unit++)
+        if (g_unit_2d[unit] == g_video_rt_texture)
+            samples_video = true;
+    if (!samples_video)
+        return;
+
+    ++g_ui_dumps;
+    GLint viewport[4] = {};
+    GLint program = 0;
+    GLint fbo = 0;
+    glad_glGetIntegerv(0x0BA2 /*VIEWPORT*/, viewport);
+    glad_glGetIntegerv(0x8B8D /*CURRENT_PROGRAM*/, &program);
+    glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
+    BD_LOG("VIDEO",
+           "UI draw #%llu samples the video RT %u: %s count=%d first=%d program=%d "
+           "fbo=%d viewport=[%d %d %d %d] unit0=%u",
+           (unsigned long long)g_ui_dumps, g_video_rt_texture, kind, count, first,
+           program, fbo, viewport[0], viewport[1], viewport[2], viewport[3],
+           g_unit_2d[0]);
+    bd_dump_program(program);
+    for (GLint i = 0; i < 8; i++)
+        bd_dump_attribute(i);
+    if (type == 0x1401 || type == 0x1403 || type == 0x1405)
+        bd_dump_indices(type, count, indices);
+}
+
+// Which sampler uniforms a program declares, cached because a UI frame issues
+// dozens of draws and re-querying the interface every time is wasteful.
+struct BdSampler
+{
+    std::string name;
+    GLint location = -1;
+    GLenum type = 0;
+};
+static std::map<GLuint, std::vector<BdSampler>> g_program_samplers;
+
+// Does this draw actually *read* the video? The question cannot be answered by
+// looking at the bound textures: Unity draws plenty of passes whose shader has
+// no sampler at all, and those inherit whatever texture the last bind left on
+// unit 0. Ask the program which samplers it has, read the texture unit each one
+// points at, and compare that with the video textures. Only a draw that samples
+// the video texture can put the video on screen, so only that draw's transform
+// and geometry matter.
+static bool bd_draw_samples_video(GLint program, std::string* sampler,
+                                  int* unit_index, GLuint* texture)
+{
+    if (!glad_glGetActiveUniform || !glad_glGetUniformLocation ||
+        !glad_glGetUniformiv || !glad_glGetProgramiv)
+        return false;
+    const GLuint key = (GLuint)program;
+    auto entry = g_program_samplers.find(key);
+    if (entry == g_program_samplers.end()) {
+        std::vector<BdSampler> found;
+        GLint uniforms = 0;
+        glad_glGetProgramiv(program, 0x8B86 /*ACTIVE_UNIFORMS*/, &uniforms);
+        for (GLint i = 0; i < uniforms && i < 64; i++) {
+            char name[128] = {};
+            GLsizei length = 0;
+            GLint size = 0;
+            GLenum type = 0;
+            glad_glGetActiveUniform(program, (GLuint)i, sizeof(name) - 1, &length,
+                                    &size, &type, name);
+            const bool is_sampler =
+                (type >= 0x8B5E && type <= 0x8B62) || type == 0x8D66;
+            if (!is_sampler)
+                continue;
+            BdSampler info;
+            info.name.assign(name, (size_t)length);
+            info.location = glad_glGetUniformLocation(program, name);
+            info.type = type;
+            found.push_back(info);
+        }
+        entry = g_program_samplers.emplace(key, std::move(found)).first;
+    }
+
+    const GLuint backing = bd_video::backing_texture();
+    for (const BdSampler& info : entry->second) {
+        if (info.location < 0)
+            continue;
+        GLint unit = -1;
+        glad_glGetUniformiv(program, info.location, &unit);
+        if (unit < 0 || unit >= BD_MAX_UNITS)
+            continue;
+        const GLuint bound_2d = g_unit_2d[unit];
+        const GLuint bound_ext = g_unit_ext[unit];
+        const bool is_video =
+            (backing != 0 &&
+             (bound_2d == backing || bound_ext == backing)) ||
+            (g_video_rt_texture != 0 && bound_2d == g_video_rt_texture);
+        if (!is_video)
+            continue;
+        if (sampler)
+            *sampler = info.name;
+        if (unit_index)
+            *unit_index = unit;
+        if (texture)
+            *texture = bound_2d != 0 ? bound_2d : bound_ext;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry census for the video: BD_VIDEO_TRACE_UI=2
+//
+// Once the video texture exists, the draws that sample it are the whole story
+// of how the clip reaches the screen, so print them in full: program uniforms
+// (the MVP matrix included), every vertex attribute with size/stride, and the
+// index buffer. A quad whose positions are sized for a canvas other than 640x480
+// is a quad laid out for a different screen, which is how "only part of the
+// video is visible" happens.
+static int g_census_left = 0;
+static bool g_census_started = false;
+static uint64_t g_census_seen = 0;
+
+// Name/type/unit/current-texture of every sampler a program declares, as one
+// string. Printed for every draw in the census window: whether the video is on
+// screen at all comes down to which draw reads which texture, and this is the
+// line that says so without dumping megabytes.
+static std::string bd_sampler_summary(GLint program)
+{
+    std::string out;
+    if (!glad_glGetActiveUniform || !glad_glGetUniformLocation ||
+        !glad_glGetUniformiv || !glad_glGetProgramiv)
+        return "(no sampler API)";
+    GLint uniforms = 0;
+    glad_glGetProgramiv(program, 0x8B86 /*ACTIVE_UNIFORMS*/, &uniforms);
+    for (GLint i = 0; i < uniforms && i < 8; i++) {
+        char name[128] = {};
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glad_glGetActiveUniform(program, (GLuint)i, sizeof(name) - 1, &length,
+                                &size, &type, name);
+        const bool is_sampler =
+            (type >= 0x8B5E && type <= 0x8B62) || type == 0x8D66;
+        if (!is_sampler)
+            continue;
+        const GLint location = glad_glGetUniformLocation(program, name);
+        GLint unit = -1;
+        if (location >= 0)
+            glad_glGetUniformiv(program, location, &unit);
+        char piece[192];
+        if (unit >= 0 && unit < BD_MAX_UNITS) {
+            // The dimensions answer "is the sampler reading the game's
+            // 1280x720 video RT, a 640x360 decoded frame, or a sprite atlas?"
+            // without guessing from the texture name. Each unit already has the
+            // right texture bound, so only the active unit needs switching.
+            GLint width = 0;
+            GLint height = 0;
+            if (glad_glActiveTexture && glad_glGetTexLevelParameteriv &&
+                g_unit_2d[unit] != 0) {
+                GLint previous = 0;
+                glad_glGetIntegerv(0x84E0 /*ACTIVE_TEXTURE*/, &previous);
+                glad_glActiveTexture((GLenum)(0x84C0 + unit));
+                glad_glGetTexLevelParameteriv(0x0DE1 /*TEXTURE_2D*/, 0, 0x1000,
+                                              &width);
+                glad_glGetTexLevelParameteriv(0x0DE1 /*TEXTURE_2D*/, 0, 0x1001,
+                                              &height);
+                glad_glActiveTexture((GLenum)previous);
+            }
+            snprintf(piece, sizeof(piece), " %s(0x%x)@%d=2d:%u(%dx%d),ext:%u",
+                     name, (unsigned)type, unit, g_unit_2d[unit], width, height,
+                     g_unit_ext[unit]);
+        } else {
+            snprintf(piece, sizeof(piece), " %s(0x%x)@%d", name, (unsigned)type,
+                     unit);
+        }
+        out += piece;
+    }
+    return out.empty() ? "(none)" : out;
+}
+
+static void bd_quad_summary(const char* kind, GLenum mode, GLsizei count,
+                            GLenum type, const void* indices)
+{
+    if (bd_trace_ui_mode() < 2)
+        return;
+    if (g_census_left <= 0) {
+        // Start counting once a video frame is on the GPU: every draw from here
+        // on is a candidate for putting it on screen.
+        if (!g_video_frame_uploaded || g_census_started)
+            return;
+        g_census_started = true;
+        g_census_left = 300;
+        BD_LOG("VIDEO", "--- geometry census: every draw from the first uploaded "
+                        "video frame (300 max) ---");
+    }
+    --g_census_left;
+    ++g_census_seen;
+
+    GLint program = 0;
+    GLint fbo = 0;
+    GLint viewport[4] = {};
+    glad_glGetIntegerv(0x8B8D /*CURRENT_PROGRAM*/, &program);
+    glad_glGetIntegerv(0x0BA2 /*VIEWPORT*/, viewport);
+    glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
+    BD_LOG("VIDEO",
+           "census #%llu %s count=%d program=%d fbo=%d vp=[%d %d %d %d] "
+           "units_2d=[%u %u %u %u] units_ext=[%u %u %u %u] backing=%u rt=%u "
+           "samplers:%s",
+           (unsigned long long)g_census_seen, kind, count, program, fbo,
+           viewport[0], viewport[1], viewport[2], viewport[3], g_unit_2d[0],
+           g_unit_2d[1], g_unit_2d[2], g_unit_2d[3], g_unit_ext[0], g_unit_ext[1],
+           g_unit_ext[2], g_unit_ext[3], bd_video::backing_texture(),
+           g_video_rt_texture, bd_sampler_summary(program).c_str());
+
+    std::string sampler;
+    int unit = -1;
+    GLuint texture = 0;
+    const bool samples_video =
+        bd_draw_samples_video(program, &sampler, &unit, &texture);
+
+    // The clip does not necessarily reach the screen through the texture the
+    // loader recognises: Unity can blit it into a RenderTexture of its own and
+    // hand the RawImage that one, in which case nothing here mentions the
+    // backing texture and no draw ever samples the video RT either. A RawImage
+    // still submits a quad, though, so keep dumping quad-sized draws: their MVP
+    // says where on screen they land, which is the only question left.
+    if (!samples_video && count > 12)
+        return;
+
+    // A draw that samples the video *into* an FBO is Unity's own video blit, so
+    // that FBO's colour attachment is the RenderTexture the UI will show later.
+    // Remember it here: the guard that normally does this only runs for programs
+    // the loader rewrote, and with the bind swap alone no rewrite is needed.
+    if (samples_video && fbo != 0) {
+        bd_remember_video_rt();
+        bd_maybe_dump_ui_draw(kind, mode, count, type, indices, 0, 0);
+    }
+
+    if (samples_video) {
+        BD_LOG("VIDEO",
+               "=== the video itself: %s count=%d program=%d fbo=%d sampler=%s "
+               "unit=%d texture=%u",
+               kind, count, program, fbo, sampler.c_str(), unit, texture);
+    } else {
+        BD_LOG("VIDEO",
+               "--- small draw %s count=%d program=%d fbo=%d (no video sampler)",
+               kind, count, program, fbo);
+    }
+    if (glad_glGetActiveAttrib && glad_glGetAttribLocation) {
+        GLint attribs = 0;
+        glad_glGetProgramiv(program, 0x8B89 /*ACTIVE_ATTRIBUTES*/, &attribs);
+        for (GLint i = 0; i < attribs && i < 8; i++) {
+            char name[128] = {};
+            GLsizei length = 0;
+            GLint size = 0;
+            GLenum attrib_type = 0;
+            glad_glGetActiveAttrib(program, (GLuint)i, sizeof(name) - 1, &length,
+                                   &size, &attrib_type, name);
+            const GLint location = glad_glGetAttribLocation(program, name);
+            GLint enabled = 0;
+            GLint buffer = 0;
+            GLint stride = 0;
+            if (location >= 0)
+                glad_glGetVertexAttribiv((GLuint)location, 0x8622 /*ENABLED*/,
+                                         &enabled);
+            if (location >= 0)
+                glad_glGetVertexAttribiv((GLuint)location, 0x889F /*BUFFER*/,
+                                         &buffer);
+            if (location >= 0)
+                glad_glGetVertexAttribiv((GLuint)location, 0x8624 /*STRIDE*/,
+                                         &stride);
+            BD_LOG("VIDEO", "    attribute %d %s type=0x%x size=%d location=%d "
+                            "enabled=%d buffer=%d stride=%d",
+                   i, name, (unsigned)attrib_type, size, location, enabled, buffer,
+                   stride);
+        }
+    }
+    for (GLint i = 0; i < 8; i++)
+        bd_dump_attribute(i);
+    for (GLint i = 0; i < 4; i++)
+        bd_dump_attribute_bounds(i, count);
+    if (type == 0x1401 || type == 0x1403 || type == 0x1405)
+        bd_dump_indices(type, count, indices);
+    bd_dump_program(program);
+}
+
+// ---------------------------------------------------------------------------
+// Which texture holds the video: BD_VIDEO_TRACE_UI=3
+//
+// The shader reads whichever texture is bound at the unit its sampler uses. If
+// that turns out to be a texture Unity itself created for the video (i.e. it has
+// the clip's dimensions and is used nowhere else), the decoded frames can be
+// uploaded straight into it and the loader's own redirect texture - plus the
+// per-frame rebinding and the shader rewrite that goes with it - become
+// unnecessary. That would also make playback independent of the shader cache,
+// which is what silently kills the video when Unity loads a pre-compiled
+// program. Log the sizes to tell the two cases apart.
+static void bd_dump_unit_textures()
+{
+    if (bd_trace_ui_mode() < 3)
+        return;
+    static int logged = 0;
+    if (logged >= 6)
+        return;
+    ++logged;
+
+    GLint previous_unit = 0;
+    glad_glGetIntegerv(0x84E0 /*ACTIVE_TEXTURE*/, &previous_unit);
+    for (int unit = 0; unit < 4; unit++) {
+        if (g_unit_2d[unit] == 0 && g_unit_ext[unit] == 0)
+            continue;
+        glad_glActiveTexture((GLenum)(0x84C0 + unit));
+        const GLuint textures[2] = {g_unit_2d[unit], g_unit_ext[unit]};
+        const GLenum targets[2] = {BD_GL_TEXTURE_2D, BD_GL_TEXTURE_EXTERNAL_OES};
+        for (int i = 0; i < 2; i++) {
+            if (textures[i] == 0)
+                continue;
+            GLint width = -1;
+            GLint height = -1;
+            if (glad_glBindTexture && glad_glGetTexLevelParameteriv) {
+                glad_glBindTexture(targets[i], textures[i]);
+                glad_glGetTexLevelParameteriv(targets[i], 0, 0x1000 /*WIDTH*/,
+                                              &width);
+                glad_glGetTexLevelParameteriv(targets[i], 0, 0x1001 /*HEIGHT*/,
+                                              &height);
+            }
+            BD_LOG("VIDEO", "unit %d %s texture %u is %dx%d (backing=%u)", unit,
+                   i == 0 ? "2d " : "ext", textures[i], width, height,
+                   bd_video::backing_texture());
+        }
+    }
+    glad_glActiveTexture((GLenum)previous_unit);
+}
+
+template <typename DrawFn>
+static void video_draw_guard(DrawFn&& draw)
+{
+    if (g_video_program_active) {
+        bd_dump_unit_textures();
+        bd_remember_video_rt();
+        const int rebound = fixup_video_bindings();
+        if (rebound) {
+            static uint64_t fixed = 0;
+            if (++fixed <= 6 || (fixed % 300) == 0)
+                BD_LOG("VIDEO",
+                       "re-bound backing at %d unit(s) before video draw (#%llu)",
+                       rebound, (unsigned long long)fixed);
+        }
+    }
+    draw();
+}
+
+extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
+{
+    if (g_video_program_active)
+        bd_dump_video_draw("drawArrays", mode, count, 0, nullptr, first, 0);
+    else {
+        bd_maybe_dump_ui_draw("drawArrays", mode, count, 0, nullptr, first, 0);
+        bd_quad_summary("drawArrays", mode, count, 0, nullptr);
+    }
+    video_draw_guard([&] {
+        if (glad_glDrawArrays)
+            glad_glDrawArrays(mode, first, count);
+    });
+}
+
+extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
+                                   const void* indices)
+{
+    if (g_video_program_active)
+        bd_dump_video_draw("drawElements", mode, count, type, indices, 0, 0);
+    else {
+        bd_maybe_dump_ui_draw("drawElements", mode, count, type, indices, 0, 0);
+        bd_quad_summary("drawElements", mode, count, type, indices);
+    }
+    video_draw_guard([&] {
+        if (glad_glDrawElements)
+            glad_glDrawElements(mode, count, type, indices);
+    });
+}
+
+extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
+                                         GLsizei instances)
+{
+    if (g_video_program_active)
+        bd_dump_video_draw("drawArraysInstanced", mode, count, 0, nullptr, first,
+                           instances);
+    else
+        bd_quad_summary("drawArraysInstanced", mode, count, 0, nullptr);
+    video_draw_guard([&] {
+        if (glad_glDrawArraysInstanced)
+            glad_glDrawArraysInstanced(mode, first, count, instances);
+    });
+}
+
+extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
+                                           const void* indices, GLsizei instances)
+{
+    if (g_video_program_active)
+        bd_dump_video_draw("drawElementsInstanced", mode, count, type, indices, 0,
+                           instances);
+    else
+        bd_quad_summary("drawElementsInstanced", mode, count, type, indices);
+    video_draw_guard([&] {
+        if (glad_glDrawElementsInstanced)
+            glad_glDrawElementsInstanced(mode, count, type, indices, instances);
+    });
+}
+
+extern "C" void bd_glUseProgram(GLuint program)
+{
+    if (glad_glUseProgram)
+        glad_glUseProgram(program);
+    g_video_program_active = g_video_programs.count(program) > 0;
+    if (!g_video_program_active)
+        return;
+    static uint64_t uses = 0;
+    ++uses;
+    if (uses <= 12 || (uses % 120) == 0) {
+        BD_LOG("VIDEO",
+               "video draw #%llu program=%u unit_2d=[%u %u %u %u] unit_ext=[%u %u %u %u] backing=%u",
+               (unsigned long long)uses, program, g_unit_2d[0], g_unit_2d[1],
+               g_unit_2d[2], g_unit_2d[3], g_unit_ext[0], g_unit_ext[1],
+               g_unit_ext[2], g_unit_ext[3], bd_video::backing_texture());
+    }
+}
+
+extern "C" void bd_glTexParameteri(GLenum target, GLenum pname, GLint param)
+{
+    if (target == BD_GL_TEXTURE_EXTERNAL_OES && bd_video::backing_texture() != 0 &&
+        g_bound_tex_2d == bd_video::backing_texture())
+        target = BD_GL_TEXTURE_2D;
+    if (glad_glTexParameteri) glad_glTexParameteri(target, pname, param);
+}
+
+extern "C" void bd_glTexParameterf(GLenum target, GLenum pname, GLfloat param)
+{
+    if (target == BD_GL_TEXTURE_EXTERNAL_OES && bd_video::backing_texture() != 0 &&
+        g_bound_tex_2d == bd_video::backing_texture())
+        target = BD_GL_TEXTURE_2D;
+    if (glad_glTexParameterf) glad_glTexParameterf(target, pname, param);
 }
 
 extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
@@ -162,9 +1515,41 @@ extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
         for (GLsizei i = 0; i < n; i++) {
             g_tex_scales.erase((unsigned)textures[i]);
             if (textures[i] == g_bound_tex_2d) g_bound_tex_2d = 0;
+            if (textures[i] == bd_video::backing_texture())
+                bd_video::set_backing_texture(0);
+            // A deleted name can be handed out again, so it must not stay on the
+            // "this is the video texture" list.
+            g_guest_video_names.erase(textures[i]);
         }
     }
     if (glad_glDeleteTextures) glad_glDeleteTextures(n, textures);
+}
+
+extern "C" void bd_glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+    // The video blit legitimately runs in a 1280x720 viewport (Unity's video
+    // RenderTexture is the clip's size), so a wrong viewport there is normal.
+    // What cannot be normal is the DEFAULT framebuffer being set up for anything
+    // other than the drawable: GL clamps rasterization to the framebuffer, so a
+    // 1280x720 viewport on a 640x480 window shows the bottom-left quadrant of
+    // everything - UI and video alike - which reads as "the video is cropped".
+    if (glad_glGetIntegerv) {
+        GLint fbo = 0;
+        glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
+        const int drawable_w = bd_video::display_width();
+        const int drawable_h = bd_video::display_height();
+        if (fbo == 0 && drawable_w > 0 &&
+            (width != drawable_w || height != drawable_h)) {
+            static uint64_t offscreen = 0;
+            if (++offscreen <= 5 || (offscreen % 600) == 0)
+                BD_LOG("VIDEO",
+                       "screen viewport #%llu is %dx%d+%d+%d but the drawable is %dx%d",
+                       (unsigned long long)offscreen, width, height, x, y,
+                       drawable_w, drawable_h);
+        }
+    }
+    if (glad_glViewport)
+        glad_glViewport(x, y, width, height);
 }
 
 extern "C" void bd_glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
@@ -1209,4 +2594,23 @@ void load_gles2_funcs()
 	bd_symtable_override("glTexSubImage2D", (uintptr_t)&bd_glTexSubImage2D);
 	bd_symtable_override("glBindTexture", (uintptr_t)&bd_glBindTexture);
 	bd_symtable_override("glDeleteTextures", (uintptr_t)&bd_glDeleteTextures);
+	// [BD-VIDEO] VideoPlayer: external texture binds are redirected to a
+	// GL_TEXTURE_2D the loader fills from the MediaCodec thunk, and the blit
+	// shader's samplerExternalOES is rewritten to sampler2D.
+	bd_symtable_override("glShaderSource", (uintptr_t)&bd_glShaderSource);
+	bd_symtable_override("glAttachShader", (uintptr_t)&bd_glAttachShader);
+	bd_symtable_override("glLinkProgram", (uintptr_t)&bd_glLinkProgram);
+	bd_symtable_override("glUseProgram", (uintptr_t)&bd_glUseProgram);
+	bd_symtable_override("glDrawArrays", (uintptr_t)&bd_glDrawArrays);
+	bd_symtable_override("glDrawElements", (uintptr_t)&bd_glDrawElements);
+	bd_symtable_override("glDrawArraysInstanced", (uintptr_t)&bd_glDrawArraysInstanced);
+	bd_symtable_override("glDrawElementsInstanced", (uintptr_t)&bd_glDrawElementsInstanced);
+	bd_symtable_override("glActiveTexture", (uintptr_t)&bd_glActiveTexture);
+	bd_symtable_override("glViewport", (uintptr_t)&bd_glViewport);
+	bd_symtable_override("glTexParameteri", (uintptr_t)&bd_glTexParameteri);
+	bd_symtable_override("glTexParameterf", (uintptr_t)&bd_glTexParameterf);
+	bd_symtable_override("glEGLImageTargetTexture2DOES",
+	                     (uintptr_t)&bd_glEGLImageTargetTexture2DOES);
+	// Wire the bridge's per-frame upload to SurfaceTexture.updateTexImage().
+	bd_video::set_upload_hook(&bd_video_present);
 }

@@ -87,3 +87,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::media::AudioDeviceInfo) { FakeJni::Const
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::media::MediaCodec)
     END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::media::MediaCodecInfoCodecCapabilities)
+    { FakeJni::Field<&MediaCodecInfoCodecCapabilities::COLOR_FormatYUV420Planar> {},
+      "COLOR_FormatYUV420Planar", FakeJni::JFieldID::STATIC },
+    END_NATIVE_DESCRIPTOR

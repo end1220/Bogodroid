@@ -1,3 +1,4 @@
+#include "bd_video.h"
 #include "egl_sdl.h"
 #include "SDL2/SDL.h"
 #include "device_display.h"
@@ -88,9 +89,141 @@ static uint32_t bd_fb_channel(uint8_t value, const fb_bitfield& field)
         << field.offset;
 }
 
-static bool bd_cpu_present_frame()
+// Debug aid: dump real rendered frames to PPM so a black screen can be told
+// apart from a black video texture. Enabled by BD_DUMP_FRAME=<path prefix>
+// (nothing is written unless set); BD_DUMP_FRAME_AT selects the swap index
+// (default 600, i.e. ~10 s at 60 Hz) and the same offsets x2 and x3 are dumped
+// too, giving a short time series in one run.
+static void bd_dump_frame_if_requested()
 {
+    static int swap_index = 0;
+    ++swap_index;
+    const char* prefix = getenv("BD_DUMP_FRAME");
+    if (!prefix || !*prefix)
+        return;
+    const char* at_env = getenv("BD_DUMP_FRAME_AT");
+    int at = at_env && *at_env ? atoi(at_env) : 600;
+    if (at <= 0)
+        at = 600;
+    if (swap_index != at && swap_index != at * 2 && swap_index != at * 3)
+        return;
+
+    // Two independent sources, because neither alone is trustworthy here:
+    //   * glReadPixels on the GL drawable is what the app actually rendered;
+    //   * /dev/fb0 is what the panel shows (mali-fbdev page-flips between two
+    //     framebuffers, so the dumped half may be the one not on screen).
+    // Compare both to tell a black render from a bad present.
+    int gl_width = 0;
+    int gl_height = 0;
+    SDL_GL_GetDrawableSize(sdl_win, &gl_width, &gl_height);
+    if (gl_width > 0 && gl_height > 0 && glad_glReadPixels) {
+        std::vector<uint8_t> pixels(static_cast<size_t>(gl_width) * gl_height * 3u);
+        glad_glFinish();
+        glad_glReadPixels(0, 0, gl_width, gl_height, GL_RGB, GL_UNSIGNED_BYTE,
+                          pixels.data());
+        char path[512];
+        snprintf(path, sizeof(path), "%s.%d.gl.ppm", prefix, swap_index);
+        FILE* file = fopen(path, "wb");
+        if (file) {
+            fprintf(file, "P6\n%d %d\n255\n", gl_width, gl_height);
+            for (int y = gl_height - 1; y >= 0; --y)
+                fwrite(pixels.data() + static_cast<size_t>(y) * gl_width * 3u, 1,
+                       static_cast<size_t>(gl_width) * 3u, file);
+            fclose(file);
+            uint64_t sum = 0;
+            for (size_t i = 0; i < pixels.size(); i += 3)
+                sum += pixels[i];
+            BD_LOG("DUMP", "wrote %s (%dx%d) mean R=%llu", path, gl_width,
+                   gl_height,
+                   (unsigned long long)(sum / (pixels.size() / 3)));
+        }
+    } else {
+        BD_LOG("DUMP", "gl readback unavailable drawable=%dx%d readpixels=%p",
+               gl_width, gl_height, (void*)glad_glReadPixels);
+    }
+
+    // Read the panel framebuffer too. Format comes from fb_var_screeninfo, so
+    // BGR/RGB and byte order are handled rather than assumed.
     static int fb_fd = -1;
+    static uint8_t* fb_map = nullptr;
+    static fb_fix_screeninfo finfo = {};
+    static fb_var_screeninfo vinfo = {};
+    const char* note = "ok";
+    if (!fb_map) {        fb_fd = open("/dev/fb0", O_RDONLY | O_CLOEXEC);
+        if (fb_fd < 0 || ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) != 0 ||
+            ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) != 0) {
+            BD_LOG("DUMP", "fb0 unavailable fd=%d errno=%d", fb_fd, errno);
+            if (fb_fd >= 0)
+                close(fb_fd);
+            fb_fd = -1;
+            return;
+        }
+        void* mapped = mmap(nullptr, finfo.smem_len, PROT_READ, MAP_SHARED,
+                            fb_fd, 0);
+        if (mapped == MAP_FAILED) {
+            BD_LOG("DUMP", "fb0 mmap failed errno=%d", errno);
+            close(fb_fd);
+            fb_fd = -1;
+            return;
+        }
+        fb_map = static_cast<uint8_t*>(mapped);
+        BD_LOG("DUMP",
+               "fb0 %ux%u virtual=%ux%u yoffset=%u bpp=%u stride=%u "
+               "rgba=%u:%u/%u:%u/%u:%u/%u:%u",
+               vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
+               vinfo.yoffset, vinfo.bits_per_pixel, finfo.line_length,
+               vinfo.red.offset, vinfo.red.length, vinfo.green.offset,
+               vinfo.green.length, vinfo.blue.offset, vinfo.blue.length,
+               vinfo.transp.offset, vinfo.transp.length);
+    }
+    const uint32_t bytes_per_pixel = vinfo.bits_per_pixel / 8u;
+    const int width = std::min<int>(vinfo.xres, (int)finfo.line_length / (int)bytes_per_pixel);
+    const int height = vinfo.yres;
+    if (bytes_per_pixel < 3 || width <= 0 || height <= 0) {
+        BD_LOG("DUMP", "fb0 unsupported bpp=%u", vinfo.bits_per_pixel);
+        return;
+    }
+    const size_t plane = (size_t)vinfo.yoffset * finfo.line_length;
+
+    // mali-fbdev double-buffers: vinfo.yoffset is the buffer being displayed and
+    // the other half of the virtual height holds the one being rendered. Dump
+    // the displayed half first, then the back half, so a wrong guess is visible.
+    for (int buffer = 0; buffer < 2; ++buffer) {
+        const size_t offset = buffer == 0
+            ? plane
+            : (plane == 0 ? (size_t)height * finfo.line_length : 0);
+        char path[512];
+        snprintf(path, sizeof(path), "%s.%d.fb%d.ppm", prefix, swap_index,
+                 buffer);
+        FILE* file = fopen(path, "wb");
+        if (!file) {
+            BD_LOG("DUMP", "open %s failed errno=%d", path, errno);
+            continue;
+        }
+        fprintf(file, "P6\n%d %d\n255\n", width, height);
+        std::vector<uint8_t> row((size_t)width * 3u);
+        for (int y = 0; y < height; ++y) {
+            const uint8_t* src = fb_map + offset + (size_t)y * finfo.line_length;
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* pixel = src + (size_t)x * bytes_per_pixel;
+                row[(size_t)x * 3u + 0] = pixel[vinfo.red.offset / 8u];
+                row[(size_t)x * 3u + 1] = pixel[vinfo.green.offset / 8u];
+                row[(size_t)x * 3u + 2] = pixel[vinfo.blue.offset / 8u];
+            }
+            fwrite(row.data(), 1, row.size(), file);
+        }
+        fclose(file);
+        uint64_t sum = 0;
+        for (size_t i = 0; i < row.size(); i += 3)
+            sum += row[i];
+        BD_LOG("DUMP", "wrote %s (%dx%d, offset=%zu, mean R=%llu)", path, width,
+               height, offset,
+               (unsigned long long)(sum / (row.size() / 3)));
+    }
+}
+
+static bool bd_cpu_present_frame()
+{    static int fb_fd = -1;
     static uint8_t* fb_map = nullptr;
     static size_t fb_map_size = 0;
     static fb_fix_screeninfo finfo = {};
@@ -191,6 +324,175 @@ static void bd_log_sdl_display_mode(const char* label, int display_index)
     } else {
         BD_LOG("EGL_SDL", "%s display=%d current_mode unavailable: %s",
                label, display_index, SDL_GetError());
+    }
+}
+
+// Small helpers for reading the sysfs framebuffer files. Missing files are
+// normal (containers, KMS-only devices) and must never be fatal.
+static bool bd_read_small_file(const char* path, char* buf, size_t len)
+{
+    if (len == 0)
+        return false;
+    FILE* f = fopen(path, "r");
+    if (f == NULL)
+        return false;
+    size_t n = fread(buf, 1, len - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' '))
+        buf[--n] = '\0';
+    return n > 0;
+}
+
+// fb0's virtual_size covers the driver's buffers, so the panel's 640x480 shows
+// up as 640x960 (two frames stacked) on the H700. A whole multiple of the size
+// we are rendering is the same geometry with more buffers; anything else is a
+// genuinely different mode.
+static bool bd_fb_geometry_matches(int fb_w, int fb_h, int want_w, int want_h)
+{
+    if (want_w <= 0 || want_h <= 0)
+        return false;
+    if (fb_w == want_w && fb_h % want_h == 0 && fb_h / want_h <= 3)
+        return true;
+    if (fb_h == want_h && fb_w % want_w == 0 && fb_w / want_w <= 3)
+        return true;
+    return false;
+}
+
+// fb0 may have been left in a mode larger than the panel by whatever ran before
+// us (on the H700 the frontend dmenu.bin leaves 1280x1024 on a 640x480 panel).
+// SDL then creates its window inside that oversized framebuffer without
+// touching the mode, and the LCD ends up showing only one corner of the frame
+// while every GL query happily reports the size we asked for. That is exactly
+// how "the video is stuck in the bottom-left" looks from the outside.
+//
+// The size the guest was told the screen has is the only size the panel can
+// byte-for-byte display, so switch fb0 to the matching mode - before SDL_Init
+// reads the framebuffer - whenever the two disagree. Pure sysfs writes, no-op
+// when they already agree or when the driver refuses; BD_NO_FB_MODE=1 opts out.
+static void bd_fb_mode_align(int want_w, int want_h)
+{
+    if (want_w <= 0 || want_h <= 0)
+        return;
+    if (getenv("BD_NO_FB_MODE") != NULL) {
+        BD_LOG("EGL_SDL", "fb0 mode alignment disabled by BD_NO_FB_MODE");
+        return;
+    }
+
+    char cur[64] = {};
+    if (!bd_read_small_file("/sys/class/graphics/fb0/virtual_size", cur, sizeof(cur)))
+        return; // no fbdev here: nothing to align.
+
+    int fb_w = 0, fb_h = 0;
+    if (sscanf(cur, "%d,%d", &fb_w, &fb_h) != 2)
+        return;
+
+    // virtual_size covers the driver's buffers, so the panel's 640x480 shows up
+    // as 640x960 (two frames stacked) on the H700. Only a *different* geometry -
+    // e.g. the 1280x1024 a frontend may leave behind - is a problem.
+    if (bd_fb_geometry_matches(fb_w, fb_h, want_w, want_h)) {
+        BD_LOG("EGL_SDL", "fb0 %dx%d already matches the requested %dx%d",
+               fb_w, fb_h, want_w, want_h);
+        return;
+    }
+
+    char modes[1024] = {};
+    if (!bd_read_small_file("/sys/class/graphics/fb0/modes", modes, sizeof(modes))) {
+        BD_LOG("EGL_SDL", "WARNING fb0 is %dx%d but its modes could not be read",
+               fb_w, fb_h);
+        return;
+    }
+
+    char want[32] = {};
+    snprintf(want, sizeof(want), "%dx%d", want_w, want_h);
+
+    // Modes are newline separated, e.g. "U:1280x1024p-59\nU:640x480p-59".
+    std::string picked;
+    std::string listing = modes;
+    size_t pos = 0;
+    while (pos < listing.size()) {
+        size_t end = listing.find_first_of("\r\n", pos);
+        if (end == std::string::npos)
+            end = listing.size();
+        std::string line = listing.substr(pos, end - pos);
+        pos = end + 1;
+        if (line.empty())
+            continue;
+        size_t hit = line.find(want);
+        // "<w>x<h>" must end at the mode's refresh part or the end of the line,
+        // otherwise 640x480 would also match 640x4800.
+        if (hit != std::string::npos &&
+            (hit + strlen(want) >= line.size() ||
+             line[hit + strlen(want)] == 'p' || line[hit + strlen(want)] == '-' ||
+             line[hit + strlen(want)] == 'i')) {
+            picked = line;
+            break;
+        }
+    }
+
+    if (picked.empty()) {
+        BD_LOG("EGL_SDL",
+               "WARNING fb0 is %dx%d and has no %s mode (%s); leaving it alone - the "
+               "panel will show only part of the frame",
+               fb_w, fb_h, want, modes);
+        return;
+    }
+
+    int fd = open("/sys/class/graphics/fb0/mode", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        BD_LOG("EGL_SDL", "WARNING fb0 is %dx%d, could not open its mode: %s",
+               fb_w, fb_h, strerror(errno));
+        return;
+    }
+    std::string payload = picked + "\n";
+    ssize_t written = write(fd, payload.c_str(), payload.size());
+    int saved_errno = errno;
+    close(fd);
+    if (written != static_cast<ssize_t>(payload.size())) {
+        BD_LOG("EGL_SDL", "WARNING setting fb0 mode '%s' failed: %s",
+               picked.c_str(), strerror(saved_errno));
+        return;
+    }
+
+    // The driver never applies the mode synchronously; give it a moment so the
+    // log (and SDL's own mode query) describes the framebuffer we actually use.
+    usleep(120000);
+    char after[64] = {};
+    if (bd_read_small_file("/sys/class/graphics/fb0/virtual_size", after, sizeof(after)))
+        BD_LOG("EGL_SDL", "fb0 mode %s (was %dx%d) -> now %s",
+               picked.c_str(), fb_w, fb_h, after);
+    else
+        BD_LOG("EGL_SDL", "fb0 mode %s (was %dx%d) requested", picked.c_str(), fb_w, fb_h);
+}
+
+// Reports the same condition after the window exists, from the presentation
+// side: if fb0 is still bigger than the drawable, the swap is landing at an
+// offset. bd_fb_mode_align should have prevented this, so a hit here means the
+// mode write was refused (frontend holding fb0, no permission, missing mode).
+static void bd_panel_check(int drawable_w, int drawable_h)
+{
+    if (drawable_w <= 0 || drawable_h <= 0)
+        return;
+
+    char virtual_size[64] = {};
+    int fb_w = 0, fb_h = 0;
+    if (bd_read_small_file("/sys/class/graphics/fb0/virtual_size", virtual_size,
+                           sizeof(virtual_size)) &&
+        sscanf(virtual_size, "%d,%d", &fb_w, &fb_h) == 2) {
+        char modes[1024] = {};
+        bd_read_small_file("/sys/class/graphics/fb0/modes", modes, sizeof(modes));
+        if (!bd_fb_geometry_matches(fb_w, fb_h, drawable_w, drawable_h)) {
+            BD_LOG("EGL_SDL",
+                   "WARNING fb0 is %dx%d but the drawable is %dx%d: the panel only shows "
+                   "one %dx%d area of it, so the frame is presented at an offset and gets "
+                   "clipped. Modes: %s",
+                   fb_w, fb_h, drawable_w, drawable_h, drawable_w, drawable_h, modes);
+            BD_LOG("EGL_SDL",
+                   "WARNING set fb0 to the panel mode before launching "
+                   "(e.g. echo U:640x480p-59 > /sys/class/graphics/fb0/mode)");
+        } else {
+            BD_LOG("EGL_SDL", "fb0 %dx%d matches the drawable", fb_w, fb_h);
+        }
     }
 }
 
@@ -326,6 +628,22 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
 {
     bd_sdl_gl_make_current(sdl_ctx);
 
+    // Render thread, GL context current: hand any decoded video frame to the
+    // guest here so its updateTexImage()/upload runs against a live context.
+    // The drawable size goes with it - that is the only size the video texture
+    // needs to have, and the media thread uses it to avoid converting pixels the
+    // panel can never show.
+    {
+        int drawable_w = 0;
+        int drawable_h = 0;
+        if (sdl_win)
+            SDL_GL_GetDrawableSize(sdl_win, &drawable_w, &drawable_h);
+        bd_video::set_display_size(drawable_w, drawable_h);
+    }
+    bd_video::pump();
+
+    bd_dump_frame_if_requested();
+
     const char* cpu_present_value = getenv("BD_EGL_CPU_PRESENT");
     const bool cpu_present = cpu_present_value && *cpu_present_value &&
         strcmp(cpu_present_value, "0") != 0;
@@ -405,6 +723,14 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     if (egl_display)
         return egl_display;
 
+    // The size configured in the TOML (or fb0 when it is left at 0) is what the
+    // guest will be told the screen is. Make the framebuffer agree with it
+    // before SDL reads the geometry - a 640x480 window inside a 1280x1024 fb0
+    // is presented at an offset and looks like a video stuck in one corner.
+    // See bd_fb_mode_align.
+    bd_device_display_probe();
+    bd_fb_mode_align(bd_device_display_width(), bd_device_display_height());
+
     // Initialize SDL with video (GLEScene: then SDL_GetCurrentDisplayMode).
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fatal_error("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
@@ -452,6 +778,7 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     SDL_GL_GetDrawableSize(sdl_win, &drawable_w, &drawable_h);
     BD_LOG("EGL_SDL", "SDL drawable=%dx%d logical=%dx%d",
            drawable_w, drawable_h, requested_w, requested_h);
+    bd_panel_check(drawable_w, drawable_h);
 
     //
 

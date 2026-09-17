@@ -28,6 +28,8 @@ toml::table config;
 
 #include "anative_activity.h"
 #include "ndk.h"
+// Decode benchmark entry point (BD_MEDIA_BENCH); implemented in thunks/ndk/media.cpp.
+extern "C" void bd_media_bench(const char* path, int frames);
 
 #include "logging.h"
 
@@ -38,6 +40,7 @@ toml::table config;
 #include "gles2.h"
 #include "input_backend.h"
 #include "plugin_api.h"
+#include "shader_cache.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
 #include <cstdarg>
@@ -872,6 +875,14 @@ int main(int argc, char* argv[])
     print_backtrace_on_segfault(); // Registers a signal handler to print backtrace on segfaults
     exit_on_signals(); // Exits when CTRL-C is presset (or SIGINT or SIGTERM is received)
 
+    // Decode benchmark mode: measure FFmpeg on this CPU and exit without ever
+    // touching Unity. See bd_media_bench() in thunks/ndk/media.cpp.
+    if (const char* bench = getenv("BD_MEDIA_BENCH")) {
+        const char* frames = getenv("BD_MEDIA_BENCH_FRAMES");
+        bd_media_bench(bench, frames ? atoi(frames) : 0);
+        return 0;
+    }
+
     if (argc < 2) {
         fatal_error("Usage: %s <config file>\n", argv[0]);
         return -1;
@@ -881,6 +892,11 @@ int main(int argc, char* argv[])
 
     // Init config, GLES pointers, JNI VN and bindings
     init_config(config_path_abs.c_str());
+    // The video blit shader is rewritten at glShaderSource time, so a program
+    // cached by an earlier (or pre-rewrite) build would silently skip the
+    // rewrite and play the clip to an empty texture. Stamp the cache and drop it
+    // when the stamp does not match. See platform/common/shader_cache.h.
+    bd_shader_cache::prepare();
     // Load JNI-aware plugins before class registration. Plugins that need
     // IL2CPP defer this early phase and are loaded again below.
     plugin_host::set_jvm(&vm);
