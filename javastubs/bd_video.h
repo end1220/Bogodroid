@@ -22,16 +22,45 @@
 // closed by hand:
 //
 //   1. media.cpp hands every decoded frame it releases to submit_i420();
-//   2. bd_video converts it to RGBA, keeps it as the pending frame and runs the
-//      guest's OnFrameAvailableListener so Unity starts its blit;
+//   2. bd_video keeps I420 as the pending frame and runs the guest's
+//      OnFrameAvailableListener so Unity starts its blit;
 //   3. thunks/khronos/gles2.cpp redirects glBindTexture(GL_TEXTURE_EXTERNAL_OES,
 //      <video texture>) to a private GL_TEXTURE_2D (backing_texture()) that
-//      begin_upload()/end_upload() keeps current, and rewrites samplerExternalOES
-//      to sampler2D in glShaderSource so the blit shader reads that texture.
+//      the GPU YUV->RGB pass fills, and rewrites samplerExternalOES to sampler2D
+//      in glShaderSource so the blit shader reads that texture.
 //
 // Every entry point is safe to call when no video is playing: the bridge then
 // reports "nothing to do" and the loader behaves exactly as before.
 namespace bd_video {
+
+enum class UploadFormat {
+    RGBA8888,
+    I420,
+};
+
+enum class ColorMatrix {
+    Auto,
+    BT601,
+    BT709,
+};
+
+enum class ColorRange {
+    Auto,
+    Limited,
+    Full,
+};
+
+struct UploadFrame {
+    const uint8_t* pixels{};
+    size_t size{};
+    int width{};
+    int height{};
+    uint64_t serial{};
+    UploadFormat format{UploadFormat::RGBA8888};
+    bool flip{};
+    ColorMatrix color_matrix{ColorMatrix::BT601};
+    ColorRange color_range{ColorRange::Limited};
+};
 
 ///// SurfaceTexture JNI stub (javastubs/android_view.cpp)
 
@@ -76,16 +105,23 @@ using UploadHook = void (*)();
 void set_upload_hook(UploadHook hook);
 
 // Locks the frame buffer and hands back the newest frame that has not been
-// uploaded yet, or nullptr. The caller must call end_upload() once it is done
-// reading - glTexImage2D in between is the whole point.
-const uint8_t* begin_upload(int* width, int* height, uint64_t* serial);
+// uploaded yet. The caller must call end_upload() once it is done reading.
+// I420 is tightly packed as Y, U, V; RGBA8888 is the compatibility path.
+bool begin_upload(UploadFrame* frame);
 void end_upload();
+
+// The GPU presenter asks this before consuming a frame. If its private shader
+// or FBO cannot be created it permanently falls back to the old CPU converter
+// for this process; the next decoded frame will be RGBA.
+bool yuv_gpu_enabled();
+void fallback_to_rgba_cpu(const char* reason);
 
 // A decoded frame finished travelling through the codec. `packed` is tightly
 // packed I420 of `size` bytes (exactly what AMediaCodec_getOutputBuffer hands
 // out). Returns true when a sink accepted it.
 bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
-                 int64_t pts_us);
+                 int64_t pts_us, ColorMatrix color_matrix = ColorMatrix::Auto,
+                 ColorRange color_range = ColorRange::Auto);
 
 // Delivers a decoded frame to the guest's OnFrameAvailableListener. Must be
 // called from the render thread with the GL context current (the loader calls it

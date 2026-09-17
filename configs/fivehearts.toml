@@ -68,6 +68,14 @@ offline = true
 
 backend = "auto"
 
+[video]
+
+# Upload decoded I420 planes and convert them in GLES. Use "rgba_cpu" only as
+# a compatibility fallback when diagnosing a driver/shader problem.
+path = "yuv_gpu"
+# "auto" uses FFmpeg metadata; metadata-free HD clips use BT.709 limited.
+color_matrix = "auto" # auto | bt601 | bt709
+color_range = "auto"  # auto | limited | full
 
 [gpu]
 

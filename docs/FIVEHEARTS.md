@@ -6,8 +6,22 @@
 >
 > 掌机运行方式最早是会话里手敲出来的，这里固化，不要再凭记忆拼命令。
 >
-> 视频黑屏、面板偏移和 RenderTexture 被 `textureMaxDim` 误缩导致的裁切均已修复；
-> 关键判据与通用结论已归档到 [`CASE_STUDIES.md`](CASE_STUDIES.md)。
+> 视频黑屏、面板偏移已修复；`textureMaxDim` 误缩 RenderTexture 导致的裁切目前用
+> `textureMaxDim = 0` **绕过**（正经修法仍待做，见 §4.6）。关键判据与通用结论见
+> [`CASE_STUDIES.md`](CASE_STUDIES.md)。
+
+## 当前结论（先看）
+
+**已可用**：游戏可启动；视频可见且颜色正常；`yuv_gpu` 已把 I420→RGBA 从 CPU
+移到 GLES；854×480 低复杂度视频实测 23–28fps。
+
+**仍待解决（以 §4.6 为唯一权威清单）**：
+
+1. **异步 decode worker**：把 FFmpeg 软解移出 Unity 同步视频更新路径，并上机验证。
+2. **`textureMaxDim` 正确识别 RenderTarget**：当前只能设为 `0` 绕过裁切，尚未兼得
+   纹理省内存与 RT 尺寸正确。
+
+**暂缓**：H700 硬解接口不通；全局“稍微偏白”目前无法复现。
 
 ---
 
@@ -137,12 +151,12 @@ Unity 的 `VideoPlayer` 在 Android 上走 `AndroidVideoMedia`：`AMediaExtracto
 ```
 FFmpeg (thunks/ndk/media.cpp)
    └─ AMediaCodec 解出 I420 帧
-        └─ javastubs/bd_video.cpp   submit_i420(): I420 → RGBA，翻转，发布
+        └─ javastubs/bd_video.cpp   submit_i420(): 保存 I420，发布
              └─ bd_video::pump()    渲染线程（eglSwapBuffers）调用
                   └─ 通知 guest 的 OnFrameAvailableListener
                        └─ guest 调 SurfaceTexture.updateTexImage()
                             └─ upload hook = thunks/khronos/gles2.cpp bd_video_present()
-                                 └─ 上传到 loader 自己的 GL_TEXTURE_2D（backing）
+                                 └─ 上传 Y/U/V，GPU 色转到 GL_TEXTURE_2D（backing）
                                       └─ 视频四边形绘制时采样该纹理
 ```
 
@@ -164,106 +178,171 @@ FFmpeg (thunks/ndk/media.cpp)
 
 ---
 
-## 4. 根因：「视频黑屏、解码正常」= Unity 状态缓存把重定向顶掉了
+## 4. 已完成工作、性能与待办
 
-症状：日志里一切健康（codec 起、帧解出、`updateTexImage` 每帧调用、上传计数在涨），
-屏幕上视频区域纯黑，UI 正常。
+### 4.1 已解决问题摘要
 
-容器里抓帧 + 打点定位到的是**绘制那一刻的纹理绑定**（`thunks/khronos/gles2.cpp`）：
+以下问题已解决，只保留维护所需结论；详细取证见
+[`CASE_STUDIES.md`](CASE_STUDIES.md)：
 
-```
-[BD-VIDEO] uploaded frame #1 1280x720 -> texture 177
-[BD-VIDEO] redirect external bind 179 -> GL_TEXTURE_2D 177 (redirect #1..3)
-[BD-VIDEO] video draw #1 program=33 unit_2d=[176 0 0 0] unit_ext=[179 0 0 0] backing=177
-```
+- **视频黑屏**：Unity GL state cache 在 draw 前覆盖 external→2D 重定向。现于实际
+  draw 前重绑 backing texture，并用 shader-cache 版本戳淘汰旧程序。
+- **面板偏移**：启动前对齐 fb0 与 640×480 drawable。
+- **GPU 色转首版近乎全白**：FBO backing 覆盖 Y 采样单元形成反馈；draw 前重绑
+  Y/U/V 后修复。
+- **立即退出 134**：曾由 UTF-16 `unity.toml` 引起；配置必须是 UTF-8。
 
-即：我们按 external bind 把 177 绑到 unit 0，**但 Unity 自己的 GL state cache 认为
-unit 0 上应该是它自己的 176（它给 `SurfaceTexture` 用的纹理名），在画之前又绑了
-回去**，把重定向顶掉。shader 已经被改写成 `sampler2D`，于是它采样的是那个永远
-为空的 176 → 黑屏。
+`textureMaxDim` 裁切的**症状已绕过但机制未修复**，归入 §4.6 B，不列为已解决。
 
-验证手段（两个探针，缺一不可）：
+### 4.2 I420 三平面 GPU 色转（2026-09-17）
 
-* **渐变探针** `BD_VIDEO_DEBUG_GRADIENT=1`：把上传内容换成「R 沿 x 递增、G 沿 y 递增」
-  的高对比渐变。修好之前屏幕全黑；修好之后整屏是左上暗→右下亮的渐变（`look.sh`
-  一眼可辨）。这证明「视频四边形采样的是我们的纹理」。
-* **RGBA 转储** `BD_VIDEO_DUMP_FRAME=<前缀> BD_VIDEO_DUMP_AT=<帧号>`：把 `submit_i420`
-  产出的 RGBA 落成 PPM，用来把「数据错」和「采样错」分开。
+`[video] path = "yuv_gpu"`（默认）不再在 `submit_i420()` 热路径逐像素转 RGBA：
 
-修法（`thunks/khronos/gles2.cpp`）：**在绘制点重新断言绑定**。`glUseProgram` 记录
-当前程序是不是「由改写过的 shader 编译出来的视频程序」，`glDrawArrays/glDrawElements
-(/Instanced)` 在真正下发前，把 guest 绑过 external 纹理的那些 unit 上的 2D 绑定
-重新换回 backing：
+1. media 线程只复制紧凑 I420，保留 FFmpeg 的色彩矩阵/范围；
+2. render 线程上传 Y/U/V 三张 R8 纹理；
+3. 私有 GLES3 shader 转成 RGBA，画入原有 backing texture；
+4. Unity 的 external→2D 改写、VideoPlayer blit 和 RawImage 契约保持不变。
 
-```
-[BD-VIDEO] re-bound backing at 1 unit(s) before video draw (#1)
-```
+掌机 854×480 实测：I420 handoff 约 **0.56–0.61ms/帧**，三平面上传+GPU blit
+稳定后约 **1.9ms/帧**，`publish` **23–28fps**；旧 `rgba_cpu` 路径约
+**11ms/帧**（早期 1280×720 约 21ms）。GPU shader/FBO 初始化失败会自动退回
+`rgba_cpu`。
 
-修完的效果（容器实测，同一份日志目录）：
+色彩默认 `auto`：优先使用 FFmpeg 解码帧元数据，元数据缺失时 HD 用 BT.709
+limited、SD 用 BT.601 limited；可用 `[video] color_matrix`（`auto/bt601/bt709`）
+和 `color_range`（`auto/limited/full`）诊断覆盖。
 
-| 帧 | 修前 | 修后（渐变探针） | 修后（真实视频） |
-|---|---|---|---|
-| intro 期 | `mean=1 sd=15 centre=0`（全黑） | `mean=76 sd=21`（整屏渐变） | `mean=200 sd=37 centre=189` |
+H700 VPU 接入探测与 No-Go 依据见
+[`H700_VIDEO_DECODE_SPIKE.md`](H700_VIDEO_DECODE_SPIKE.md)。
 
-### 4.1 视频「只显示左下部分」= `textureMaxDim` 缩小了游戏的视频 RenderTexture
+### 4.3 当前状态与后续优化边界（2026-09-17）
 
-掌机（640x480）上视频"全屏显示原视频左下部分"，而编辑器/Android 真机正常。
-原因是 `[gpu] textureMaxDim = 512`：它挂在 `bd_glTexStorage2D()` 上缩放 RGBA8 纹理，
-只豁免「LUT 形状」和「尺寸**正好等于屏幕**」的纹理，而游戏建的是
-`new RenderTexture(1280, 720, ...)` → 1280x720 ≠ 640x480 → 被缩成 **512x288**。
-Unity 的 `glViewport` 仍是 `[0 0 1280 720]`，于是只有四边形的**左下 40% × 40%**
-落进 RT，UI 再把它铺满屏幕。
+当前掌机验证基线：
 
-判据（日志一眼可辨）：
-`video blit target attachment 0 is object 25 size=512x288 viewport=[0 0 1280 720]`
-—— attachment 尺寸与它自己的 viewport 不一致，比值 = `textureMaxDim / 长边`。
-**修法（已实测）**：掌机 `unity.toml` 设 `[gpu] textureMaxDim = 0` → 同一行变成
-`size=1280x720 viewport=[0 0 1280 720]`，画面完整；峰值 `rss≈402MB`，与开着 cap 时
-（330~430MB）同量级。完整分析见 [`CASE_STUDIES.md`](CASE_STUDIES.md) 案例三。
+- loader SHA-256：
+  `93d72132a502e14a8af89e574518a38a1278e1750a5c49e0579fcc65518b2d95`；
+- `[video] path = "yuv_gpu"`、色彩矩阵/范围均为 `auto`；
+- `[gpu] textureMaxDim = 0`；失败的 sRGB 实验代码未保留；
+- 不同离线编码的帧率对照见 §4.5；待办清单见 §4.6。
 
-### 4.2 顺带修掉的两个坑
+这里的“GPU 优化”不是 H.264 硬解。H.264 仍由 FFmpeg 在 CPU 上解成 I420；
+GPU 只接手原先由 CPU 完成的 I420→RGBA 色转。现阶段最大的剩余成本是软解本身，
+不是 I420 搬运或 GLES 色转。
 
-* **`libswscale` 不能用来做 I420→RGBA**。同一个转换，掌机的 `libswscale.so.5` 接受，
-  ubuntu 20.04 的那个直接拒绝：`No accelerated colorspace conversion found from
-  yuv420p to rgba.` → `sws_scale failed`；而掌机上同一个库还在负 stride 上 SIGSEGV。
-  现在 `bd_video.cpp` 用自己写的 `i420_to_rgba()`（BT.601 整数式，顺手把垂直翻转
-  合并进去），不再有版本差异，也去掉了那次 in-place 翻转。
-* **`log_gl_error()`**：Unity 只会打 `OPENGL NATIVE PLUG-IN ERROR: GL_INVALID_ENUM`
-  而不会说是哪次调用。重定向/上传后会 drain `glGetError` 并按调用点打点（实测这
-  两处都不产生错误，那条 INVALID_ENUM 来自 Unity 自己的某次一次性调用）。
+软解条件下、实现成本较低的试验（不替代 §4.6）：
+
+1. 用 `Release` + 全部日志关闭的构建复测；排障版逐帧日志会争用 CPU/I/O。
+2. 扫 `BD_MEDIA_THREADS=0/2/3/4` 与 `BD_MEDIA_FAST=1`，按 `decode=` 和
+   `publish:` 选择；`BD_MEDIA_SKIP_LOOP=1` 会损画质，只作备选。
+3. 离线编码继续降复杂度或降到 854×480 / 640×360（见 §4.5）。
+4. 双 PBO/减少 GL 状态保存只能抠约 1.9–3 ms 的上传色转，优先级低。
+
+H700 硬解当前仍是 No-Go：芯片有 Cedar 引擎，但系统没有 aarch64 CedarX，
+也没有可供 FFmpeg 接入的 V4L2 request/M2M H.264 decoder。除非补齐这些接口，
+否则不能把 32 位厂商 CedarX 库直接装进 64 位 unityloader。详见
+[`H700_VIDEO_DECODE_SPIKE.md`](H700_VIDEO_DECODE_SPIKE.md)。
+
+### 4.4 “稍微偏白”调查暂结（2026-09-17）
+
+Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任该 capability；相关
+代码和配置未保留。`/dev/fb0` 的 swap 300/600/900 抓帧及后续手工启动均正常，问题
+暂时无法复现。若重现，以 `/dev/fb0` 和 Android 同帧数值对比；Mali 下
+`glReadPixels` 曾返回全黑，不能单独作为颜色证据。
+
+### 4.5 离线编码参数对照（掌机，`yuv_gpu`，2026-09-17）
+
+同一 loader（SHA `93d72132…`）、同一路径 `yuv_gpu`，只换 APK 内
+`intro.bundle` / `lobby.bundle` 的视频编码。指标来自运行日志：
+
+- `publish:` — 客人真正看到的发布帧率（每 30 帧一条，稳态区间）
+- `decode=` — FFmpeg `send+drain` 墙钟时间
+- handoff / GPU — I420 交接与三平面上传+色转
+
+| 构建 / 意图 | 分辨率（日志） | intro.bundle | lobby.bundle | `publish` 稳态 | `decode` | handoff | 上传+GPU |
+|---|---|---:|---:|---|---|---|---|
+| 面板友好（约 854 宽） | **854×480** | — | — | **23–28 fps** | **~10.8 ms** | **~0.56 ms** | **~1.9 ms** |
+| 720p 低解码开销 | **1280×720** | 7,223,280 | 13,020,048 | **17–20 fps**（常见 18–20） | **~14–16 ms** | **~1.4–1.5 ms** | **~2.9 ms** |
+| 720p 更高画质 | **1280×720** | 8,000,480 | 14,684,112 | **12–15 fps**（常见 13–14） | **~20–22 ms** | **~1.45 ms** | **~2.95 ms** |
+
+补充：
+
+- 三次 `submits/publish` 均为 **1.0**：发布侧几乎不白烧解码帧；帧率差主要来自软解变慢，而不是丢帧门控。
+- 同为 720p 时，handoff / GPU 几乎不变；高画质相对低开销大约多付 **5–7 ms/帧** 在 H.264 软解上，`publish` 掉约 **30%**。
+- 854×480 相对 720p：像素量约少一半，handoff / GPU / 软解一起变轻，是目前最接近流畅的一档。
+- 旧对照（同机、改路径前）：`rgba_cpu` 在 854 量级色转约 **11 ms/帧**，早期全尺寸 720p CPU 色转约 **21 ms/帧**；现已由 GPU 色转取代热路径。
+- APK 指纹（便于复测）：低开销包 `C1AA5E37…E01479`（16:17）；高画质包 `1952B63D…31A73D2`（16:49）。视频在 AssetBundle 内，经 `AMediaDataSource` 读入；`conf/FiveHearts/video/INTRO.mp4` 若存在只是旧遗留，不参与本次 intro 播放。
+
+编码选型建议（软解、无硬解前提下）：优先 **854×480@30、低复杂度 H.264**（Baseline /
+B=0 / refs≤2）；若坚持 720p，用低开销档并接受约 18–20 fps，或降到 640×360。要在
+不降分辨率的前提下抬高流畅度，需实现并验证 §4.6 的异步 decode worker。
+
+### 4.6 未解决问题（唯一权威清单，2026-09-17）
+
+下列项**尚未落地**，只是已确认方向；不要把「已绕过 / 已讨论」当成「已完成」。
+
+#### A. 异步 decode worker（软解路径，优先）
+
+**问题**：FFmpeg `avcodec_send_packet` / `avcodec_receive_frame` 目前跟 Unity 的
+`AMediaCodec` 调用同步执行（常落在视频更新 / `UpdateTexture` 路径）。720p 高画质档
+`decode≈20–22 ms/帧`，会直接拉长该路径墙钟时间；`BD_MEDIA_THREADS` 只能让 FFmpeg
+内部并行，**调用线程仍要等这一帧解完**。
+
+**目标**：独立 worker 线程持续解码；MediaCodec 桩侧只做 packet 入队与取已解帧。
+Unity / 渲染相关路径不再同步支付软解时间。
+
+**建议实现要点**（`thunks/ndk/media.cpp`）：
+
+1. 每个视频 codec 一个 decode 线程（或共享线程池 + per-codec 队列）。
+2. `queueInputBuffer`：拷贝/移交 packet 到输入队列后立即返回。
+3. worker：循环 `avcodec_send_packet` + `avcodec_receive_frame`，产出写入现有
+   `pending` / 输出队列（保持 `MAX_QUEUED_OUTPUTS` 背压）。
+4. `dequeueOutputBuffer` / `releaseOutputBuffer`：只消费已就绪帧，再走现有
+   `submit_i420` → `yuv_gpu` 路径。
+5. 停机、seek、EOS、surface 重建时要能排空并 join，避免悬空 FFmpeg 上下文。
+
+**验收（掌机）**：
+
+| 指标 | 期望 |
+|---|---|
+| 同 APK（尤其 720p 高画质）`publish` | 相对同步路径明显上升；对照 §4.5 基线 |
+| Unity 视频更新路径上的 `decode=` / 同 tid 耗时 | 不再出现 ~15–22 ms 的 send+drain |
+| `submits/publish`、音画同步、seek | 不劣于现状；无卡死 / 泄漏 |
+| 与 `BD_MEDIA_THREADS` 组合 | 可保留内部多线程，但收益要单独测 |
+
+未经验证前，不要把「开了 FFmpeg 多线程」写成异步 decode 已完成。
+
+#### B. `textureMaxDim` 识别 RenderTarget（正经修法）
+
+**现状**：`textureMaxDim = 0` 绕过误缩视频 RT 的裁切；开 `>0` 仍会打到
+`glTexStorage2D` 创建的 RenderTexture（见 §4.1 / CASE_STUDIES 案例三）。
+
+**目标**：内容上传可继续 cap 省内存；被 `glFramebufferTexture2D` 挂成颜色附件的
+纹理（或明确的 RT 分配）不缩，viewport 与 attachment 尺寸保持一致。
+
+**验收**：同一标题可设合理 `textureMaxDimRGBA8>0`，视频 / 后处理 RT 日志中
+`attachment size == viewport`，画面不裁切；rss 相对全关 cap 有可测下降。
+
+#### C. 次级优化（待测，非阻塞）
+
+- 关闭全部日志的 Release 与日志版做同 APK 对照。
+- 扫 `BD_MEDIA_THREADS=0/2/3/4`、`BD_MEDIA_FAST=1`。
+- 双 PBO / 减少 GL 状态保存；仅覆盖约 1.9–3ms，优先级低。
+
+#### D. 明确不做 / 暂缓
+
+- H700 Cedar / V4L2 硬解：No-Go，见 spike 文档。
+- 仅凭 SDL `FRAMEBUFFER_SRGB_CAPABLE` 向 Unity 谎称 sRGB：已证会更白，实验代码不保留。
+- 「稍微偏白」全局调查：已暂结（§4.4）。
 
 ---
 
 ## 5. 容器 ≠ 掌机（判读差异用）
 
-* GL：容器是 `Mesa 21.2.6 llvmpipe`（GLES 3.2），掌机是 Mali。`GL_OES_EGL_image_external`
-  两边都有，但 llvmpipe 走的是软件路径。
-* **UnityShaderCache 是关键变量**：Unity 会把编译好的程序缓存进 `cache/UnityShaderCache`。
-  命中缓存时**根本不调 `glShaderSource`**，我们改写的 shader 也就没机会生效
-  （日志里 `shader N: samplerExternalOES -> sampler2D` 一行都不会出现）。
-  2026-09-16 起 loader 自己管这件事：`bd_shader_cache::prepare()` 给每个缓存目录写
-  `.bd_rewrite = <BD_SHADER_REWRITE_VERSION>`，戳不匹配就整目录丢掉重编，日志：
-
-  ```
-  [BD-SHADER] shader cache ./assets/bin/cache/UnityShaderCache: found in the port tree -> dropped 1 entries, stamp=2
-  ```
-
-  所以现在通常**不需要**手动删缓存；只有在查「旧 loader 写的缓存」时才手动删：
-
-  ```bash
-  rm -rf "$GAME/cache/UnityShaderCache"     # Windows: rmdir /s /q ...
-  ```
-
-  反过来说，第一次带改写的运行之后，缓存里存的就是**已改写**的程序，后续不再需要删。
-  但掌机上如果缓存是旧 loader（没有改写）写的，就会一直黑 —— 排查视频黑屏时先删它。
-* **性能**：qemu + llvmpipe 慢很多。容器里 Unity 可能 40 秒只画 2 次视频四边形，
-  所以「容器里视频不逐帧动」不能直接判成 bug；判「能不能动」要回掌机看
-  `updateTexImage #N` 的计数是否持续增长。
-* **Xvfb 竞态**：`run.sh/frames.sh` 已经用 `xdpyinfo` 轮询到 X 真的能连上才启动
-  loader。裸 `sleep 2` 在 qemu 下会随机让 `SDL_Init` 失败 → `fatal_error` →
-  SIGABRT，看起来像 Unity 崩了。
-* **日志量**：`BD_ENABLE_TRACE` 会打开 `[BD-ASSET]`/`[BD-WROPEN]` 等，容器排障可以开，
-  上机发布不要开。
+- 容器是 qemu + llvmpipe，掌机是 Mali；容器只适合功能回归和相对对照，绝对帧率、
+  音频与实屏颜色必须上机验收。
+- shader cache 已由版本戳管理；只有怀疑旧 loader 缓存时才手动删
+  `cache/UnityShaderCache`。
+- 上机发布使用 Release 且关闭 LOG/TRACE/VERBOSE；排障版日志会影响性能。
 
 ---
 

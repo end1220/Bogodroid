@@ -162,6 +162,12 @@ static const GLenum BD_GL_TEXTURE_WRAP_S = 0x2802;
 static const GLenum BD_GL_TEXTURE_WRAP_T = 0x2803;
 static const GLenum BD_GL_LINEAR = 0x2601;
 static const GLenum BD_GL_CLAMP_TO_EDGE = 0x812F;
+static const GLenum BD_GL_RED = 0x1903;
+static const GLenum BD_GL_R8 = 0x8229;
+static const GLenum BD_GL_READ_FRAMEBUFFER = 0x8CA8;
+static const GLenum BD_GL_DRAW_FRAMEBUFFER = 0x8CA9;
+static const GLenum BD_GL_COLOR_ATTACHMENT0 = 0x8CE0;
+static const GLenum BD_GL_FRAMEBUFFER_COMPLETE = 0x8CD5;
 
 static uint64_t g_video_uploads = 0;
 static uint64_t g_video_redirects = 0;
@@ -175,6 +181,22 @@ static uint64_t g_video_swaps = 0;
 static int g_video_tex_w = 0;
 static int g_video_tex_h = 0;
 static uint32_t g_upload_ms = 0;
+static uint32_t g_yuv_blit_ms = 0;
+
+struct BD_YuvGpu {
+    GLuint textures[3]{};
+    GLuint framebuffer{};
+    GLuint program{};
+    GLuint vertex_array{};
+    GLint sampler[3]{-1, -1, -1};
+    GLint flip{-1};
+    GLint bt709{-1};
+    GLint full_range{-1};
+    int width{};
+    int height{};
+    bool failed{};
+};
+static BD_YuvGpu g_yuv_gpu;
 
 // True once a decoded frame has been uploaded into the backing texture
 // (bd_video_present). The UI geometry census (BD_VIDEO_TRACE_UI=2) starts from
@@ -225,6 +247,10 @@ static GLuint bd_ensure_backing_texture()
         return backing;
     if (!glad_glGenTextures || !glad_glBindTexture || !glad_glTexParameteri)
         return 0;
+    GLint previous_texture = 0;
+    const unsigned previous_shadow = g_bound_tex_2d;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8069 /*TEXTURE_BINDING_2D*/, &previous_texture);
     glad_glGenTextures(1, &backing);
     glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
     glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER, BD_GL_LINEAR);
@@ -232,7 +258,9 @@ static GLuint bd_ensure_backing_texture()
     glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_S, BD_GL_CLAMP_TO_EDGE);
     glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_T, BD_GL_CLAMP_TO_EDGE);
     bd_video::set_backing_texture(backing);
-    g_bound_tex_2d = backing;
+    // Texture creation is private loader work, not a guest bind.
+    glad_glBindTexture(BD_GL_TEXTURE_2D, (GLuint)previous_texture);
+    g_bound_tex_2d = previous_shadow;
     // New texture: nothing is allocated yet, so the next upload must be a full
     // glTexImage2D, not a glTexSubImage2D into nothing.
     g_video_tex_w = 0;
@@ -255,6 +283,328 @@ static bool bd_redirect_video_bind(GLuint texture)
     return true;
 }
 
+static GLuint bd_compile_yuv_shader(GLenum type, const char* source)
+{
+    if (!glad_glCreateShader || !glad_glShaderSource || !glad_glCompileShader ||
+        !glad_glGetShaderiv || !glad_glGetShaderInfoLog)
+        return 0;
+    const GLuint shader = glad_glCreateShader(type);
+    if (!shader)
+        return 0;
+    glad_glShaderSource(shader, 1, &source, nullptr);
+    glad_glCompileShader(shader);
+    GLint ok = 0;
+    glad_glGetShaderiv(shader, 0x8B81 /*GL_COMPILE_STATUS*/, &ok);
+    if (!ok) {
+        char message[1024]{};
+        GLsizei length = 0;
+        glad_glGetShaderInfoLog(shader, sizeof(message) - 1, &length, message);
+        BD_LOG("VIDEO", "YUV shader compile failed: %s", message);
+        if (glad_glDeleteShader)
+            glad_glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static bool bd_init_yuv_gpu()
+{
+    if (g_yuv_gpu.program)
+        return true;
+    if (g_yuv_gpu.failed)
+        return false;
+    if (!glad_glCreateProgram || !glad_glAttachShader || !glad_glLinkProgram ||
+        !glad_glGetProgramiv || !glad_glGetProgramInfoLog ||
+        !glad_glGenTextures || !glad_glGenFramebuffers ||
+        !glad_glGetUniformLocation) {
+        g_yuv_gpu.failed = true;
+        return false;
+    }
+
+    static const char* vertex_source =
+        "#version 300 es\n"
+        "out vec2 v_uv;\n"
+        "void main() {\n"
+        "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+        "  v_uv = p;\n"
+        "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+        "}\n";
+    static const char* fragment_source =
+        "#version 300 es\n"
+        "precision mediump float;\n"
+        "in vec2 v_uv;\n"
+        "layout(location=0) out vec4 out_color;\n"
+        "uniform sampler2D tex_y;\n"
+        "uniform sampler2D tex_u;\n"
+        "uniform sampler2D tex_v;\n"
+        "uniform bool flip_y;\n"
+        "uniform bool use_bt709;\n"
+        "uniform bool full_range;\n"
+        "void main() {\n"
+        "  vec2 uv = vec2(v_uv.x, flip_y ? 1.0-v_uv.y : v_uv.y);\n"
+        "  float raw_y = texture(tex_y, uv).r * 255.0;\n"
+        "  float raw_u = texture(tex_u, uv).r * 255.0 - 128.0;\n"
+        "  float raw_v = texture(tex_v, uv).r * 255.0 - 128.0;\n"
+        "  float y = full_range ? raw_y/255.0 : (raw_y-16.0)/219.0;\n"
+        "  float u = raw_u / (full_range ? 255.0 : 224.0);\n"
+        "  float v = raw_v / (full_range ? 255.0 : 224.0);\n"
+        "  vec3 rgb;\n"
+        "  if (use_bt709)\n"
+        "    rgb = vec3(y+1.5748*v, y-0.187324*u-0.468124*v, y+1.8556*u);\n"
+        "  else\n"
+        "    rgb = vec3(y+1.402*v, y-0.344136*u-0.714136*v, y+1.772*u);\n"
+        "  out_color = vec4(clamp(rgb, 0.0, 1.0), 1.0);\n"
+        "}\n";
+    const GLuint vertex = bd_compile_yuv_shader(0x8B31 /*GL_VERTEX_SHADER*/,
+                                                 vertex_source);
+    const GLuint fragment = bd_compile_yuv_shader(0x8B30 /*GL_FRAGMENT_SHADER*/,
+                                                   fragment_source);
+    if (!vertex || !fragment) {
+        if (vertex && glad_glDeleteShader) glad_glDeleteShader(vertex);
+        if (fragment && glad_glDeleteShader) glad_glDeleteShader(fragment);
+        g_yuv_gpu.failed = true;
+        return false;
+    }
+    const GLuint program = glad_glCreateProgram();
+    glad_glAttachShader(program, vertex);
+    glad_glAttachShader(program, fragment);
+    glad_glLinkProgram(program);
+    GLint linked = 0;
+    glad_glGetProgramiv(program, 0x8B82 /*GL_LINK_STATUS*/, &linked);
+    if (glad_glDeleteShader) {
+        glad_glDeleteShader(vertex);
+        glad_glDeleteShader(fragment);
+    }
+    if (!linked) {
+        char message[1024]{};
+        GLsizei length = 0;
+        glad_glGetProgramInfoLog(program, sizeof(message) - 1, &length, message);
+        BD_LOG("VIDEO", "YUV program link failed: %s", message);
+        if (glad_glDeleteProgram)
+            glad_glDeleteProgram(program);
+        g_yuv_gpu.failed = true;
+        return false;
+    }
+
+    g_yuv_gpu.program = program;
+    g_yuv_gpu.sampler[0] = glad_glGetUniformLocation(program, "tex_y");
+    g_yuv_gpu.sampler[1] = glad_glGetUniformLocation(program, "tex_u");
+    g_yuv_gpu.sampler[2] = glad_glGetUniformLocation(program, "tex_v");
+    g_yuv_gpu.flip = glad_glGetUniformLocation(program, "flip_y");
+    g_yuv_gpu.bt709 = glad_glGetUniformLocation(program, "use_bt709");
+    g_yuv_gpu.full_range =
+        glad_glGetUniformLocation(program, "full_range");
+    glad_glGenTextures(3, g_yuv_gpu.textures);
+    glad_glGenFramebuffers(1, &g_yuv_gpu.framebuffer);
+    if (glad_glGenVertexArrays)
+        glad_glGenVertexArrays(1, &g_yuv_gpu.vertex_array);
+    if (!g_yuv_gpu.textures[0] || !g_yuv_gpu.textures[1] ||
+        !g_yuv_gpu.textures[2] || !g_yuv_gpu.framebuffer) {
+        g_yuv_gpu.failed = true;
+        return false;
+    }
+    BD_LOG("VIDEO", "YUV GPU path ready: program=%u textures=%u/%u/%u fbo=%u",
+           program, g_yuv_gpu.textures[0], g_yuv_gpu.textures[1],
+           g_yuv_gpu.textures[2], g_yuv_gpu.framebuffer);
+    return true;
+}
+
+static void bd_set_texture_parameters()
+{
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER, BD_GL_LINEAR);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER, BD_GL_LINEAR);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_S, BD_GL_CLAMP_TO_EDGE);
+    glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_WRAP_T, BD_GL_CLAMP_TO_EDGE);
+}
+
+static bool bd_present_i420(const bd_video::UploadFrame& frame, GLuint backing)
+{
+    if (!bd_init_yuv_gpu())
+        return false;
+
+    GLint previous_program = 0;
+    GLint previous_draw_fbo = 0;
+    GLint previous_read_fbo = 0;
+    GLint previous_viewport[4]{};
+    GLint previous_active = 0;
+    GLint previous_unpack = 4;
+    GLint previous_unpack_row_length = 0;
+    GLint previous_unpack_skip_rows = 0;
+    GLint previous_unpack_skip_pixels = 0;
+    GLint previous_unpack_buffer = 0;
+    GLint previous_array_buffer = 0;
+    GLint previous_vertex_array = 0;
+    GLint previous_texture[3]{};
+    GLint previous_sampler[3]{};
+    const unsigned previous_shadow_bound = g_bound_tex_2d;
+    GLboolean previous_color_mask[4]{1, 1, 1, 1};
+    const GLenum toggles[] = {
+        0x0BE2 /*BLEND*/, 0x0B71 /*DEPTH_TEST*/, 0x0B44 /*CULL_FACE*/,
+        0x0C11 /*SCISSOR_TEST*/, 0x0B90 /*STENCIL_TEST*/,
+        0x8C89 /*RASTERIZER_DISCARD*/, 0x0BD0 /*DITHER*/
+    };
+    GLboolean enabled[sizeof(toggles) / sizeof(toggles[0])]{};
+    glad_glGetIntegerv(0x8B8D /*CURRENT_PROGRAM*/, &previous_program);
+    glad_glGetIntegerv(0x8CA6 /*DRAW_FRAMEBUFFER_BINDING*/,
+                       &previous_draw_fbo);
+    glad_glGetIntegerv(0x8CAA /*READ_FRAMEBUFFER_BINDING*/,
+                       &previous_read_fbo);
+    glad_glGetIntegerv(0x0BA2 /*VIEWPORT*/, previous_viewport);
+    glad_glGetIntegerv(0x84E0 /*ACTIVE_TEXTURE*/, &previous_active);
+    glad_glGetIntegerv(0x0CF5 /*UNPACK_ALIGNMENT*/, &previous_unpack);
+    glad_glGetIntegerv(0x0CF2 /*UNPACK_ROW_LENGTH*/,
+                       &previous_unpack_row_length);
+    glad_glGetIntegerv(0x0CF3 /*UNPACK_SKIP_ROWS*/,
+                       &previous_unpack_skip_rows);
+    glad_glGetIntegerv(0x0CF4 /*UNPACK_SKIP_PIXELS*/,
+                       &previous_unpack_skip_pixels);
+    glad_glGetIntegerv(0x88EF /*PIXEL_UNPACK_BUFFER_BINDING*/,
+                       &previous_unpack_buffer);
+    glad_glGetIntegerv(0x8894 /*ARRAY_BUFFER_BINDING*/,
+                       &previous_array_buffer);
+    if (glad_glBindVertexArray)
+        glad_glGetIntegerv(0x85B5 /*VERTEX_ARRAY_BINDING*/,
+                           &previous_vertex_array);
+    if (glad_glGetBooleanv)
+        glad_glGetBooleanv(0x0C23 /*COLOR_WRITEMASK*/, previous_color_mask);
+    for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i)
+        enabled[i] = glad_glIsEnabled ? glad_glIsEnabled(toggles[i]) : false;
+    for (int plane = 0; plane < 3; ++plane) {
+        glad_glActiveTexture((GLenum)(0x84C5 + plane)); // texture units 5..7
+        glad_glGetIntegerv(0x8069 /*TEXTURE_BINDING_2D*/,
+                           &previous_texture[plane]);
+        if (glad_glBindSampler)
+            glad_glGetIntegerv(0x8919 /*SAMPLER_BINDING*/,
+                               &previous_sampler[plane]);
+    }
+
+    const size_t y_size = (size_t)frame.width * (size_t)frame.height;
+    const size_t uv_size = y_size / 4;
+    const uint8_t* planes[] = {
+        frame.pixels, frame.pixels + y_size, frame.pixels + y_size + uv_size
+    };
+    glad_glPixelStorei(0x0CF5 /*UNPACK_ALIGNMENT*/, 1);
+    glad_glPixelStorei(0x0CF2 /*UNPACK_ROW_LENGTH*/, 0);
+    glad_glPixelStorei(0x0CF3 /*UNPACK_SKIP_ROWS*/, 0);
+    glad_glPixelStorei(0x0CF4 /*UNPACK_SKIP_PIXELS*/, 0);
+    if (glad_glBindBuffer) {
+        glad_glBindBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/, 0);
+        glad_glBindBuffer(0x8892 /*ARRAY_BUFFER*/, 0);
+    }
+    for (int plane = 0; plane < 3; ++plane) {
+        const int width = plane == 0 ? frame.width : frame.width / 2;
+        const int height = plane == 0 ? frame.height : frame.height / 2;
+        glad_glActiveTexture((GLenum)(0x84C5 + plane));
+        if (glad_glBindSampler)
+            glad_glBindSampler(5 + plane, 0);
+        glad_glBindTexture(BD_GL_TEXTURE_2D, g_yuv_gpu.textures[plane]);
+        if (frame.width != g_yuv_gpu.width || frame.height != g_yuv_gpu.height) {
+            bd_set_texture_parameters();
+            glad_glTexImage2D(BD_GL_TEXTURE_2D, 0, BD_GL_R8, width, height, 0,
+                              BD_GL_RED, BD_GL_UNSIGNED_BYTE, planes[plane]);
+        } else {
+            glad_glTexSubImage2D(BD_GL_TEXTURE_2D, 0, 0, 0, width, height,
+                                 BD_GL_RED, BD_GL_UNSIGNED_BYTE, planes[plane]);
+        }
+    }
+
+    // The Unity-facing texture stays ordinary RGBA. Only how it is filled has
+    // changed, so the existing SurfaceTexture/shader-cache contract is intact.
+    glad_glActiveTexture(0x84C5 /*TEXTURE5*/);
+    glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+    if (frame.width != g_video_tex_w || frame.height != g_video_tex_h) {
+        glad_glTexImage2D(BD_GL_TEXTURE_2D, 0, BD_GL_RGBA, frame.width,
+                          frame.height, 0, BD_GL_RGBA, BD_GL_UNSIGNED_BYTE,
+                          nullptr);
+        g_video_tex_w = frame.width;
+        g_video_tex_h = frame.height;
+    }
+    glad_glBindFramebuffer(BD_GL_DRAW_FRAMEBUFFER, g_yuv_gpu.framebuffer);
+    glad_glFramebufferTexture2D(BD_GL_DRAW_FRAMEBUFFER, BD_GL_COLOR_ATTACHMENT0,
+                                BD_GL_TEXTURE_2D, backing, 0);
+    // Allocating/attaching backing above used texture unit 5, which is also the
+    // Y sampler unit. Re-bind all three planes before drawing; sampling the
+    // render target itself is an undefined feedback loop (Mali produced the
+    // severely clipped almost-white frame seen in the first device capture).
+    for (int plane = 0; plane < 3; ++plane) {
+        glad_glActiveTexture((GLenum)(0x84C5 + plane));
+        glad_glBindTexture(BD_GL_TEXTURE_2D, g_yuv_gpu.textures[plane]);
+    }
+    if (glad_glCheckFramebufferStatus(BD_GL_DRAW_FRAMEBUFFER) !=
+        BD_GL_FRAMEBUFFER_COMPLETE) {
+        BD_LOG("VIDEO", "YUV framebuffer incomplete");
+        g_yuv_gpu.failed = true;
+    } else {
+        for (GLenum toggle : toggles)
+            glad_glDisable(toggle);
+        glad_glColorMask(true, true, true, true);
+        glad_glViewport(0, 0, frame.width, frame.height);
+        glad_glUseProgram(g_yuv_gpu.program);
+        if (glad_glBindVertexArray && g_yuv_gpu.vertex_array)
+            glad_glBindVertexArray(g_yuv_gpu.vertex_array);
+        for (int plane = 0; plane < 3; ++plane) {
+            if (g_yuv_gpu.sampler[plane] >= 0)
+                glad_glUniform1i(g_yuv_gpu.sampler[plane], 5 + plane);
+        }
+        if (g_yuv_gpu.flip >= 0)
+            glad_glUniform1i(g_yuv_gpu.flip, frame.flip ? 1 : 0);
+        if (g_yuv_gpu.bt709 >= 0)
+            glad_glUniform1i(
+                g_yuv_gpu.bt709,
+                frame.color_matrix == bd_video::ColorMatrix::BT709 ? 1 : 0);
+        if (g_yuv_gpu.full_range >= 0)
+            glad_glUniform1i(
+                g_yuv_gpu.full_range,
+                frame.color_range == bd_video::ColorRange::Full ? 1 : 0);
+        glad_glDrawArrays(0x0004 /*GL_TRIANGLES*/, 0, 3);
+    }
+
+    glad_glBindFramebuffer(BD_GL_DRAW_FRAMEBUFFER,
+                           (GLuint)previous_draw_fbo);
+    glad_glBindFramebuffer(BD_GL_READ_FRAMEBUFFER,
+                           (GLuint)previous_read_fbo);
+    glad_glViewport(previous_viewport[0], previous_viewport[1],
+                    previous_viewport[2], previous_viewport[3]);
+    glad_glUseProgram((GLuint)previous_program);
+    glad_glColorMask(previous_color_mask[0], previous_color_mask[1],
+                     previous_color_mask[2], previous_color_mask[3]);
+    for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i) {
+        if (enabled[i]) glad_glEnable(toggles[i]);
+        else glad_glDisable(toggles[i]);
+    }
+    for (int plane = 0; plane < 3; ++plane) {
+        glad_glActiveTexture((GLenum)(0x84C5 + plane));
+        glad_glBindTexture(BD_GL_TEXTURE_2D, (GLuint)previous_texture[plane]);
+        if (glad_glBindSampler)
+            glad_glBindSampler(5 + plane, (GLuint)previous_sampler[plane]);
+    }
+    glad_glActiveTexture((GLenum)previous_active);
+    glad_glPixelStorei(0x0CF5 /*UNPACK_ALIGNMENT*/, previous_unpack);
+    glad_glPixelStorei(0x0CF2 /*UNPACK_ROW_LENGTH*/,
+                       previous_unpack_row_length);
+    glad_glPixelStorei(0x0CF3 /*UNPACK_SKIP_ROWS*/,
+                       previous_unpack_skip_rows);
+    glad_glPixelStorei(0x0CF4 /*UNPACK_SKIP_PIXELS*/,
+                       previous_unpack_skip_pixels);
+    if (glad_glBindBuffer) {
+        glad_glBindBuffer(0x88EC /*PIXEL_UNPACK_BUFFER*/,
+                          (GLuint)previous_unpack_buffer);
+        if (glad_glBindVertexArray)
+            glad_glBindVertexArray((GLuint)previous_vertex_array);
+        glad_glBindBuffer(0x8892 /*ARRAY_BUFFER*/,
+                          (GLuint)previous_array_buffer);
+    } else if (glad_glBindVertexArray) {
+        glad_glBindVertexArray((GLuint)previous_vertex_array);
+    }
+    g_bound_tex_2d = previous_shadow_bound;
+
+    if (g_yuv_gpu.failed)
+        return false;
+    g_yuv_gpu.width = frame.width;
+    g_yuv_gpu.height = frame.height;
+    return true;
+}
+
 // Uploads the newest decoded frame into the backing texture. Installed into the
 // video bridge, which calls it from SurfaceTexture.updateTexImage().
 extern "C" void bd_video_present()
@@ -267,12 +617,34 @@ extern "C" void bd_video_present()
     if (backing == 0 || !glad_glBindTexture || !glad_glTexImage2D)
         return;
 
-    int width = 0;
-    int height = 0;
-    uint64_t serial = 0;
-    const uint8_t* pixels = bd_video::begin_upload(&width, &height, &serial);
-    if (!pixels)
+    bd_video::UploadFrame frame;
+    if (!bd_video::begin_upload(&frame))
         return;
+    const int width = frame.width;
+    const int height = frame.height;
+    const uint8_t* pixels = frame.pixels;
+
+    if (frame.format == bd_video::UploadFormat::I420) {
+        const Uint32 start_ms = SDL_GetTicks();
+        if (!bd_present_i420(frame, backing)) {
+            bd_video::end_upload();
+            bd_video::fallback_to_rgba_cpu("shader/FBO initialization failed");
+            return;
+        }
+        bd_video::end_upload();
+        g_video_frame_uploaded = true;
+        const Uint32 cost = SDL_GetTicks() - start_ms;
+        g_upload_ms += cost;
+        g_yuv_blit_ms += cost;
+        if (++g_video_uploads <= 3 || (g_video_uploads % 60) == 0)
+            BD_LOG("VIDEO",
+                   "uploaded YUV frame #%llu %dx%d -> texture %u (%.2f ms avg)",
+                   (unsigned long long)g_video_uploads, width, height, backing,
+                   (double)g_yuv_blit_ms / (double)g_video_uploads);
+        log_gl_error("YUV upload/blit");
+        return;
+    }
+
     glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
     // glTexSubImage2D in the steady state: same pixels, but it does not ask the
     // driver to re-allocate/re-layout the texture. glTexImage2D is only needed

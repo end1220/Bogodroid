@@ -6,8 +6,10 @@
 extern toml::table config;
 
 #include <chrono>
+#include <cstring>
 #include <mutex>
 #include <set>
+#include <string>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
@@ -70,6 +72,10 @@ uint64_t g_pending_serial = 0;
 uint64_t g_uploaded_serial = 0;
 int g_pending_width = 0;
 int g_pending_height = 0;
+bd_video::UploadFormat g_pending_format = bd_video::UploadFormat::RGBA8888;
+bool g_pending_flip = false;
+bd_video::ColorMatrix g_pending_color_matrix = bd_video::ColorMatrix::BT601;
+bd_video::ColorRange g_pending_color_range = bd_video::ColorRange::Limited;
 
 unsigned g_backing_texture = 0;
 
@@ -87,6 +93,82 @@ uint64_t g_step_samples = 0;
 
 bool g_flip = true;
 bool g_flip_read = false;
+bool g_video_path_read = false;
+bool g_yuv_gpu_enabled = true;
+bool g_color_config_read = false;
+bd_video::ColorMatrix g_color_matrix_override = bd_video::ColorMatrix::Auto;
+bd_video::ColorRange g_color_range_override = bd_video::ColorRange::Auto;
+
+void read_video_path_locked()
+{
+    if (g_video_path_read)
+        return;
+    const std::string path =
+        config["video"]["path"].value_or<std::string>("yuv_gpu");
+    if (path == "yuv_gpu") {
+        g_yuv_gpu_enabled = true;
+    } else if (path == "rgba_cpu") {
+        g_yuv_gpu_enabled = false;
+    } else {
+        g_yuv_gpu_enabled = false;
+        BD_LOG("VIDEO",
+               "unknown video.path=%s; using rgba_cpu", path.c_str());
+    }
+    g_video_path_read = true;
+    BD_LOG("VIDEO", "video.path = %s",
+           g_yuv_gpu_enabled ? "yuv_gpu" : "rgba_cpu");
+}
+
+void read_color_config_locked()
+{
+    if (g_color_config_read)
+        return;
+    const std::string matrix =
+        config["video"]["color_matrix"].value_or<std::string>("auto");
+    const std::string range =
+        config["video"]["color_range"].value_or<std::string>("auto");
+    if (matrix == "bt601")
+        g_color_matrix_override = bd_video::ColorMatrix::BT601;
+    else if (matrix == "bt709")
+        g_color_matrix_override = bd_video::ColorMatrix::BT709;
+    else if (matrix != "auto")
+        BD_LOG("VIDEO", "unknown video.color_matrix=%s; using auto",
+               matrix.c_str());
+    if (range == "limited")
+        g_color_range_override = bd_video::ColorRange::Limited;
+    else if (range == "full")
+        g_color_range_override = bd_video::ColorRange::Full;
+    else if (range != "auto")
+        BD_LOG("VIDEO", "unknown video.color_range=%s; using auto",
+               range.c_str());
+    g_color_config_read = true;
+}
+
+void resolve_color(int width, int height, bd_video::ColorMatrix input_matrix,
+                   bd_video::ColorRange input_range,
+                   bd_video::ColorMatrix* output_matrix,
+                   bd_video::ColorRange* output_range)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    read_color_config_locked();
+    bd_video::ColorMatrix matrix = g_color_matrix_override;
+    bd_video::ColorRange range = g_color_range_override;
+    if (matrix == bd_video::ColorMatrix::Auto)
+        matrix = input_matrix;
+    if (range == bd_video::ColorRange::Auto)
+        range = input_range;
+    // FFmpeg reports UNSPECIFIED for the FiveHearts MP4s. Follow the normal
+    // SD/HD convention rather than silently applying the old BT.601 matrix to
+    // every 720p clip.
+    if (matrix == bd_video::ColorMatrix::Auto)
+        matrix = (width >= 1280 || height > 576)
+            ? bd_video::ColorMatrix::BT709
+            : bd_video::ColorMatrix::BT601;
+    if (range == bd_video::ColorRange::Auto)
+        range = bd_video::ColorRange::Limited;
+    *output_matrix = matrix;
+    *output_range = range;
+}
 
 bool flip_enabled()
 {
@@ -168,7 +250,8 @@ void fill_gradient(uint8_t* rgba, int width, int height)
 // removes the in-place plane flip the swscale path needed.
 void i420_to_rgba(const uint8_t* y_plane, const uint8_t* u_plane,
                   const uint8_t* v_plane, int width, int height, uint8_t* dst,
-                  bool flip)
+                  bool flip, bd_video::ColorMatrix matrix,
+                  bd_video::ColorRange range)
 {
     const int half_width = width / 2;
     for (int y = 0; y < height; y++) {
@@ -177,13 +260,21 @@ void i420_to_rgba(const uint8_t* y_plane, const uint8_t* u_plane,
         const uint8_t* src_v = v_plane + (size_t)(flip ? height - 1 - y : y) / 2 * half_width;
         uint8_t* out = dst + (size_t)y * width * 4;
         for (int x = 0; x < width; x++) {
-            const int c = src_y[x] - 16;
+            const int c = range == bd_video::ColorRange::Full
+                ? src_y[x]
+                : src_y[x] - 16;
             const int d = src_u[x / 2] - 128;
             const int e = src_v[x / 2] - 128;
-            const int luma = 298 * c;
-            int r = (luma + 409 * e + 128) >> 8;
-            int g = (luma - 100 * d - 208 * e + 128) >> 8;
-            int b = (luma + 516 * d + 128) >> 8;
+            const bool full = range == bd_video::ColorRange::Full;
+            const bool bt709 = matrix == bd_video::ColorMatrix::BT709;
+            const int luma = (full ? 256 : 298) * c;
+            const int rv = bt709 ? (full ? 403 : 459) : (full ? 359 : 409);
+            const int gu = bt709 ? (full ? 48 : 55) : (full ? 88 : 100);
+            const int gv = bt709 ? (full ? 120 : 136) : (full ? 183 : 208);
+            const int bu = bt709 ? (full ? 475 : 541) : (full ? 454 : 516);
+            int r = (luma + rv * e + 128) >> 8;
+            int g = (luma - gu * d - gv * e + 128) >> 8;
+            int b = (luma + bu * d + 128) >> 8;
             out[x * 4 + 0] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
             out[x * 4 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
             out[x * 4 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
@@ -445,7 +536,8 @@ static void report_publish()
 }
 
 bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
-                 int64_t pts_us)
+                 int64_t pts_us, ColorMatrix input_matrix,
+                 ColorRange input_range)
 {
     if (!packed || width <= 0 || height <= 0 || (width & 1) || (height & 1))
         return false;
@@ -518,10 +610,6 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
     // timing so a heavy encode still shows up in the log.
     const int out_width = width;
     const int out_height = height;
-    const size_t rgba_size = (size_t)out_width * (size_t)out_height * 4;
-    if (g_scratch.size() != rgba_size)
-        g_scratch.assign(rgba_size, 0);
-
     // Brightness of the source luma plane, sampled sparsely. A video that is
     // genuinely black (fade-in, title card) and one that decoded to black look
     // identical on screen, so record which one this is.
@@ -553,16 +641,41 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
         }
     }
 
-    const int64_t convert_start = monotonic_us();
     const size_t plane_y = (size_t)width * (size_t)height;
     const size_t plane_uv = plane_y / 4;
-    if (gradient_probe_enabled())
+    ColorMatrix color_matrix = ColorMatrix::BT601;
+    ColorRange color_range = ColorRange::Limited;
+    resolve_color(width, height, input_matrix, input_range,
+                  &color_matrix, &color_range);
+    static bool color_logged = false;
+    if (!color_logged) {
+        color_logged = true;
+        BD_LOG("VIDEO", "YUV color = %s %s (source=%d/%d)",
+               color_matrix == ColorMatrix::BT709 ? "BT.709" : "BT.601",
+               color_range == ColorRange::Full ? "full" : "limited",
+               (int)input_matrix, (int)input_range);
+    }
+    const bool use_yuv_gpu = bd_video::yuv_gpu_enabled() &&
+                             !gradient_probe_enabled();
+    const size_t output_size = use_yuv_gpu
+        ? expected
+        : (size_t)out_width * (size_t)out_height * 4;
+    if (g_scratch.size() != output_size)
+        g_scratch.resize(output_size);
+
+    const int64_t convert_start = monotonic_us();
+    if (gradient_probe_enabled()) {
         fill_gradient(g_scratch.data(), out_width, out_height);
-    else
+    } else if (use_yuv_gpu) {
+        memcpy(g_scratch.data(), packed, expected);
+    } else {
         i420_to_rgba(packed, packed + plane_y, packed + plane_y + plane_uv,
-                     width, height, g_scratch.data(), flip_enabled());
+                     width, height, g_scratch.data(), flip_enabled(),
+                     color_matrix, color_range);
+    }
     const int64_t convert_us = monotonic_us() - convert_start;
-    dump_rgba_frame(g_scratch.data(), out_width, out_height, g_submitted + 1);
+    if (!use_yuv_gpu)
+        dump_rgba_frame(g_scratch.data(), out_width, out_height, g_submitted + 1);
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -570,6 +683,12 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
         g_pending.swap(g_scratch);
         g_pending_width = out_width;
         g_pending_height = out_height;
+        g_pending_format = use_yuv_gpu
+            ? bd_video::UploadFormat::I420
+            : bd_video::UploadFormat::RGBA8888;
+        g_pending_flip = use_yuv_gpu && flip_enabled();
+        g_pending_color_matrix = color_matrix;
+        g_pending_color_range = color_range;
         ++g_pending_serial;
         g_frame_ready = true;
         report_publish();
@@ -582,8 +701,8 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
             static uint64_t previous_samples = 0;
             const uint64_t frames = g_convert_samples - previous_samples;
             const uint64_t total = g_convert_us - previous_total;
-            BD_LOG("VIDEO",
-                   "convert: %.2f ms/frame avg over %llu frames (%dx%d RGBA)",
+            BD_LOG("VIDEO", "%s: %.2f ms/frame avg over %llu frames (%dx%d)",
+                   use_yuv_gpu ? "I420 handoff" : "convert RGBA",
                    frames ? (double)total / (double)frames / 1000.0 : 0.0,
                    (unsigned long long)frames, width, height);
             previous_total = g_convert_us;
@@ -597,9 +716,10 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
         // an assumption.
         if (g_submitted <= 3 || (g_submitted % 300) == 0)
             BD_LOG("VIDEO",
-                   "frame #%llu I420 %dx%d pts=%lld -> RGBA %dx%d (%lld us, tid=%d), uploads=%llu",
+                   "frame #%llu I420 %dx%d pts=%lld -> %s %dx%d (%lld us, tid=%d), uploads=%llu",
                    (unsigned long long)g_submitted, width, height,
-                   (long long)pts_us, out_width, out_height,
+                   (long long)pts_us, use_yuv_gpu ? "GPU" : "RGBA",
+                   out_width, out_height,
                    (long long)convert_us, (int)syscall(__NR_gettid),
                    (unsigned long long)g_uploaded);
     }
@@ -639,18 +759,26 @@ void set_backing_texture(unsigned texture_name)
     BD_LOG("VIDEO", "backing GL_TEXTURE_2D for video = %u", texture_name);
 }
 
-const uint8_t* begin_upload(int* width, int* height, uint64_t* serial)
+bool begin_upload(UploadFrame* frame)
 {
+    if (!frame)
+        return false;
     g_mutex.lock();
     if (g_pending.empty() || g_pending_serial == g_uploaded_serial ||
         g_pending_width <= 0 || g_pending_height <= 0) {
         g_mutex.unlock();
-        return nullptr;
+        return false;
     }
-    if (width) *width = g_pending_width;
-    if (height) *height = g_pending_height;
-    if (serial) *serial = g_pending_serial;
-    return g_pending.data();
+    frame->pixels = g_pending.data();
+    frame->size = g_pending.size();
+    frame->width = g_pending_width;
+    frame->height = g_pending_height;
+    frame->serial = g_pending_serial;
+    frame->format = g_pending_format;
+    frame->flip = g_pending_flip;
+    frame->color_matrix = g_pending_color_matrix;
+    frame->color_range = g_pending_color_range;
+    return true;
 }
 
 void end_upload()
@@ -658,6 +786,24 @@ void end_upload()
     g_uploaded_serial = g_pending_serial;
     ++g_uploaded;
     g_mutex.unlock();
+}
+
+bool yuv_gpu_enabled()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    read_video_path_locked();
+    return g_yuv_gpu_enabled;
+}
+
+void fallback_to_rgba_cpu(const char* reason)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    read_video_path_locked();
+    if (!g_yuv_gpu_enabled)
+        return;
+    g_yuv_gpu_enabled = false;
+    BD_LOG("VIDEO", "yuv_gpu unavailable (%s); falling back to rgba_cpu",
+           reason ? reason : "unknown reason");
 }
 
 void log_state(const char* where)

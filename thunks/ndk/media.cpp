@@ -94,7 +94,28 @@ struct CodecOutput {
     // numbers the buffer was built with.
     int width{};
     int height{};
+    bd_video::ColorMatrix color_matrix{bd_video::ColorMatrix::Auto};
+    bd_video::ColorRange color_range{bd_video::ColorRange::Auto};
 };
+
+bd_video::ColorMatrix video_color_matrix(AVColorSpace value)
+{
+    if (value == AVCOL_SPC_BT709)
+        return bd_video::ColorMatrix::BT709;
+    if (value == AVCOL_SPC_BT470BG || value == AVCOL_SPC_SMPTE170M ||
+        value == AVCOL_SPC_FCC)
+        return bd_video::ColorMatrix::BT601;
+    return bd_video::ColorMatrix::Auto;
+}
+
+bd_video::ColorRange video_color_range(AVColorRange value)
+{
+    if (value == AVCOL_RANGE_JPEG)
+        return bd_video::ColorRange::Full;
+    if (value == AVCOL_RANGE_MPEG)
+        return bd_video::ColorRange::Limited;
+    return bd_video::ColorRange::Auto;
+}
 
 const char* mime_for_codec(AVCodecID id) {
     switch (id) {
@@ -410,6 +431,8 @@ struct AMediaCodec {
         // geometry it was packed with rather than the codec context size.
         output.width = width;
         output.height = height;
+        output.color_matrix = video_color_matrix(frame->colorspace);
+        output.color_range = video_color_range(frame->color_range);
         return true;
     }
 
@@ -1115,6 +1138,8 @@ ABI_ATTR media_status_t AMediaCodec_releaseOutputBuffer(
     int width = 0;
     int height = 0;
     int64_t pts = 0;
+    bd_video::ColorMatrix color_matrix = bd_video::ColorMatrix::Auto;
+    bd_video::ColorRange color_range = bd_video::ColorRange::Auto;
     size_t bytes = 0;
     size_t calls = 0;
     {
@@ -1128,6 +1153,8 @@ ABI_ATTR media_status_t AMediaCodec_releaseOutputBuffer(
                 width = found->second.width;
                 height = found->second.height;
                 pts = found->second.pts;
+                color_matrix = found->second.color_matrix;
+                color_range = found->second.color_range;
             }
             codec->outstanding.erase(found);
             codec->ready.notify_all();
@@ -1138,7 +1165,8 @@ ABI_ATTR media_status_t AMediaCodec_releaseOutputBuffer(
         BD_LOG("MEDIA", "releaseOutputBuffer #%zu index=%zu render=%d surface=%d",
                calls, index, (int)render, (int)codec->surface_mode);
     if (!frame.empty())
-        bd_video::submit_i420(frame.data(), bytes, width, height, pts);
+        bd_video::submit_i420(frame.data(), bytes, width, height, pts,
+                              color_matrix, color_range);
     return AMEDIA_OK;
 }
 ABI_ATTR media_status_t AMediaCodec_setOutputSurface(

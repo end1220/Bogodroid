@@ -117,7 +117,9 @@ Unity 自己的 `glViewport` 仍是 `[0 0 1280 720]`，于是那段渲染只有�
    白白多绕了一轮。
 4. 临时验证用配置即可：`[gpu] textureMaxDim = 0`（或只关 `textureMaxDimRGBA8`）。
    正经修法是让 cap **认得渲染目标**（延迟到明确是内容上传再缩，或被
-   `glFramebufferTexture2D` 命中的纹理不缩）。
+   `glFramebufferTexture2D` 命中的纹理不缩）。**截至 2026-09-17 正经修法仍未实现**，
+   FiveHearts 上机默认 `textureMaxDim = 0`；待办见
+   [`FIVEHEARTS.md`](FIVEHEARTS.md) §4.6 B。
 5. 版本跨度上值得注意：本 case 是 Unity **2022.3**（走 `glTexStorage2D` 的不可变 storage），
    Skul / Maximus2 是 2020.3 —— 老的 `glTexImage2D` 路径 `textureMaxDim` 同样是隐患，
    只是当时没撞上 RT。
