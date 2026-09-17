@@ -13,11 +13,13 @@
 ## 当前结论（先看）
 
 **已可用**：游戏可启动；视频可见且颜色正常；`yuv_gpu` 已把 I420→RGBA 从 CPU
-移到 GLES；854×480 低复杂度视频实测 23–28fps。
+移到 GLES；异步 decode worker 已上机，720p 高复杂度 intro 从同步基线 12–15fps
+升到 20.6–21.0fps，后续 clip 可到 29–31fps。关闭全部日志的 Release 版经实际
+游玩确认比诊断版更流畅，观感满意，主观判断明确高于 21fps。
 
-**仍待解决（以 §4.6 为唯一权威清单）**：
+**仍待解决 / 验收（以 §4.6 为唯一权威清单）**：
 
-1. **异步 decode worker**：把 FFmpeg 软解移出 Unity 同步视频更新路径，并上机验证。
+1. **主动 seek**：worker 的 flush/join/restart 路径已实现，但还没有单独注入跳转测试。
 2. **`textureMaxDim` 正确识别 RenderTarget**：当前只能设为 `0` 绕过裁切，尚未兼得
    纹理省内存与 RT 尺寸正确。
 
@@ -64,11 +66,12 @@ DROP=dist/dropbeak-cli.exe     # 在 D:/Locke/gitee/dropbeak
 # 0) 先清干净
 $DROP exec "pkill -9 unityloader; sleep 1; pgrep -l unityloader"
 
-# 1) 推二进制（--verify 必加：push 会静默截断）
-$DROP push unityloader-video-debug /mnt/mmc/Roms/PORTS/FiveHearts/unityloader --verify
+# 1) 推二进制（--verify 依赖 --chunk；覆盖现有文件还要 --force）
+$DROP push unityloader-video-debug /mnt/mmc/Roms/PORTS/FiveHearts/unityloader \
+  --force --chunk --chunk-size 16m --verify --progress
 
 # 2) 启动
-$DROP exec "sh /mnt/mmc/Roms/PORTS/FiveHearts/launch.sh"   # fivehearts_launch.sh 的部署名
+$DROP exec "sh /mnt/mmc/Roms/PORTS/FiveHearts/relaunch.sh"
 
 # 3) 等游戏跑到 intro，再收日志
 $DROP exec "grep -a 'BD-VIDEO' /mnt/mmc/Roms/PORTS/FiveHearts/log.txt | tail -30"
@@ -171,10 +174,10 @@ FFmpeg (thunks/ndk/media.cpp)
   否则 shader 读的是永远没有数据的 external 纹理。
 * **分辨率 / 码率不在 loader 里压**：`submit_i420()` 按源帧尺寸做 I420→RGBA 上传
   （不再 `1280x720→640x360`）。画质与 CPU 预算由 **Unity 构建 APK 前的离线转码**
-  决定。推荐掌机目标（cover / 铺满 640×480）：约 **854×480@30、~700–900 kbps、
-  H.264 Baseline、B 帧=0、参考帧≤2**；暂时保留 720p 也可，但看日志
-  `convert: … ms/frame` / `publish: … fps` / 音频是否卡。源帧比 drawable 大约 25%
-  时会打一条 `source … larger than drawable` 警告。
+  决定。本标题最终保留观感较好的 **1280×720@30、H.264 High、B 帧=2、
+  约 900 kbps、BT.709 TV range**；异步 worker + 无日志 Release 已使它达到可接受
+  流畅度。854×480 / 960×540 仅作为以后需要进一步降 CPU 或体积时的备选。源帧比
+  drawable 大约 25% 时会打一条 `source … larger than drawable` 警告。
 
 ---
 
@@ -219,23 +222,24 @@ H700 VPU 接入探测与 No-Go 依据见
 
 当前掌机验证基线：
 
-- loader SHA-256：
-  `93d72132a502e14a8af89e574518a38a1278e1750a5c49e0579fcc65518b2d95`；
+- 异步 worker 诊断版 SHA-256：`be537105…d87097`；
+- 当前无日志 Release SHA-256：`5a733b35…7fbcf37`；
 - `[video] path = "yuv_gpu"`、色彩矩阵/范围均为 `auto`；
 - `[gpu] textureMaxDim = 0`；失败的 sRGB 实验代码未保留；
+- 当前视频为 1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range；
 - 不同离线编码的帧率对照见 §4.5；待办清单见 §4.6。
 
 这里的“GPU 优化”不是 H.264 硬解。H.264 仍由 FFmpeg 在 CPU 上解成 I420；
 GPU 只接手原先由 CPU 完成的 I420→RGBA 色转。现阶段最大的剩余成本是软解本身，
 不是 I420 搬运或 GLES 色转。
 
-软解条件下、实现成本较低的试验（不替代 §4.6）：
+软解条件下的后续边界（不替代 §4.6）：
 
-1. 用 `Release` + 全部日志关闭的构建复测；排障版逐帧日志会争用 CPU/I/O。
-2. 扫 `BD_MEDIA_THREADS=0/2/3/4` 与 `BD_MEDIA_FAST=1`，按 `decode=` 和
-   `publish:` 选择；`BD_MEDIA_SKIP_LOOP=1` 会损画质，只作备选。
-3. 离线编码继续降复杂度或降到 854×480 / 640×360（见 §4.5）。
-4. 双 PBO/减少 GL 状态保存只能抠约 1.9–3 ms 的上传色转，优先级低。
+1. 无日志 Release 已复测通过；日常部署继续使用该构建。
+2. `BD_MEDIA_THREADS` 保持 FFmpeg 默认值；当前观感已达标，不再为几帧收益增加
+   与 Unity/音频争核的风险。
+3. 若以后还要降 CPU 或体积，优先试 960×540，再考虑 854×480（见 §4.5）。
+4. 双 PBO/减少 GL 状态保存只能优化约 1.9–3 ms 的上传色转，优先级低。
 
 H700 硬解当前仍是 No-Go：芯片有 Cedar 引擎，但系统没有 aarch64 CedarX，
 也没有可供 FFmpeg 接入的 V4L2 request/M2M H.264 decoder。除非补齐这些接口，
@@ -249,10 +253,10 @@ Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任�
 暂时无法复现。若重现，以 `/dev/fb0` 和 Android 同帧数值对比；Mali 下
 `glReadPixels` 曾返回全黑，不能单独作为颜色证据。
 
-### 4.5 离线编码参数对照（掌机，`yuv_gpu`，2026-09-17）
+### 4.5 离线编码与异步 worker 对照（掌机，`yuv_gpu`，2026-09-17）
 
-同一 loader（SHA `93d72132…`）、同一路径 `yuv_gpu`，只换 APK 内
-`intro.bundle` / `lobby.bundle` 的视频编码。指标来自运行日志：
+前三行是异步 worker 前、同一 loader（SHA `93d72132…`）只换 APK 内视频编码的
+对照；最后一行是当前异步 worker 诊断版。指标来自运行日志：
 
 - `publish:` — 客人真正看到的发布帧率（每 30 帧一条，稳态区间）
 - `decode=` — FFmpeg `send+drain` 墙钟时间
@@ -263,6 +267,7 @@ Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任�
 | 面板友好（约 854 宽） | **854×480** | — | — | **23–28 fps** | **~10.8 ms** | **~0.56 ms** | **~1.9 ms** |
 | 720p 低解码开销 | **1280×720** | 7,223,280 | 13,020,048 | **17–20 fps**（常见 18–20） | **~14–16 ms** | **~1.4–1.5 ms** | **~2.9 ms** |
 | 720p 更高画质 | **1280×720** | 8,000,480 | 14,684,112 | **12–15 fps**（常见 13–14） | **~20–22 ms** | **~1.45 ms** | **~2.95 ms** |
+| 720p 高画质 + 异步 worker | **1280×720** | 8,000,480 | 14,684,112 | intro **20.6–21.0 fps**；后续 clip **29–31 fps** | **~19.8–24.4 ms**（worker） | **~1.6–1.8 ms** | **~2.9 ms** |
 
 补充：
 
@@ -272,17 +277,18 @@ Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任�
 - 旧对照（同机、改路径前）：`rgba_cpu` 在 854 量级色转约 **11 ms/帧**，早期全尺寸 720p CPU 色转约 **21 ms/帧**；现已由 GPU 色转取代热路径。
 - APK 指纹（便于复测）：低开销包 `C1AA5E37…E01479`（16:17）；高画质包 `1952B63D…31A73D2`（16:49）。视频在 AssetBundle 内，经 `AMediaDataSource` 读入；`conf/FiveHearts/video/INTRO.mp4` 若存在只是旧遗留，不参与本次 intro 播放。
 
-编码选型建议（软解、无硬解前提下）：优先 **854×480@30、低复杂度 H.264**（Baseline /
-B=0 / refs≤2）；若坚持 720p，用低开销档并接受约 18–20 fps，或降到 640×360。要在
-不降分辨率的前提下抬高流畅度，需实现并验证 §4.6 的异步 decode worker。
+最终选型：保留 **1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range**。
+无日志 Release 没有 `publish` 计数，但实际游玩主观确认比 21fps 诊断版更流畅，
+画质与流畅度均满意，不再为降码率或取消 B 帧牺牲观感。
 
-### 4.6 未解决问题（唯一权威清单，2026-09-17）
+### 4.6 实现状态与剩余问题（唯一权威清单，2026-09-17）
 
-下列项**尚未落地**，只是已确认方向；不要把「已绕过 / 已讨论」当成「已完成」。
+本节同时保留已完成实现和剩余待办：A 已完成性能与稳定性验收，只剩主动 seek
+补验；B 尚未实现。
 
-#### A. 异步 decode worker（软解路径，优先）
+#### A. 异步 decode worker（软解路径，已完成）
 
-**问题**：FFmpeg `avcodec_send_packet` / `avcodec_receive_frame` 目前跟 Unity 的
+**原问题**：FFmpeg `avcodec_send_packet` / `avcodec_receive_frame` 原先跟 Unity 的
 `AMediaCodec` 调用同步执行（常落在视频更新 / `UpdateTexture` 路径）。720p 高画质档
 `decode≈20–22 ms/帧`，会直接拉长该路径墙钟时间；`BD_MEDIA_THREADS` 只能让 FFmpeg
 内部并行，**调用线程仍要等这一帧解完**。
@@ -290,26 +296,51 @@ B=0 / refs≤2）；若坚持 720p，用低开销档并接受约 18–20 fps，�
 **目标**：独立 worker 线程持续解码；MediaCodec 桩侧只做 packet 入队与取已解帧。
 Unity / 渲染相关路径不再同步支付软解时间。
 
-**建议实现要点**（`thunks/ndk/media.cpp`）：
+**当前实现**（`thunks/ndk/media.cpp`，2026-09-17）：
 
-1. 每个视频 codec 一个 decode 线程（或共享线程池 + per-codec 队列）。
-2. `queueInputBuffer`：拷贝/移交 packet 到输入队列后立即返回。
-3. worker：循环 `avcodec_send_packet` + `avcodec_receive_frame`，产出写入现有
-   `pending` / 输出队列（保持 `MAX_QUEUED_OUTPUTS` 背压）。
-4. `dequeueOutputBuffer` / `releaseOutputBuffer`：只消费已就绪帧，再走现有
+1. 每个视频 codec 一个 decode worker；音频保留同步路径，避免 Unity 大量短命音频
+   codec 反复建线程。
+2. `queueInputBuffer` 把 packet 复制到带 FFmpeg padding 的私有输入队列后返回；
+   worker 取走副本后立即归还 guest input slot。
+3. worker 独占 `AVCodecContext`，执行 `avcodec_send_packet` /
+   `avcodec_receive_frame`；输出写入现有 `pending`，达到
+   `MAX_QUEUED_OUTPUTS` 时阻塞 worker，不丢 guest 尚未消费的帧。
+4. `dequeueOutputBuffer` / `releaseOutputBuffer` 只消费已就绪帧，继续走现有
    `submit_i420` → `yuv_gpu` 路径。
-5. 停机、seek、EOS、surface 重建时要能排空并 join，避免悬空 FFmpeg 上下文。
+5. `stop/delete` 会唤醒并 join worker；`flush`（seek）会 join、清输入/输出和
+   `avcodec_flush_buffers`，然后按 started 状态重启 worker；EOS 保持队列顺序。
+
+**Docker 功能回归**（aarch64 qemu + llvmpipe，40 s）：
+
+- worker 有独立 tid，窗口探测 codec 与 Surface codec 均能 start/stop/join；
+- `yuv_gpu` 收到 854×480 I420，handoff 约 0.05–0.11 ms，时间线进入真实画面；
+- 无 `send failed` / crash / pure virtual，超时退出码 124 符合测试脚本预期；
+- llvmpipe 首帧 GPU 上传约 1.1 s，容器结果不用于判断掌机帧率。
+
+**掌机验证**（loader SHA-256 `be537105…d87097`，两轮共约 190 s）：
+
+- 1280×720 高复杂度 intro 的 `decode` 约 19.8–24.4 ms/frame，`publish`
+  稳定 20.6–21.0fps；同步基线为 12–15fps；
+- intro 约 60 s 处 `frame sink cleared`，旧 worker 正常 stop，新 worker 启动；
+  后续 clip 稳态 29.3–30.9fps；
+- `pending` 稳定 4–6、峰值 6，输入队列 3–4，`submits/publish=1.0`，
+  未出现无界堆积或白解帧；
+- `guest video step` 约 0.1–0.5 ms，I420 handoff 约 1.6–1.8 ms，
+  GPU 上传约 2.9 ms；
+- 无 `send failed`、crash、pure virtual；RSS 约 386–428 MB；
+- 无日志 Release（SHA `5a733b35…7fbcf37`）实际游玩确认流畅度满意、明确高于
+  21fps；该版本不含性能日志，因此不虚构精确帧率；
+- 主动 seek 尚未单独注入，作为非阻塞补验项保留。
 
 **验收（掌机）**：
 
-| 指标 | 期望 |
+| 指标 | 结果 |
 |---|---|
-| 同 APK（尤其 720p 高画质）`publish` | 相对同步路径明显上升；对照 §4.5 基线 |
-| Unity 视频更新路径上的 `decode=` / 同 tid 耗时 | 不再出现 ~15–22 ms 的 send+drain |
-| `submits/publish`、音画同步、seek | 不劣于现状；无卡死 / 泄漏 |
-| 与 `BD_MEDIA_THREADS` 组合 | 可保留内部多线程，但收益要单独测 |
-
-未经验证前，不要把「开了 FFmpeg 多线程」写成异步 decode 已完成。
+| 同 APK（尤其 720p 高画质）`publish` | 通过：12–15fps → 20.6–21.0fps |
+| Unity 视频更新路径上的同步 decode | 通过：FFmpeg send/drain 已移到独立 worker |
+| `submits/publish`、clip 切换、稳定性 | 通过：1.0；worker 正常 stop/restart；无崩溃 |
+| 无日志 Release 主观流畅度 | 通过：满意，明确高于 21fps |
+| 主动 seek | 待单独注入 |
 
 #### B. `textureMaxDim` 识别 RenderTarget（正经修法）
 
@@ -324,8 +355,8 @@ Unity / 渲染相关路径不再同步支付软解时间。
 
 #### C. 次级优化（待测，非阻塞）
 
-- 关闭全部日志的 Release 与日志版做同 APK 对照。
-- 扫 `BD_MEDIA_THREADS=0/2/3/4`、`BD_MEDIA_FAST=1`。
+- 主动 seek 补验。
+- `BD_MEDIA_THREADS` 保持默认，不再主动扫描。
 - 双 PBO / 减少 GL 状态保存；仅覆盖约 1.9–3ms，优先级低。
 
 #### D. 明确不做 / 暂缓

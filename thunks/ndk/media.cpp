@@ -23,6 +23,8 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/syscall.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -55,12 +57,6 @@ constexpr size_t INPUT_BUFFER_COUNT = 4;
 // Unity's own late-frame tolerance is k_VideoPlaybackFrameOffsetTolerance = 5,
 // so the queue only needs to cover that plus jitter.
 constexpr size_t MAX_QUEUED_OUTPUTS = 6;
-// If the input pool has been empty this long with nothing queued for the guest
-// either, the packet/frame pairing has desynced (a packet that produced no
-// frame). Give the oldest slot back instead of latching - see
-// AMediaCodec::release_stalled_input_slot().
-constexpr int64_t INPUT_POOL_STALL_US = 200000;
-
 int64_t monotonic_us()
 {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -96,6 +92,16 @@ struct CodecOutput {
     int height{};
     bd_video::ColorMatrix color_matrix{bd_video::ColorMatrix::Auto};
     bd_video::ColorRange color_range{bd_video::ColorRange::Auto};
+};
+
+struct CodecInput {
+    size_t index{};
+    // FFmpeg may read AV_INPUT_BUFFER_PADDING_SIZE bytes past packet_size while
+    // parsing, so storage includes a zeroed tail that is not part of AVPacket.
+    std::vector<uint8_t> storage;
+    size_t packet_size{};
+    int64_t pts{};
+    uint32_t flags{};
 };
 
 bd_video::ColorMatrix video_color_matrix(AVColorSpace value)
@@ -245,10 +251,10 @@ struct AMediaCodec {
     AMediaFormat* output_format{};
     // Android's input-buffer contract, which is also the flow control for the
     // whole pipeline: the app dequeues one of INPUT_BUFFER_COUNT slots, fills
-    // it, queues it, and only gets that slot back when the decoder has turned
-    // the packet into a frame. Unity feeds input buffers as fast as the codec
-    // accepts them, so without this pool it hands us an entire 40 s clip in the
-    // first seconds of playback; the frames that pile up here are then useless
+    // it, and queues it. queueInputBuffer copies the packet; the slot comes back
+    // when the worker takes that copy. Unity feeds input buffers as fast as the
+    // codec accepts them, so without this pool it hands us an entire 40 s clip
+    // in the first seconds of playback; the frames that pile up are then useless
     // by the time the player clock reaches their PTS, and Unity's own frame
     // index bookkeeping (AndroidVideoMedia::ConsumeOutputBuffers) classifies
     // them as "too late" and refuses to render them into the Surface at all -
@@ -259,17 +265,21 @@ struct AMediaCodec {
             INPUT_BUFFER_COUNT, std::vector<uint8_t>(INPUT_BUFFER_SIZE));
     std::vector<bool> input_free =
         std::vector<bool>(INPUT_BUFFER_COUNT, true);
-    std::deque<size_t> input_in_flight;   // in queue order == frame output order
-    int64_t pool_empty_since_us{};
-    size_t stalled_releases{};
+    std::deque<CodecInput> queued_inputs;
     std::deque<CodecOutput> pending;
     std::map<size_t, CodecOutput> outstanding;
     std::mutex mutex;
     std::condition_variable ready;
+    std::thread decode_worker;
+    bool worker_stop{};
     size_t next_output_index{};
     size_t decoded_frames{};
     bool format_changed{};
     bool started{};
+    // Only video decoding belongs on the worker. Unity creates many short-lived
+    // audio codecs; spawning threads for those adds churn without helping the
+    // VideoPlayer render path this bridge is intended to unblock.
+    bool async_decode{};
     // Unity's AndroidVideoMedia attaches a Surface (from its SurfaceTexture) to
     // the decoder. The I420 we decode in its place has to be published to the
     // video texture by hand - see javastubs/bd_video.h.
@@ -311,63 +321,31 @@ struct AMediaCodec {
         for (size_t i = 0; i < input_free.size(); ++i) {
             if (input_free[i]) {
                 input_free[i] = false;
-                input_in_flight.push_back(i);
-                pool_empty_since_us = free_input_slots() == 0 ? monotonic_us() : 0;
                 return static_cast<ssize_t>(i);
             }
         }
         return -1;
     }
 
-    // One frame came out of the decoder: the oldest packet in flight is done
-    // with its buffer. Paired this way (not on queueInputBuffer) because FFmpeg
-    // may still be reading the packet until the frame that consumes it exists.
-    void release_input_for_frame()
+    // queueInputBuffer copies the compressed packet into queued_inputs. Once
+    // the worker takes that copy, the guest-owned input slot can immediately
+    // be reused even though FFmpeg may still be decoding the packet.
+    void release_input_slot(size_t slot)
     {
-        if (input_in_flight.empty()) {
-            pool_empty_since_us = 0;
-            return;
-        }
-        const size_t slot = input_in_flight.front();
-        input_in_flight.pop_front();
         if (slot < input_free.size())
             input_free[slot] = true;
-        if (free_input_slots() > 0)
-            pool_empty_since_us = 0;
         ready.notify_all();
-    }
-
-    // Liveness net for the (should not happen) case of a packet that never
-    // produces a frame, which would leave the pool permanently empty and the
-    // guest waiting forever.
-    bool release_stalled_input_slot()
-    {
-        if (pool_empty_since_us == 0 || input_in_flight.empty())
-            return false;
-        if (monotonic_us() - pool_empty_since_us < INPUT_POOL_STALL_US)
-            return false;
-        const size_t slot = input_in_flight.front();
-        input_in_flight.pop_front();
-        if (slot < input_free.size())
-            input_free[slot] = true;
-        ++stalled_releases;
-        pool_empty_since_us = free_input_slots() == 0 ? monotonic_us() : 0;
-        BD_LOG("MEDIA",
-               "input pool stalled %lld us, releasing slot %zu (stalled=%zu)",
-               (long long)INPUT_POOL_STALL_US, slot, stalled_releases);
-        return true;
     }
 
     void reset_input_pool()
     {
         for (size_t i = 0; i < input_free.size(); ++i)
             input_free[i] = true;
-        input_in_flight.clear();
-        pool_empty_since_us = 0;
         ready.notify_all();
     }
 
     ~AMediaCodec() {
+        stop_worker();
         delete output_format;
         sws_freeContext(sws);
         swr_free(&swr);
@@ -376,6 +354,7 @@ struct AMediaCodec {
 
     void clear_output() {
         std::lock_guard<std::mutex> lock(mutex);
+        queued_inputs.clear();
         pending.clear();
         outstanding.clear();
         format_changed = false;
@@ -492,12 +471,15 @@ struct AMediaCodec {
                 ++decoded_frames;
                 ++produced;
                 {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    // A decoded frame is exactly the event that frees the input
-                    // buffer that produced it, so this is where the guest's
-                    // producer side gets throttled. Nothing is ever dropped
-                    // here: the frame goes to the guest even if it is late.
-                    release_input_for_frame();
+                    std::unique_lock<std::mutex> lock(mutex);
+                    ready.wait(lock, [&] {
+                        return worker_stop || !started ||
+                               pending.size() < MAX_QUEUED_OUTPUTS;
+                    });
+                    if (worker_stop || !started) {
+                        av_frame_unref(frame);
+                        break;
+                    }
                     pending.push_back(std::move(output));
                     if (pending.size() > peak_pending)
                         peak_pending = pending.size();
@@ -513,6 +495,102 @@ struct AMediaCodec {
             drain_us += (uint64_t)cost;
             drain_samples += produced;
         }
+    }
+
+    void decode_loop()
+    {
+        BD_LOG("MEDIA", "decode worker started tid=%d",
+               (int)syscall(__NR_gettid));
+        for (;;) {
+            CodecInput input_packet;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                ready.wait(lock, [&] {
+                    return worker_stop ||
+                           (started && !queued_inputs.empty() &&
+                            pending.size() < MAX_QUEUED_OUTPUTS);
+                });
+                if (worker_stop)
+                    break;
+                input_packet = std::move(queued_inputs.front());
+                queued_inputs.pop_front();
+                release_input_slot(input_packet.index);
+            }
+
+            AVPacket packet{};
+            AVPacket* packet_ptr = nullptr;
+            if (!(input_packet.flags &
+                  AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) {
+                av_init_packet(&packet);
+                packet.data = input_packet.storage.data();
+                packet.size = input_packet.packet_size;
+                packet.pts = packet.dts = input_packet.pts;
+                packet_ptr = &packet;
+            }
+
+            const int64_t send_start = monotonic_us();
+            int result = avcodec_send_packet(context, packet_ptr);
+            if (result == AVERROR(EAGAIN)) {
+                drain();
+                result = avcodec_send_packet(context, packet_ptr);
+            }
+            if (context->codec_type == AVMEDIA_TYPE_VIDEO) {
+                const int64_t send_cost = monotonic_us() - send_start;
+                std::lock_guard<std::mutex> lock(mutex);
+                send_us += (uint64_t)send_cost;
+                ++send_samples;
+            }
+            if (result < 0 && result != AVERROR_EOF) {
+                char error[AV_ERROR_MAX_STRING_SIZE]{};
+                av_strerror(result, error, sizeof(error));
+                BD_LOG("MEDIA",
+                       "decode worker send failed: %s (%d), size=%zu flags=0x%x",
+                       error, result, input_packet.packet_size,
+                       input_packet.flags);
+                continue;
+            }
+
+            drain();
+            if (input_packet.flags &
+                AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                CodecOutput eos;
+                eos.index = next_output_index++;
+                eos.pts = input_packet.pts;
+                eos.flags = AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
+                std::unique_lock<std::mutex> lock(mutex);
+                ready.wait(lock, [&] {
+                    return worker_stop || !started ||
+                           pending.size() < MAX_QUEUED_OUTPUTS;
+                });
+                if (!worker_stop && started) {
+                    reset_input_pool();
+                    pending.push_back(std::move(eos));
+                    ready.notify_all();
+                }
+            }
+        }
+        BD_LOG("MEDIA", "decode worker stopped tid=%d",
+               (int)syscall(__NR_gettid));
+    }
+
+    void start_worker()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            worker_stop = false;
+        }
+        decode_worker = std::thread([this] { decode_loop(); });
+    }
+
+    void stop_worker()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            worker_stop = true;
+            ready.notify_all();
+        }
+        if (decode_worker.joinable())
+            decode_worker.join();
     }
 };
 
@@ -562,7 +640,7 @@ extern "C" void bd_media_dump_state()
             ? (double)codec->drain_us / (double)codec->drain_samples / 1000.0 : 0.0;
         BD_LOG("MEDIA",
                "%s mime=%s surface=%d started=%d inpool=%zu/%zu pend=%zu peak=%zu out=%zu "
-               "decoded=%zu stalled=%zu drains=%zu in(deq=%zu/try=%zu) "
+               "decoded=%zu queued_in=%zu drains=%zu in(deq=%zu/try=%zu) "
                "out(deq=%zu/try=%zu) buf=%zu rel=%zu last_out=%lld last_in=%lld oldest=%zu "
                "decode=%.1fms(send %.1f + drain %.1f, n=%zu/%zu)",
                kind, mime_for_codec(codec->codec_id), (int)codec->surface_mode,
@@ -570,7 +648,8 @@ extern "C" void bd_media_dump_state()
                codec->input_free.size(),
                codec->pending.size(), codec->peak_pending,
                codec->outstanding.size(),
-               codec->decoded_frames, codec->stalled_releases, codec->drain_calls,
+               codec->decoded_frames, codec->queued_inputs.size(),
+               codec->drain_calls,
                codec->input_dequeues, codec->input_try_again,
                codec->output_dequeues, codec->output_try_again,
                codec->get_buffer_calls, codec->render_calls,
@@ -878,6 +957,8 @@ ABI_ATTR media_status_t AMediaCodec_configure(
         avcodec_parameters_to_context(codec->context, format->codecpar) < 0)
         return AMEDIA_ERROR_UNKNOWN;
     codec->context->pkt_timebase = AVRational{1, 1000000};
+    codec->async_decode =
+        codec->context->codec_type == AVMEDIA_TYPE_VIDEO;
     // Decode tuning. The defaults keep FFmpeg's own choices, so what runs is the
     // "baseline" row of BD_MEDIA_BENCH unless a knob says otherwise - start with
     // BD_MEDIA_BENCH on the device, then enable the winner here.
@@ -917,10 +998,13 @@ ABI_ATTR media_status_t AMediaCodec_start(AMediaCodec* codec) {
     {
         std::lock_guard<std::mutex> lock(codec->mutex);
         codec->started = true;
+        codec->worker_stop = false;
         codec->format_changed = true;
         codec->reset_input_pool();
     }
     codec->make_output_format();
+    if (codec->async_decode)
+        codec->start_worker();
     return AMEDIA_OK;
 }
 ABI_ATTR media_status_t AMediaCodec_stop(AMediaCodec* codec) {
@@ -929,13 +1013,26 @@ ABI_ATTR media_status_t AMediaCodec_stop(AMediaCodec* codec) {
         std::lock_guard<std::mutex> lock(codec->mutex);
         codec->started = false;
         codec->reset_input_pool();
+        codec->ready.notify_all();
     }
+    if (codec->async_decode)
+        codec->stop_worker();
+    codec->clear_output();
     return AMEDIA_OK;
 }
 ABI_ATTR media_status_t AMediaCodec_flush(AMediaCodec* codec) {
     if (!codec || !codec->context) return AMEDIA_ERROR_UNKNOWN;
+    bool restart = false;
+    {
+        std::lock_guard<std::mutex> lock(codec->mutex);
+        restart = codec->started;
+    }
+    if (codec->async_decode)
+        codec->stop_worker();
     avcodec_flush_buffers(codec->context);
     codec->clear_output();
+    if (restart && codec->async_decode)
+        codec->start_worker();
     return AMEDIA_OK;
 }
 ABI_ATTR ssize_t AMediaCodec_dequeueInputBuffer(
@@ -943,11 +1040,10 @@ ABI_ATTR ssize_t AMediaCodec_dequeueInputBuffer(
     if (!codec) return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
     std::unique_lock<std::mutex> lock(codec->mutex);
     // Availability is exactly "one of the input buffers came back". A buffer
-    // comes back when the decoder has turned its packet into a frame
-    // (AMediaCodec::release_input_for_frame), so the guest can only ever be
-    // INPUT_BUFFER_COUNT packets ahead of the frames it has consumed. That is
-    // also the only flow control that keeps our frame indices in step with
-    // Unity's player clock.
+    // comes back when the worker takes the private packet copy, so at most
+    // INPUT_BUFFER_COUNT packets wait in queued_inputs while one is decoding.
+    // The output cap below stops the worker (and therefore this pool) when Unity
+    // falls behind.
     //
     // Two things this deliberately does NOT depend on:
     //  - the output queue. Unity's AndroidVideoMedia feeds and drains from one
@@ -971,8 +1067,7 @@ ABI_ATTR ssize_t AMediaCodec_dequeueInputBuffer(
         ++codec->input_try_again;
         return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
     }
-    if (codec->free_input_slots() == 0 &&
-        !codec->release_stalled_input_slot()) {
+    if (codec->free_input_slots() == 0) {
         ++codec->input_try_again;
         return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
     }
@@ -1008,52 +1103,71 @@ ABI_ATTR media_status_t AMediaCodec_queueInputBuffer(
     {
         std::lock_guard<std::mutex> lock(codec->mutex);
         // The slot must have been handed out by dequeueInputBuffer.
-        if (codec->input_free[index])
+        if (codec->input_free[index] || !codec->started ||
+            codec->worker_stop)
             return AMEDIA_ERROR_UNKNOWN;
         codec->last_input_pts = (int64_t)presentation_time_us;
     }
-    AVPacket* packet = nullptr;
-    AVPacket local{};
-    if (!(flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) {
-        av_init_packet(&local);
-        local.data = codec->input[index].data() + offset;
-        local.size = size;
-        local.pts = local.dts = presentation_time_us;
-        packet = &local;
-    }
-    const int64_t send_start = monotonic_us();
-    int result = avcodec_send_packet(codec->context, packet);
-    if (result == AVERROR(EAGAIN)) {
+
+    // Audio retains the synchronous path. It is not connected to the
+    // SurfaceTexture bridge, and Unity frequently creates tiny probe codecs
+    // whose lifetime is shorter than the cost of starting another thread.
+    if (!codec->async_decode) {
+        AVPacket packet{};
+        AVPacket* packet_ptr = nullptr;
+        if (!(flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) {
+            av_init_packet(&packet);
+            packet.data = codec->input[index].data() + offset;
+            packet.size = size;
+            packet.pts = packet.dts = presentation_time_us;
+            packet_ptr = &packet;
+        }
+        int result = avcodec_send_packet(codec->context, packet_ptr);
+        if (result == AVERROR(EAGAIN)) {
+            codec->drain();
+            result = avcodec_send_packet(codec->context, packet_ptr);
+        }
+        {
+            std::lock_guard<std::mutex> lock(codec->mutex);
+            codec->release_input_slot(index);
+        }
+        if (result < 0 && result != AVERROR_EOF) {
+            char error[AV_ERROR_MAX_STRING_SIZE]{};
+            av_strerror(result, error, sizeof(error));
+            BD_LOG("MEDIA",
+                   "queue audio input failed: %s (%d), size=%zu flags=0x%x",
+                   error, result, size, flags);
+            return AMEDIA_ERROR_UNKNOWN;
+        }
         codec->drain();
-        result = avcodec_send_packet(codec->context, packet);
+        if (flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+            CodecOutput eos;
+            eos.index = codec->next_output_index++;
+            eos.pts = presentation_time_us;
+            eos.flags = AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
+            std::lock_guard<std::mutex> lock(codec->mutex);
+            codec->reset_input_pool();
+            codec->pending.push_back(std::move(eos));
+            codec->ready.notify_all();
+        }
+        return AMEDIA_OK;
     }
-    if (codec->context->codec_type == AVMEDIA_TYPE_VIDEO) {
-        const int64_t send_cost = monotonic_us() - send_start;
+
+    {
         std::lock_guard<std::mutex> lock(codec->mutex);
-        codec->send_us += (uint64_t)send_cost;
-        ++codec->send_samples;
-    }
-    if (result < 0 && result != AVERROR_EOF) {
-        char error[AV_ERROR_MAX_STRING_SIZE]{};
-        av_strerror(result, error, sizeof(error));
-        BD_LOG("MEDIA", "queue input failed: %s (%d), size=%zu flags=0x%x",
-               error, result, size, flags);
-        return AMEDIA_ERROR_UNKNOWN;
-    }
-    codec->drain();
-    if (flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
-        CodecOutput eos;
-        eos.index = codec->next_output_index++;
-        eos.pts = presentation_time_us;
-        eos.flags = AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
-        std::lock_guard<std::mutex> lock(codec->mutex);
-        // EOS has to be delivered whatever the queue looks like: it is the
-        // guest's only signal that the stream is over, and a player that never
-        // sees it waits forever. It also carries no frame, so the whole pool
-        // goes back at once (frames still buffered in the decoder keep coming
-        // out and no longer need to free a slot).
-        codec->reset_input_pool();
-        codec->pending.push_back(std::move(eos));
+        CodecInput input_packet;
+        input_packet.index = index;
+        input_packet.packet_size = size;
+        input_packet.pts = presentation_time_us;
+        input_packet.flags = flags;
+        if (!(flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) {
+            input_packet.storage.resize(size + AV_INPUT_BUFFER_PADDING_SIZE);
+            memcpy(input_packet.storage.data(),
+                   codec->input[index].data() + offset, size);
+            memset(input_packet.storage.data() + size, 0,
+                   AV_INPUT_BUFFER_PADDING_SIZE);
+        }
+        codec->queued_inputs.push_back(std::move(input_packet));
         codec->ready.notify_all();
     }
     return AMEDIA_OK;
@@ -1084,6 +1198,7 @@ ABI_ATTR ssize_t AMediaCodec_dequeueOutputBuffer(
     }
     CodecOutput output = std::move(codec->pending.front());
     codec->pending.pop_front();
+    codec->ready.notify_all();
     info->offset = 0;
     info->size = output.bytes.size();
     info->presentationTimeUs = output.pts;
