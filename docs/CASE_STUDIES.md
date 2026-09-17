@@ -74,3 +74,50 @@
 1. **一份 TOML 适配多机型可行**：`[device] displayWidth/Height/RefreshRate` 留 `0` 即自动探测（SDL → `/dev/fb0` → 640x480@60），日志 `[BD-DEVICE]` 能看到解析来源。实测序列：JNI 桩先问 → `640x480 (fb0)`，`SDL_Init(VIDEO)` 后再探 → 面板真实值 `(sdl)`。
 2. **诊断期保留的桩仍有价值**（`File` 路径族、`Bundle` 取值族、`Context.getContentResolver`、`List/ArrayList.isEmpty`、`ArrayList.add` 注册名修正）：它们让缺桩行为更接近真 Android，而不是依赖"返回 null 也不要紧"。
 3. `ArrayList::add` 曾被注册成 `"size"`（真 bug），已修。
+
+---
+
+## 案例三：FiveHearts — `textureMaxDim` 把 **RenderTexture** 也缩小了（画面被裁到左下）
+
+**现象**：掌机上（640x480）视频"全屏显示原视频的左下部分"；同一份资源在 Unity 编辑器
+和 Android 真机上完全正常。UI 本身没错（Skip 按钮照旧落在右下角）。
+
+**根因**：`[gpu] textureMaxDim = 512`。缩放挂在 `bd_glTexStorage2D()`
+（`thunks/khronos/gles2.cpp`），命中的 RGBA8 纹理等比缩到长边 512。它只豁免两类：
+
+- `short_side <= 32` 或 `long_side > 4 * short_side`（LUT / 条带）；
+- **尺寸正好等于屏幕**（`width == displayWidth && height == displayHeight`）。
+
+游戏 `VideoPlaybackManager` 建的是 `new RenderTexture(1280, 720, 0, ARGB32)`：
+1280x720 ≠ 屏幕 640x480 → **不豁免** → 实际分配 **512x288**
+（1280 × 512/1280 = 512、720 × 512/1280 = 288，比值 0.4）。
+Unity 自己的 `glViewport` 仍是 `[0 0 1280 720]`，于是那段渲染只有四边形的
+**左下 40% × 40%** 落进 RT，UI 再把它铺满屏幕 → 看上去就是「视频只有左下那一块、放大 2.5 倍」。
+
+**判据（一眼可辨）**：日志里
+`video blit target attachment 0 is object 25 size=512x288 viewport=[0 0 1280 720]`
+—— **attachment 尺寸 ≠ 它自己的 viewport**，且比值恰好是 `textureMaxDim / 长边`。
+启动日志的 `[BD-CAP] textureMaxDim RGBA8=512` 就是开关状态。
+
+**验证结果（2026-09-16，FiveHearts 掌机实测）**：`unity.toml` 里
+`textureMaxDim = 0` → 重跑，同一行日志变成
+`attachment 0 is object 25 size=1280x720 viewport=[0 0 1280 720]`（尺寸与 viewport 一致），
+**画面完整**。峰值 `rss≈402MB`，与 cap 开着时的历史运行（330~430MB）同一量级，
+所以「关掉 cap」是可用方案；要保住省内存收益则需让 cap 认得 RT。
+
+**通用教训**：
+
+1. **`textureMaxDim` 会打在 RenderTexture 上**。RT 是"运行时会画进去的面"，缩小它
+   等于让 `glViewport` 与 FBO 尺寸脱钩 → 画面被裁、还很难和"UI 布局错"区分开。
+   受影响的不止视频：任何 > 上限的后处理 / 剧情背景 / 片尾 RT 都会被同样裁掉。
+2. **「尺寸正好等于屏幕」这条豁免不够用**：游戏 RT 常见尺寸是
+   1280x720 / 1920x1080 / 半分辨率，正好都不等于屏幕尺寸。
+3. 排查顺序：**先看 FBO attachment 的真实尺寸与 viewport 是否一致**，再去怀疑
+   shader、UV、RawImage 布局。这次的 512x288 一度被当成"量错了的假值"，
+   白白多绕了一轮。
+4. 临时验证用配置即可：`[gpu] textureMaxDim = 0`（或只关 `textureMaxDimRGBA8`）。
+   正经修法是让 cap **认得渲染目标**（延迟到明确是内容上传再缩，或被
+   `glFramebufferTexture2D` 命中的纹理不缩）。
+5. 版本跨度上值得注意：本 case 是 Unity **2022.3**（走 `glTexStorage2D` 的不可变 storage），
+   Skul / Maximus2 是 2020.3 —— 老的 `glTexImage2D` 路径 `textureMaxDim` 同样是隐患，
+   只是当时没撞上 RT。

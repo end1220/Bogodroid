@@ -21,6 +21,15 @@ pocs/
 build-local/
 output/
 /unityloader
+/unityloader-*
+/fivehearts-*.log
+/device-log-*.txt
+/docker-repro-*.log
+/INTRO.mp4
+/intro.bundle
+/shot*.png
+/shot*.ppm
+/video-shader.txt
 log.txt
 unity_player.log
 tmp/

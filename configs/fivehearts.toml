@@ -1,0 +1,77 @@
+[paths]
+
+# FiveHearts (com.fivehearts.offline, Unity 2022.3.62f2) — container layout.
+#
+# Mirrors the handheld's unity.toml exactly: the loader runs with the game root
+# as its cwd and game_files points at ./gamedata/, so every other relative path
+# (../conf/ = conf/ next to gamedata/) resolves the same way it does on the
+# device. Keep this file and <PORTS>/FiveHearts/unity.toml in sync; only
+# [device] differs, because a container has no panel to probe.
+game_files="./gamedata/"
+support_files="./gamedata/"
+
+android_package_code="./"
+android_external_files="../conf/"
+android_files="../conf/"
+android_cache="../cache/"
+android_obb_dirs=["./"]
+android_source_dirs=["./"]
+
+
+[package]
+
+packageName="com.fivehearts.offline"
+versionName="0.1"
+# Unity 2022.3 may prefer Vulkan; Mali and llvmpipe both get GLES here.
+mainIntentBundle = { unity = "-force-gles32" }
+
+
+[device]
+
+# 0 = probe /dev/fb0. There is no panel in the container, and 640x480 is the
+# Anbernic panel, so pin it: that also keeps the video path (1280x720 clip
+# scaled into a 640x480 backbuffer) identical to the handheld.
+displayWidth=640
+displayHeight=480
+displayRefreshRate=0
+displayRotation=0
+
+
+[input]
+
+controller=true
+controller_name="Microsoft X-Box 360 pad"
+dpad_synthesize_hat=true
+
+[input.remap]
+start   = "BUTTON_START"
+select  = "BUTTON_SELECT"
+a       = "BUTTON_A"
+b       = "BUTTON_B"
+x       = "BUTTON_X"
+y       = "BUTTON_Y"
+guide   = "ESCAPE"
+
+
+[unity]
+
+version = "legacy"
+block_analytics = true
+
+
+[google_play]
+
+offline = true
+
+
+[audio]
+
+backend = "auto"
+
+
+[gpu]
+
+# Do not cap RGBA storage here: Unity creates the 1280x720 video
+# RenderTexture with glTexStorage2D. Capping it to 512x288 while Unity keeps a
+# 1280x720 viewport crops the rendered video to its lower-left region.
+textureMaxDim = 0

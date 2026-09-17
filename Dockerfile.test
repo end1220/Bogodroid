@@ -1,0 +1,42 @@
+# Scratch image for running the aarch64 unityloader under emulation on the
+# Windows host (Docker Desktop + binfmt). Mirrors the handheld's glibc 2.31
+# target, adds the shared libraries unityloader links against (SDL2 and the
+# FFmpeg 4.2 runtimes used by thunks/ndk/media.cpp), and adds a software GL stack
+# so SDL can create its GLES window: the handheld has a real Mali/EGL driver, a
+# container has no GPU, so Mesa llvmpipe under Xvfb stands in for it.
+#
+#   docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f Dockerfile.test .
+#   docker run --rm --platform linux/arm64 \
+#     -v "<repo>/gamefiles/unity6:/game" \
+#     -v "<repo>/build-unity6/unityloader:/game/unityloader" \
+#     -v "<repo>/configs/unity6.toml:/game/unity6.toml" \
+#     -v "<repo>/scripts/unity6:/work/scripts" \
+#     bogo-arm64-test:20.04 bash /work/scripts/run.sh
+#
+# FiveHearts uses the same image; see docs/FIVEHEARTS.md.
+# See docs/UNITY6.md 4.1 for the traps this image+harness pair exists to avoid.
+FROM ubuntu:20.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libsdl2-2.0-0 \
+      ca-certificates \
+      gdb \
+      procps \
+      xvfb \
+      x11-utils \
+      x11-apps \
+      xdotool \
+      imagemagick \
+      libgl1-mesa-dri \
+      libglx-mesa0 \
+      libegl1-mesa \
+      libgles2-mesa \
+      libglapi-mesa \
+      libgbm1 \
+      libavformat58 \
+      libavcodec58 \
+      libavutil56 \
+      libswresample3 \
+      libswscale5 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /game
