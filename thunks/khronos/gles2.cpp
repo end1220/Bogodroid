@@ -637,7 +637,7 @@ extern "C" void bd_video_present()
         g_upload_ms += cost;
         g_yuv_blit_ms += cost;
         if (++g_video_uploads <= 3 || (g_video_uploads % 60) == 0)
-            BD_LOG("VIDEO",
+            BD_DEBUG("VIDEO",
                    "uploaded YUV frame #%llu %dx%d -> texture %u (%.2f ms avg)",
                    (unsigned long long)g_video_uploads, width, height, backing,
                    (double)g_yuv_blit_ms / (double)g_video_uploads);
@@ -665,7 +665,7 @@ extern "C" void bd_video_present()
     g_video_frame_uploaded = true;
     g_upload_ms += SDL_GetTicks() - start_ms;
     if (++g_video_uploads <= 3 || (g_video_uploads % 60) == 0)
-        BD_LOG("VIDEO", "uploaded frame #%llu %dx%d -> texture %u (%.2f ms avg)",
+        BD_DEBUG("VIDEO", "uploaded frame #%llu %dx%d -> texture %u (%.2f ms avg)",
                (unsigned long long)g_video_uploads, width, height, backing,
                (double)g_upload_ms / (double)g_video_uploads);
     log_gl_error("TexImage2D (video upload)");
@@ -1394,8 +1394,18 @@ static void bd_remember_video_rt()
     }
     GLint fbo = 0;
     glad_glGetIntegerv(0x8CA6 /*FRAMEBUFFER_BINDING*/, &fbo);
-    BD_LOG("VIDEO", "video blit fbo=%d attachment-query=%s", fbo,
-           glad_glGetFramebufferAttachmentParameteriv ? "yes" : "no");
+    // Middle-state LOG builds used to emit this every blit (~1/frame) and drown
+    // publish / [BD-MEM] / seek worker lines. Keep first few + changes + sparse.
+    static uint64_t blit_probe_logs = 0;
+    static GLint last_logged_fbo = -1;
+    ++blit_probe_logs;
+    if (fbo != last_logged_fbo || blit_probe_logs <= 3 ||
+        (blit_probe_logs % 120) == 0) {
+        last_logged_fbo = fbo;
+        BD_LOG("VIDEO", "video blit fbo=%d attachment-query=%s (n=%llu)", fbo,
+               glad_glGetFramebufferAttachmentParameteriv ? "yes" : "no",
+               (unsigned long long)blit_probe_logs);
+    }
     if (fbo == 0 || !glad_glGetFramebufferAttachmentParameteriv)
         return;
     GLint texture = 0;
@@ -1405,7 +1415,10 @@ static void bd_remember_video_rt()
     // A renderbuffer attachment answers here too (with its own name), so this
     // is "the attachment", not necessarily a texture.
     if (texture == 0) {
-        BD_LOG("VIDEO", "video blit attachment 0 has no name");
+        static uint64_t no_name_logs = 0;
+        if (++no_name_logs <= 3 || (no_name_logs % 120) == 0)
+            BD_LOG("VIDEO", "video blit attachment 0 has no name (n=%llu)",
+                   (unsigned long long)no_name_logs);
         return;
     }
     GLint viewport[4] = {};
@@ -1857,7 +1870,7 @@ extern "C" void bd_glUseProgram(GLuint program)
     static uint64_t uses = 0;
     ++uses;
     if (uses <= 12 || (uses % 120) == 0) {
-        BD_LOG("VIDEO",
+        BD_DEBUG("VIDEO",
                "video draw #%llu program=%u unit_2d=[%u %u %u %u] unit_ext=[%u %u %u %u] backing=%u",
                (unsigned long long)uses, program, g_unit_2d[0], g_unit_2d[1],
                g_unit_2d[2], g_unit_2d[3], g_unit_ext[0], g_unit_ext[1],

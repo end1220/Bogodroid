@@ -299,7 +299,7 @@ void invoke_listener()
         return;
     ++g_callbacks;
     if (g_callbacks <= 3 || (g_callbacks % 300) == 0)
-        BD_LOG("VIDEO", "onFrameAvailable #%llu (texture=%d) [render thread]",
+        BD_DEBUG("VIDEO", "onFrameAvailable #%llu (texture=%d) [render thread]",
                (unsigned long long)g_callbacks, g_active_texture);
     // Outside the lock: the guest handler re-enters the loader (updateTexImage ->
     // our upload hook -> glBindTexture/glTexImage2D) and must not see a held
@@ -317,7 +317,7 @@ void invoke_listener()
     if (cost > (int64_t)g_step_max_us)
         g_step_max_us = (uint64_t)cost;
     if (++g_step_samples % 30 == 0) {
-        BD_LOG("VIDEO",
+        BD_DEBUG("VIDEO",
                "guest video step: %.1f ms avg, %.1f ms max over %llu callbacks",
                (double)g_step_us / (double)g_step_samples / 1000.0,
                (double)g_step_max_us / 1000.0,
@@ -342,26 +342,22 @@ void pump()
         ++g_swaps;
     }
 
-    // Every 2 s: how often the guest actually presents, next to the producer's
-    // counters. "The video is laggy" is almost never the decoder - it is the
-    // guest calling updateTexImage() (and therefore taking a new frame) a
-    // handful of times per second while FFmpeg runs at 30. Without a rate on
-    // this line the two look identical in the log.
+    // Every 5 s: guest present vs producer (middle-state LOG; was 2 s).
     {
         static int64_t last_report_us = 0;
         const int64_t now = monotonic_us();
         if (last_report_us == 0)
             last_report_us = now;
-        if (now - last_report_us >= 2000000) {
+        if (now - last_report_us >= 5000000) {
             last_report_us = now;
             if (bd_video::video_texture_name() >= 0)
                 log_state("swap");
         }
     }
 
-    // Periodic codec state dump (thunks/ndk/media.cpp registers live codecs).
+    // Periodic codec state dump (~5 s at 60 Hz; was every ~1.5 s).
     static uint64_t pumps = 0;
-    if ((++pumps % 90) == 0) {
+    if ((++pumps % 300) == 0) {
         ::bd_media_dump_state();
     }
 
@@ -458,7 +454,7 @@ void surface_texture_update_tex_image(int texture_id)
     ++calls;
     if (calls <= 3 || (calls % 600) == 0) {
         std::lock_guard<std::mutex> lock(g_mutex);
-        BD_LOG("VIDEO",
+        BD_DEBUG("VIDEO",
                "updateTexImage #%llu texture=%d frames=%llu/%llu drop=%llu cb=%llu",
                (unsigned long long)calls, texture_id,
                (unsigned long long)g_submitted, (unsigned long long)g_uploaded,
@@ -521,7 +517,9 @@ static void report_publish()
         return;
     }
     ++published;
-    if (published % 30 != 0)
+    // ~6 s at 20 fps (was every 30 frames / ~1.5 s). Keep on LOG as the main
+    // middle-state video health line alongside [BD-MEM] and swap.
+    if (published % 120 != 0)
         return;
     const double fps = now > previous_us
         ? (double)published * 1000000.0 / (double)(now - previous_us)
@@ -623,7 +621,7 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
         }
         static uint64_t logged = 0;
         if (++logged <= 3 || (logged % 60) == 0)
-            BD_LOG("VIDEO", "frame #%llu mean luma = %llu (samples=%zu)",
+            BD_DEBUG("VIDEO", "frame #%llu mean luma = %llu (samples=%zu)",
                    (unsigned long long)g_submitted + 1,
                    (unsigned long long)(samples ? sum / samples : 0), samples);
     }
@@ -701,7 +699,7 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
             static uint64_t previous_samples = 0;
             const uint64_t frames = g_convert_samples - previous_samples;
             const uint64_t total = g_convert_us - previous_total;
-            BD_LOG("VIDEO", "%s: %.2f ms/frame avg over %llu frames (%dx%d)",
+            BD_DEBUG("VIDEO", "%s: %.2f ms/frame avg over %llu frames (%dx%d)",
                    use_yuv_gpu ? "I420 handoff" : "convert RGBA",
                    frames ? (double)total / (double)frames / 1000.0 : 0.0,
                    (unsigned long long)frames, width, height);
@@ -715,7 +713,7 @@ bool submit_i420(const uint8_t* packed, size_t size, int width, int height,
         // move to a worker. Log the tid next to the cost so that is a fact, not
         // an assumption.
         if (g_submitted <= 3 || (g_submitted % 300) == 0)
-            BD_LOG("VIDEO",
+            BD_DEBUG("VIDEO",
                    "frame #%llu I420 %dx%d pts=%lld -> %s %dx%d (%lld us, tid=%d), uploads=%llu",
                    (unsigned long long)g_submitted, width, height,
                    (long long)pts_us, use_yuv_gpu ? "GPU" : "RGBA",

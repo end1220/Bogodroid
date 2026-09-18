@@ -892,7 +892,7 @@ ABI_ATTR bool AMediaFormat_getInt32(
     // Unity derives its video path from what it reads back here; a handful of
     // lines is enough to see whether it follows the Surface or the YUV route.
     static int logged = 0;
-    if (logged < 30) {
+    if (logged < 8) {
         ++logged;
         BD_LOG("MEDIA", "format getInt32 %s = %d", key, *value);
     }
@@ -1217,7 +1217,8 @@ ABI_ATTR uint8_t* AMediaCodec_getOutputBuffer(
     if (found == codec->outstanding.end()) return nullptr;
     if (size) *size = found->second.bytes.size();
     ++codec->get_buffer_calls;
-    if (codec->get_buffer_calls <= 3 || (codec->get_buffer_calls % 300) == 0)
+    // Buffer churn is summarized by bd_media_dump_state(); keep only startup.
+    if (codec->get_buffer_calls <= 3)
         BD_LOG("MEDIA", "getOutputBuffer #%zu index=%zu size=%zu surface=%d",
                codec->get_buffer_calls, index, found->second.bytes.size(),
                (int)codec->surface_mode);
@@ -1276,7 +1277,7 @@ ABI_ATTR media_status_t AMediaCodec_releaseOutputBuffer(
         }
         calls = ++codec->render_calls;
     }
-    if (calls <= 3 || (calls % 300) == 0)
+    if (calls <= 3)
         BD_LOG("MEDIA", "releaseOutputBuffer #%zu index=%zu render=%d surface=%d",
                calls, index, (int)render, (int)codec->surface_mode);
     if (!frame.empty())

@@ -7,20 +7,27 @@
 > 掌机运行方式最早是会话里手敲出来的，这里固化，不要再凭记忆拼命令。
 >
 > 视频黑屏、面板偏移已修复；`textureMaxDim` 误缩 RenderTexture 导致的裁切目前用
-> `textureMaxDim = 0` **绕过**（正经修法仍待做，见 §4.6）。关键判据与通用结论见
+> `textureMaxDim = 0` **绕过**（正经修法仍待做，见 §4.6 B）。关键判据与通用结论见
 > [`CASE_STUDIES.md`](CASE_STUDIES.md)。
 
 ## 当前结论（先看）
 
 **已可用**：游戏可启动；视频可见且颜色正常；`yuv_gpu` 已把 I420→RGBA 从 CPU
 移到 GLES；异步 decode worker 已上机，720p 高复杂度 intro 从同步基线 12–15fps
-升到 20.6–21.0fps，后续 clip 可到 29–31fps。关闭全部日志的 Release 版经实际
-游玩确认比诊断版更流畅，观感满意，主观判断明确高于 21fps。
+升到 20.6–21.0fps，后续 clip 可到 29–31fps。上机默认改为**中间态日志**
+（`BD_ENABLE_LOG=ON`，TRACE/VERBOSE 关）：LOG 层保留 `[BD-MEM]`、`publish`、
+`swap`、codec 周期摘要、worker 启停、`[STUB-MISS]`；逐帧 blit / upload /
+guest step / luma / handoff 等已降到 `BD_DEBUG`（需 TRACE）。精简到此为止，
+不再为再压行数继续砍。
 
-**仍待解决 / 验收（以 §4.6 为唯一权威清单）**：
+**主动 seek 已验收**（2026-09-18）：`SimpleVideoPlayer` SeekProbe 掌机实测 —
+D-Pad 跳转、`decode worker` flush/restart、稳态 `publish≈19–20 fps`、
+`drop=0`、`exited (0)`；事件写入 `conf/seekprobe.log`（IL2CPP Release 的
+`Debug.Log` 进不了 loader stderr）。
 
-1. **主动 seek**：worker 的 flush/join/restart 路径已实现，但还没有单独注入跳转测试。
-2. **`textureMaxDim` 正确识别 RenderTarget**：当前只能设为 `0` 绕过裁切，尚未兼得
+**仍待解决（§4.6 B）**：
+
+1. **`textureMaxDim` 正确识别 RenderTarget**：当前只能设为 `0` 绕过裁切，尚未兼得
    纹理省内存与 RT 尺寸正确。
 
 **暂缓**：H700 硬解接口不通；全局“稍微偏白”目前无法复现。
@@ -194,6 +201,7 @@ FFmpeg (thunks/ndk/media.cpp)
 - **GPU 色转首版近乎全白**：FBO backing 覆盖 Y 采样单元形成反馈；draw 前重绑
   Y/U/V 后修复。
 - **立即退出 134**：曾由 UTF-16 `unity.toml` 引起；配置必须是 UTF-8。
+- **主动 seek**（2026-09-18）：SeekProbe 掌机验收通过，见 §4.6 A。
 
 `textureMaxDim` 裁切的**症状已绕过但机制未修复**，归入 §4.6 B，不列为已解决。
 
@@ -278,13 +286,12 @@ Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任�
 - APK 指纹（便于复测）：低开销包 `C1AA5E37…E01479`（16:17）；高画质包 `1952B63D…31A73D2`（16:49）。视频在 AssetBundle 内，经 `AMediaDataSource` 读入；`conf/FiveHearts/video/INTRO.mp4` 若存在只是旧遗留，不参与本次 intro 播放。
 
 最终选型：保留 **1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range**。
-无日志 Release 没有 `publish` 计数，但实际游玩主观确认比 21fps 诊断版更流畅，
-画质与流畅度均满意，不再为降码率或取消 B 帧牺牲观感。
+中间态日志 / 无日志 Release 的实际游玩主观确认比同步软解流畅；画质与流畅度均满意，
+不再为降码率或取消 B 帧牺牲观感。
 
-### 4.6 实现状态与剩余问题（唯一权威清单，2026-09-17）
+### 4.6 实现状态与剩余问题（唯一权威清单，2026-09-18）
 
-本节同时保留已完成实现和剩余待办：A 已完成性能与稳定性验收，只剩主动 seek
-补验；B 尚未实现。
+本节同时保留已完成实现和剩余待办：A（含主动 seek）已完成掌机验收；B 尚未实现。
 
 #### A. 异步 decode worker（软解路径，已完成）
 
@@ -317,7 +324,7 @@ Unity / 渲染相关路径不再同步支付软解时间。
 - 无 `send failed` / crash / pure virtual，超时退出码 124 符合测试脚本预期；
 - llvmpipe 首帧 GPU 上传约 1.1 s，容器结果不用于判断掌机帧率。
 
-**掌机验证**（loader SHA-256 `be537105…d87097`，两轮共约 190 s）：
+**掌机验证 — 播放性能**（loader SHA-256 `be537105…d87097`，两轮共约 190 s）：
 
 - 1280×720 高复杂度 intro 的 `decode` 约 19.8–24.4 ms/frame，`publish`
   稳定 20.6–21.0fps；同步基线为 12–15fps；
@@ -329,8 +336,27 @@ Unity / 渲染相关路径不再同步支付软解时间。
   GPU 上传约 2.9 ms；
 - 无 `send failed`、crash、pure virtual；RSS 约 386–428 MB；
 - 无日志 Release（SHA `5a733b35…7fbcf37`）实际游玩确认流畅度满意、明确高于
-  21fps；该版本不含性能日志，因此不虚构精确帧率；
-- 主动 seek 尚未单独注入，作为非阻塞补验项保留。
+  21fps；该版本不含性能日志，因此不虚构精确帧率。
+
+**掌机验证 — 主动 seek**（2026-09-18，`SimpleVideoPlayer` SeekProbe）：
+
+- 工程：`E:\BaiduNetdiskDownload\Games\SimpleVideoPlayer`（`com.bogodroid.seekprobe`），
+  端口 `/mnt/mmc/Roms/PORTS/SimpleVideoPlayer/`；循环播 `Resources/INTRO`，
+  D-Pad L/R ±5s、U/D ±30s、A 暂停、B 回开头（按键与 Jump2022 Legacy 对齐）。
+- 中间态 loader（`BD_ENABLE_LOG=ON`，TRACE/VERBOSE 关）：
+  - 首轮节流 blit 后（SHA `32c06f14…`）：~37 s / ≈560 行 / ≈44 KB；
+  - 再收热路径后（SHA `3d62e8d9…`，2026-09-18 自跑 ~47 s）：≈309 行 /
+    ≈25 KB（约 **6.6 行/s**）；`publish≈19.4–19.6`、`drop=0`。
+  - LOG 保留：`publish`（每 ~120 帧）、`swap` / codec dump（~5 s）、
+    `[BD-MEM]`、worker 启停、启动缺桩；`get/releaseOutputBuffer` 仅前 3 次。
+  - 已降到 TRACE：`guest video step`、upload/luma/handoff、`video draw`、
+    逐帧 blit 探测等。**日志精简止于此。**
+- `conf/seekprobe.log` 记录 prepare / pause / 5 次 seek：`seekCompleted`
+  latency ≈107–977 ms；后续 seek 的 `was` 时间推进，说明跳转生效
+  （`seekCompleted` 回调里读到的 `VideoPlayer.time` 有时仍是旧值，属 Unity 时序，
+  以后续播放进度为准）。
+- 稳态 `publish≈19.3–19.6 fps`，seek 窗口短暂掉到 ~6–14 fps（worker
+  stop/restart，预期行为，不单独优化）；`drop=0`；`rss≈217–219 MB`。
 
 **验收（掌机）**：
 
@@ -339,13 +365,14 @@ Unity / 渲染相关路径不再同步支付软解时间。
 | 同 APK（尤其 720p 高画质）`publish` | 通过：12–15fps → 20.6–21.0fps |
 | Unity 视频更新路径上的同步 decode | 通过：FFmpeg send/drain 已移到独立 worker |
 | `submits/publish`、clip 切换、稳定性 | 通过：1.0；worker 正常 stop/restart；无崩溃 |
-| 无日志 Release 主观流畅度 | 通过：满意，明确高于 21fps |
-| 主动 seek | 待单独注入 |
+| 无日志 / 中间态主观流畅度 | 通过：满意，明确高于 21fps |
+| 主动 seek | 通过：SeekProbe 掌机 5 次跳转 + worker flush/restart |
 
 #### B. `textureMaxDim` 识别 RenderTarget（正经修法）
 
 **现状**：`textureMaxDim = 0` 绕过误缩视频 RT 的裁切；开 `>0` 仍会打到
 `glTexStorage2D` 创建的 RenderTexture（见 §4.1 / CASE_STUDIES 案例三）。
+SeekProbe / FiveHearts 上机配置均保持 `textureMaxDim = 0`。
 
 **目标**：内容上传可继续 cap 省内存；被 `glFramebufferTexture2D` 挂成颜色附件的
 纹理（或明确的 RT 分配）不缩，viewport 与 attachment 尺寸保持一致。
@@ -355,7 +382,6 @@ Unity / 渲染相关路径不再同步支付软解时间。
 
 #### C. 次级优化（待测，非阻塞）
 
-- 主动 seek 补验。
 - `BD_MEDIA_THREADS` 保持默认，不再主动扫描。
 - 双 PBO / 减少 GL 状态保存；仅覆盖约 1.9–3ms，优先级低。
 
@@ -364,7 +390,7 @@ Unity / 渲染相关路径不再同步支付软解时间。
 - H700 Cedar / V4L2 硬解：No-Go，见 spike 文档。
 - 仅凭 SDL `FRAMEBUFFER_SRGB_CAPABLE` 向 Unity 谎称 sRGB：已证会更白，实验代码不保留。
 - 「稍微偏白」全局调查：已暂结（§4.4）。
-
+- seek 窗口内的短暂掉帧：worker flush/restart 固有成本，不做专项优化。
 ---
 
 ## 5. 容器 ≠ 掌机（判读差异用）

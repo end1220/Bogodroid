@@ -21,38 +21,38 @@
 ```text
 APK/解包 → 本地 staging
     → inventory / astc_retier / shrink / audio_stream_patch
-    → Docker：Release + 关日志编 unityloader + plugin
+    → Docker：Release + 中间态日志（LOG=ON，TRACE/VERBOSE 关）编 unityloader + plugin
     → Dropbeak push (--force --chunk --chunk-size 16m --verify)
     → 掌机 Ports 手启（勿随意远程 .sh）
-    → 看 log：退出码、prefs flush；诊断构建再开 [BD-MEM]
+    → 看 log：退出码、prefs flush、`[BD-MEM]` / 视频桥关键行；深挖再开 TRACE
 ```
 
-### 1.1 发布构建（小体积、少日志）
+### 1.1 发布构建（小体积、关键日志）
 
-日常上机用 **Release、关 BD 日志、strip**（约 5MB 级，而非 Debug ~90MB）。
+日常上机用 **Release + 中间态日志 + strip**（约 5–7MB，而非 Debug ~90MB）。
 
 日志为**编译期**开关（见 `platform/common/logging.h` / `AGENTS.md`）：
 
-| 开关 | 上机 | 排障 |
-|------|------|------|
-| `BD_ENABLE_LOG` | OFF | ON（主开关，含 `[BD-MEM]`） |
-| `BD_ENABLE_TRACE` | OFF | 按需 ON |
-| `BD_ENABLE_VERBOSE` | OFF | 仅深挖时 ON（行数极多） |
-| `CMAKE_BUILD_TYPE` | Release + strip | Debug 或 Release+LOG |
+| 开关 | 上机（中间态） | 全关 / 深挖 |
+|------|----------------|-------------|
+| `BD_ENABLE_LOG` | **ON**（主开关：`[BD-MEM]` / `publish`/`swap` / codec 摘要 / worker / `[STUB-MISS]`） | OFF 压体积对照；深挖保持 ON |
+| `BD_ENABLE_TRACE` | OFF（upload/step/luma/blit 等 `BD_DEBUG` 在此） | 深挖按需 ON |
+| `BD_ENABLE_VERBOSE` | OFF | 仅深挖 ON（行数极多） |
+| `CMAKE_BUILD_TYPE` | Release + strip | Debug 或 Release+TRACE |
 
+中间态视频桥已把热路径降到 TRACE，掌机实测约 **6–7 行/s**；**不再继续精简 LOG**。
+全关日志对照：同一目录改 `-DBD_ENABLE_LOG=OFF`；深挖再加 `-DBD_ENABLE_TRACE=ON`。toml `[debug] mem_log_interval_ms` 仅在 LOG 打开时有输出（且**可省略**，见 §3）。
 ```powershell
 docker run --rm --platform linux/amd64 `
   -v "D:\Locke\gitee\Bogodroid:/work" -w /work/build-aarch64 `
   bogo-builder:unity2017-armv7 bash -c @"
 cmake . -DCMAKE_BUILD_TYPE=Release \
-  -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+  -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
   -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
 cmake --build . -j2 --target unityloader plugin_<name>
 aarch64-linux-gnu-strip --strip-unneeded unityloader unityloader.d/*.so
 "@
 ```
-
-排障示例：同一目录改 `-DBD_ENABLE_LOG=ON`，可选 `-DBD_ENABLE_TRACE=ON`，重编推送；toml `[debug] mem_log_interval_ms` 仅在 LOG 打开时有输出（且**可省略**，见 §3）。
 
 ### 1.2 `JNIVM_ENABLE_RETURN_NON_ZERO`：必须显式 OFF
 

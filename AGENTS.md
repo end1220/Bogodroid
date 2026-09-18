@@ -8,13 +8,15 @@
 
 | CMake | 默认 | 作用 |
 |-------|------|------|
-| `BD_ENABLE_LOG` | **OFF** | 主开关：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG`（关闭时 `[BD-MEM]` 那段整段编译移除，不再每 2 s 读 `/proc`） |
+| `BD_ENABLE_LOG` | **OFF**（CMake 默认） | 主开关：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG`（关闭时 `[BD-MEM]` 那段整段编译移除，不再每 2 s 读 `/proc`） |
 | `BD_ENABLE_TRACE` | OFF | 需 LOG：额外 `BD_DEBUG` / `BOOT_LOG` 等 |
 | `BD_ENABLE_VERBOSE` | OFF | 需 LOG：大量 `verbose()`（含 NATIVE/JNI 刷屏） |
 | `IL2CPP_TRACE` | OFF | 需 LOG：il2cpp 内部 trace |
 
-**上机默认**：`CMAKE_BUILD_TYPE=Release` + 上述全 OFF + `strip`（~5MB）。  
-**排障**：临时 `BD_ENABLE_LOG=ON`（可加 TRACE/VERBOSE）重编推送；通了再改回关日志的 Release。  
+**上机默认（中间态）**：`CMAKE_BUILD_TYPE=Release` + **`BD_ENABLE_LOG=ON`** + TRACE/VERBOSE/IL2CPP_TRACE 全 OFF + `strip`。  
+LOG 层：`[BD-MEM]`、视频 `publish`/`swap`、codec 周期摘要、worker 启停、`[STUB-MISS]`；  
+逐帧 upload/step/luma/blit 等在 **TRACE**（`BD_DEBUG`）。精简止于此，不再继续砍 LOG。  
+全关（LOG=OFF）只在压体积/对照性能时用；深挖再临时开 TRACE/VERBOSE。  
 `fatal_error` / SEGV 回溯**不依赖** `BD_ENABLE_LOG`。
 
 toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_MEM_LOG_MS` 环境变量优先，`0` 关闭），整个 `[debug]` 表都可以不写。`[device]` 同理：`displayWidth/Height/RefreshRate` 省略或 `0` 即自动探测。铺配置只写必要项。
