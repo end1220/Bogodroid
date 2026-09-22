@@ -35,12 +35,92 @@ extern "C" void bd_media_bench(const char* path, int frames);
 // jar:file://!/assets/... form before it reaches the NDK extractor. The
 // corresponding helper is at a stable offset in Oddmar's libunity build. Keep
 // this opt-in so other Unity ports retain the original behavior.
+//
+// ABI of libunity+0x4c124c -- a virtual-call forwarding thunk (see
+// docs/HANDOFF-ODDMAR.md §0.6-C). Its consumer starts at 0x53f020 and calls it
+// at 0x53f150. Read of the *whole* consumer path (2026-09-22, verified against
+// the 979746-byte splash mp4):
+//
+//   53f084  add  x0, sp, #0x480      ; a1 = &local_string (string object!)
+//   53f08c  bl   <string assign>     ; a1 <- original "jar:file://!/assets/..."
+//   53f090  ...  "http:" / "https:" / "file:" prefix checks on a1
+//   53f12c  mov  x1, xzr
+//   53f130  mov  w2, wzr
+//   53f13c  bl   106178              ; ★ a1 <- (NULL, 0)  i.e. the string is CLEARED
+//   53f138  str  xzr, [sp, #16]      ; slot a2 pre-cleared
+//   53f140  add  x0, sp, #0x48       ; a0 = object
+//   53f144  add  x1, sp, #0x480      ; a1 = &local_string   (in/out!)
+//   53f148  add  x2, sp, #0x10       ; a2 -> slot (data base)
+//   53f14c  add  x3, sp, #0x18       ; a3 -> slot (data length)
+//   53f150  bl   4c124c
+//   53f154  tbz  w0, #0, <fail>      ; return value is BOOL (bit0)
+//   53f158  ldp  x8, x3, [sp, #16]   ; x8 = slot a2, x3 = slot a3
+//   53f15c  add  x9, x20, x22        ; x9 = size + offset  (x20/x22 = consumer's
+//   53f160  add  x8, x8,  x22        ; x8 = base + offset   offset/size args)
+//   53f164  cmp  x9, x3              ; bounds: offset+size <= slot a3
+//   53f16c  b.ls 53f25c              ; -> success path
+//   ...
+//   53f300  cbnz x22, 53f308         ; x22 = base(slot a2) + offset
+//   53f308  ldr  x8, [sp, #0x480]    ; ★ data ptr of the translated string
+//   53f30c  mov  w1, wzr             ; O_RDONLY
+//   53f314  csel x0, x25, x8, eq     ; (x25 = &string+8 = inline buffer if data==0)
+//   53f318  bl   open@plt            ; open(<translated path>)
+//   53f32c  mov  x2, x22             ; base + offset
+//   53f338  mov  x3, x20             ; length
+//   53f33c  blr  x8                  ; [vtbl+136](obj, fd, offset, length)
+//                                    ;  == SetDataSourceFd(fd, offset, length)
+//   ...or, when x22 == 0, 53f2c4: [vtbl+144](obj, path) == SetDataSourcePath(path)
+//
+// So the helper's contract is:
+//     bool f(obj, string* path_in_out, void** out_base, size_t* out_len)
+// * path_in_out arrives holding the original URL and is CLEARED just before the
+//   call; the helper must store the *translated local path* back into it.
+//   Downstream consumers (prefix checks, open) read its first 8 bytes as the
+//   data pointer, using &obj+8 as the inline buffer when that pointer is 0.
+// * out_base/out_len describe where the media bytes live: out_base == NULL means
+//   "they live in a file" and out_base + offset becomes the file offset handed
+//   to the extractor. out_len is the total length and also the bound checked
+//   against offset+size.
+//
+// History of this hook (each step measured):
+//   v1  returned a path pointer     -> bit0 == 0, `tbz w0,#0` always "failure"
+//                                      -> could not translate -> -10004
+//   v2  wrote {path,path_len} slots -> tbz passed, but the path was never put
+//                                      back into a1 and slot a3 was 48 bytes,
+//                                      so open("") -> unable to open, error: 0
+//   v3  wrote a1 + {buffer,len}     -> path/open OK (fd=30!), but slot a2 fed a
+//                                      heap pointer into the offset, giving
+//                                      "offset=70369750858784" -> invalid data
+//   v4  a1 = path, a2 = NULL, a3 = length  (this one)
 static uintptr_t g_video_translate_orig = 0;
 static std::string g_bypass_video_path;
+static long long g_bypass_video_size = -1;
+
+// --- L2 diagnostics -------------------------------------------------------
+// libunity's load address; needed to resolve the absolute addresses of its
+// private globals. Filled in by main() right after libunity is mapped.
+static uintptr_t g_lunity_base = 0;
+namespace il2cpp_patch {
+    void probe_app_paths_pub(const char* tag);
+    void probe_fs_source_pub(const char* tag, uintptr_t base);
+}
 static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                                         uintptr_t a3, uintptr_t a4, uintptr_t a5,
                                         uintptr_t a6, uintptr_t a7)
 {
+    // L2 probe anchor. This hook fires exactly once and always *after* Unity has
+    // already built the StreamingAssets URL, so it is a safe late point to ask
+    // the managed runtime for Application.*Path and to resolve the private
+    // function that produced the URL host.
+    if (std::getenv("BD_PROBE_APPPATHS")) {
+        if (a1) {
+            const char* in = *reinterpret_cast<const char**>(a1);
+            BD_LOG("L2", "video translate in-URL = '%s'",
+                   in ? in : "(<null / inline buffer>)");
+        }
+        il2cpp_patch::probe_app_paths_pub("video");
+        il2cpp_patch::probe_fs_source_pub("video", g_lunity_base);
+    }
     if (g_bypass_video_path.empty()) {
         char cwd[PATH_MAX] = {};
         if (getcwd(cwd, sizeof(cwd))) {
@@ -51,12 +131,42 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
                 "/assets/Videos/mobge_and_senri_splash_video.mp4";
         }
     }
-    BD_LOG("MEDIA", "bypassing Unity video path translation -> %s",
-           g_bypass_video_path.c_str());
-    BD_LOG("MEDIA", "video translate args=%p %p %p %p %p %p %p %p",
-           (void*)a0, (void*)a1, (void*)a2, (void*)a3,
-           (void*)a4, (void*)a5, (void*)a6, (void*)a7);
-    return reinterpret_cast<uintptr_t>(g_bypass_video_path.c_str());
+
+    // Only the size is needed: the media stays in the file. -1 == not probed
+    // yet, 0 == unreadable, >0 == byte length.
+    if (g_bypass_video_size < 0 && !g_bypass_video_path.empty()) {
+        std::ifstream in(g_bypass_video_path.c_str(),
+                         std::ios::binary | std::ios::ate);
+        g_bypass_video_size = 0;
+        if (in) {
+            std::streamoff n = in.tellg();
+            if (n > 0) g_bypass_video_size = (long long)n;
+        }
+        BD_LOG("MEDIA", "bypass: %s -> %lld bytes",
+               g_bypass_video_path.c_str(), (long long)g_bypass_video_size);
+    }
+
+    // a1 is the caller's string object; it was cleared just before this call and
+    // the translated local path has to go back into it. Its first 8 bytes are
+    // the data pointer (0 == "use the inline buffer at obj+8"). Pointing that at
+    // our static path is enough for every downstream reader.
+    if (a1) {
+        const char** slot = reinterpret_cast<const char**>(a1);
+        BD_LOG("MEDIA", "bypass: a1 obj before = [%p %p %p %p]",
+               (void*)slot[0], (void*)slot[1], (void*)slot[2], (void*)slot[3]);
+        *slot = g_bypass_video_path.c_str();
+    }
+
+    // a2: NULL -- the media lives in a file, so the extractor gets a plain file
+    // offset. A non-NULL base would be added to the caller's offset and end up
+    // as a bogus file position.
+    if (a2) *reinterpret_cast<void**>(a2) = nullptr;
+    // a3: total length; also the bound the caller checks offset+size against.
+    if (a3) *reinterpret_cast<size_t*>(a3) = (size_t)g_bypass_video_size;
+
+    BD_LOG("MEDIA", "bypass: out path='%s' base=(nil) len=%lld -> return 1",
+           g_bypass_video_path.c_str(), (long long)g_bypass_video_size);
+    return 1;   // bool true - NOT a pointer
 }
 
 #include "logging.h"
@@ -364,6 +474,27 @@ namespace il2cpp_patch {
         }
     }
 
+    void probe_app_paths_pub(const char* tag) { probe_app_paths(tag); }
+
+    // ---- L2: what really produces the StreamingAssets URL host ---------------
+    // libunity 0x47e940 assembles
+    //     streamingAssetsPath = "jar:file://" + F() + "!/assets"
+    // and F() = 0x39f800 -> 0x4bbe14 (FS singleton) -> 0x4bfbe8, the latter a tail
+    // call to the virtual method in vtable slot 0x170 of *(singleton+8).
+    // Oddmar's URL is "jar:file://!/assets/..." i.e. F() == "" -- print the
+    // resolved slot so the actual producer can be disassembled statically.
+    void probe_fs_source_pub(const char* tag, uintptr_t base) {
+        if (!base) { BD_LOG("L2", "[%s] no libunity base (hook not armed?)", tag); return; }
+        const uintptr_t gp = base + 0xf0b000 + 0xB88;    // singleton pointer slot
+        uintptr_t s = *reinterpret_cast<uintptr_t*>(gp);
+        uintptr_t o = s ? *reinterpret_cast<uintptr_t*>(s + 8) : 0;
+        uintptr_t v = o ? *reinterpret_cast<uintptr_t*>(o) : 0;
+        uintptr_t f = v ? *reinterpret_cast<uintptr_t*>(v + 0x170) : 0;
+        BD_LOG("L2", "[%s] singleton@%p =%p  obj=%p  vtbl=%p  vtbl[0x170]=%p (libunity+%p)",
+               tag, (void*)gp, (void*)s, (void*)o, (void*)v, (void*)f,
+               (void*)(f ? f - base : 0));
+    }
+
     static void install_once() {
         if (g_installed) return;
         g_installed = true;
@@ -396,6 +527,7 @@ namespace il2cpp_patch {
     static void* il2cpp_init_hook(const char* name) {
         void* dom = g_orig_init(name);          // runtime now initialized
         install_once();
+        probe_app_paths("post-init");           // L2: early snapshot (may be too early)
         for (int i = 0; i < g_post_init_n; i++) {
             if (g_post_init_cb[i].cb) g_post_init_cb[i].cb(g_post_init_cb[i].userdata);
         }
@@ -437,13 +569,17 @@ namespace il2cpp_patch {
     static void init(so_module* lil2cpp) {
         g_mod = lil2cpp;
         load_config();
-        if (g_n == 0 && g_post_init_n == 0) return;  // no patches and no post-init hook -> fully inert
+        g_probe_app_paths = std::getenv("BD_PROBE_APPPATHS") != nullptr;
+        // No patches, no post-init hook and no probe -> fully inert.
+        if (g_n == 0 && g_post_init_n == 0 && !g_probe_app_paths) return;
         il2cpp_domain_get                 = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
         il2cpp_domain_get_assemblies      = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
         il2cpp_assembly_get_image         = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
         il2cpp_image_get_name             = (p_image_get_name)so_symbol(lil2cpp, "il2cpp_image_get_name");
         il2cpp_class_from_name            = (p_class_from_name)so_symbol(lil2cpp, "il2cpp_class_from_name");
         il2cpp_class_get_method_from_name = (p_class_get_method_from_name)so_symbol(lil2cpp, "il2cpp_class_get_method_from_name");
+        // Needed by the BD_PROBE_APPPATHS probe only; not part of the hard set.
+        il2cpp_runtime_invoke = (p_runtime_invoke)so_symbol(lil2cpp, "il2cpp_runtime_invoke");
         if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
             BD_LOG("DMG", "missing il2cpp API exports, patches disabled");
             return;
@@ -1161,6 +1297,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     loaded_modules[module_count++] = &lunity;
+    g_lunity_base = addr_lunity;
     BD_TIME("after loading libunity.so");
 
     if (std::getenv("BD_BYPASS_VIDEO_TRANSLATE")) {
