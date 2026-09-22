@@ -31,6 +31,34 @@ toml::table config;
 // Decode benchmark entry point (BD_MEDIA_BENCH); implemented in thunks/ndk/media.cpp.
 extern "C" void bd_media_bench(const char* path, int frames);
 
+// Unity 2018's AndroidVideoMedia rejects the unpacked, hostless
+// jar:file://!/assets/... form before it reaches the NDK extractor. The
+// corresponding helper is at a stable offset in Oddmar's libunity build. Keep
+// this opt-in so other Unity ports retain the original behavior.
+static uintptr_t g_video_translate_orig = 0;
+static std::string g_bypass_video_path;
+static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2,
+                                        uintptr_t a3, uintptr_t a4, uintptr_t a5,
+                                        uintptr_t a6, uintptr_t a7)
+{
+    if (g_bypass_video_path.empty()) {
+        char cwd[PATH_MAX] = {};
+        if (getcwd(cwd, sizeof(cwd))) {
+            std::string root(cwd);
+            if (root.size() < 8 || root.compare(root.size() - 8, 8, "gamedata") != 0)
+                root += "/gamedata";
+            g_bypass_video_path = root +
+                "/assets/Videos/mobge_and_senri_splash_video.mp4";
+        }
+    }
+    BD_LOG("MEDIA", "bypassing Unity video path translation -> %s",
+           g_bypass_video_path.c_str());
+    BD_LOG("MEDIA", "video translate args=%p %p %p %p %p %p %p %p",
+           (void*)a0, (void*)a1, (void*)a2, (void*)a3,
+           (void*)a4, (void*)a5, (void*)a6, (void*)a7);
+    return reinterpret_cast<uintptr_t>(g_bypass_video_path.c_str());
+}
+
 #include "logging.h"
 
 #include "debug_utils.h"
@@ -1134,6 +1162,15 @@ int main(int argc, char* argv[])
     }
     loaded_modules[module_count++] = &lunity;
     BD_TIME("after loading libunity.so");
+
+    if (std::getenv("BD_BYPASS_VIDEO_TRANSLATE")) {
+        const uintptr_t target = addr_lunity + 0x4c124c;
+        hook_address_detour(&lunity, target,
+                            (uintptr_t)&bypass_video_translate,
+                            &g_video_translate_orig);
+        BD_LOG("MEDIA", "video translation bypass armed target=%p orig=%p",
+               (void*)target, (void*)g_video_translate_orig);
+    }
 
     // libAkSoundEngine.so (Wwise). IL2CPP resolves [DllImport("AkSoundEngine")]
     // by dlopen("libAkSoundEngine.so") + dlsym, and dlopen_impl only answers for

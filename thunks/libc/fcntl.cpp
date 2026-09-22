@@ -79,6 +79,27 @@ char* clean_jar_path(const char* path) {
     }
     *dst = '\0';
 
+    // Offline Unity ports keep StreamingAssets unpacked under gamedata/assets.
+    // Unity 2018 can hand us the hostless form jar:file://!/assets/...; the
+    // generic cleanup above maps that to <cwd>/assets, which does not exist in
+    // the staging layout. Resolve the equivalent local tree before returning.
+    if (prefix_at_start) {
+        const char* asset = strstr(clean_path, "/assets/");
+        if (asset) {
+            char gamedata_path[PATH_MAX];
+            const size_t cwd_prefix = (size_t)(asset - clean_path);
+            if (cwd_prefix <= sizeof(gamedata_path) - 16) {
+                snprintf(gamedata_path, sizeof(gamedata_path), "%.*s/gamedata%s",
+                         (int)cwd_prefix, clean_path, asset);
+                struct stat st;
+                if (stat(gamedata_path, &st) == 0) {
+                    free(clean_path);
+                    return strdup(gamedata_path);
+                }
+            }
+        }
+    }
+
     // If path starts with "/", check existence
     if (clean_path[0] == '/') {
         struct stat st;
