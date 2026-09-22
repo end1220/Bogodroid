@@ -35,20 +35,24 @@ static std::string bd_abs_path(const std::string& path)
     }
 }
 
-static std::shared_ptr<jnivm::android::content::pm::ApplicationInfo>
-bd_make_application_info()
+// Where the app's own data pack lives.
+//
+// Two Android APIs answer this and Unity uses both: ApplicationInfo.sourceDir
+// (handed out through PackageManager) and Context.getPackageCodePath() (a
+// direct JNI call). It builds the StreamingAssets URL out of the latter --
+// "jar:file://<path>!/assets/..." -- and feeds that URL to AndroidVideoMedia,
+// which strips the jar: prefix and looks for the asset on disk.
+//
+// They must agree. They did not: getPackageCodePath() returned the raw config
+// string, so Oddmar's "./" went into the URL unmodified, normalised away to an
+// empty host, and every VideoPlayer open died with
+//   AndroidVideoMedia::OpenExtractor could not translate
+//   jar:file://!/assets/Videos/... to local file   ->   -10004
+// while a working port (SimpleVideoPlayer) resolved to a real directory
+// (".../gamedata") and got a file descriptor back. Resolve it once here, and
+// let both callers read the same answer.
+static std::string bd_compute_source_dir()
 {
-    auto info = std::make_shared<jnivm::android::content::pm::ApplicationInfo>();
-
-    std::string dd = config["paths"]["android_data"].value_or<std::string>("../");
-    info->dataDir = std::make_shared<FakeJni::JString>(bd_abs_path(dd).c_str());
-    BD_LOG("DATADIR", "ApplicationInfo.dataDir = %s",
-            info->dataDir->asStdString().c_str());
-
-    std::string pkg = config["package"]["packageName"].value_or<std::string>("");
-    info->packageName = std::make_shared<FakeJni::JString>(pkg.c_str());
-    BD_LOG("DATADIR", "ApplicationInfo.packageName = %s", pkg.c_str());
-
     // Prefer the staged Unity data-pack APK. cwd is already paths.game_files
     // after init_config, so resolve against current_path() first — joining
     // "./gamedata" again produced the broken .../gamedata/gamedata/ path.
@@ -81,6 +85,34 @@ bd_make_application_info()
             source = bd_abs_path(cand.string());
         }
     }
+    // Unity's Android StreamingAssets resolver only retains the package host
+    // when sourceDir looks like an APK. Our offline staging keeps the unpacked
+    // asset tree and usually has no physical APK, so provide the corresponding
+    // stable logical path; the media thunk maps its parent back to gamedata.
+    if (source.empty() || !std::filesystem::path(source).has_extension()) {
+        std::filesystem::path logical = std::filesystem::current_path() / "UnityDataAssetPack.apk";
+        source = logical.lexically_normal().string();
+    }
+    return source;
+}
+
+static std::shared_ptr<jnivm::android::content::pm::ApplicationInfo>
+bd_make_application_info()
+{
+    auto info = std::make_shared<jnivm::android::content::pm::ApplicationInfo>();
+
+    std::string dd = config["paths"]["android_data"].value_or<std::string>("../");
+    info->dataDir = std::make_shared<FakeJni::JString>(bd_abs_path(dd).c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.dataDir = %s",
+            info->dataDir->asStdString().c_str());
+
+    std::string pkg = config["package"]["packageName"].value_or<std::string>("");
+    info->packageName = std::make_shared<FakeJni::JString>(pkg.c_str());
+    BD_LOG("DATADIR", "ApplicationInfo.packageName = %s", pkg.c_str());
+
+    std::string source = bd_compute_source_dir();
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path();
     info->sourceDir = std::make_shared<FakeJni::JString>(source.c_str());
     info->publicSourceDir = std::make_shared<FakeJni::JString>(source.c_str());
     BD_LOG("DATADIR", "ApplicationInfo.sourceDir = %s", source.c_str());
@@ -175,7 +207,11 @@ jnivm::android::content::res::AssetManager::list(std::shared_ptr<FakeJni::JStrin
     }
     catch (const std::filesystem::filesystem_error& e) {
         verbose("JBRIDGE", "Error listing files in '%s': %s", relPath.c_str(), e.what());
-        std::make_shared<jnivm::Array<jnivm::java::lang::String>>(0);
+        // Falling off the end of a non-void function left the caller with
+        // whatever was in x0. Return an explicit empty array instead: a garbage
+        // jobject here becomes a managed NullReferenceException the moment the
+        // game iterates the result.
+        return std::make_shared<jnivm::Array<jnivm::java::lang::String>>(0);
     }
 }
 
@@ -637,6 +673,21 @@ jnivm::android::content::Context::getPackageName()
     return std::make_shared<FakeJni::JString>(config["package"]["packageName"].value_or<std::string>("package.name.not.defined"));
 }
 
+std::shared_ptr<jnivm::android::content::Context>
+jnivm::android::content::Context::getApplicationContext()
+{
+    // Java's Context.getApplicationContext() returns the application context,
+    // which for a single-Activity game is the Activity itself. Returning a real
+    // object (rather than falling into the STUB-MISS type-default path, which
+    // yields null for Ljava/lang/Object;) is what stops
+    // "JNI: Init'd AndroidJavaObject with null ptr!" and the
+    // AndroidTvChecker.IsAndroidOrFireTv NullReferenceException.
+    auto self = std::dynamic_pointer_cast<jnivm::android::content::Context>(
+        shared_from_this());
+    BD_LOG("JBRIDGE", "getApplicationContext -> %p", (void*)self.get());
+    return self;
+}
+
 std::shared_ptr<jnivm::android::content::SharedPreferences>
 jnivm::android::content::Context::getSharedPreferences(std::shared_ptr<FakeJni::JString> str, int num)
 {
@@ -654,15 +705,13 @@ jnivm::android::content::Context::getSharedPreferences(std::shared_ptr<FakeJni::
 std::shared_ptr<FakeJni::JString>
 jnivm::android::content::Context::getPackageCodePath()
 {
-    std::error_code ec;
-    const std::filesystem::path staged_apk =
-        std::filesystem::current_path() / "UnityDataAssetPack.apk";
-    if (std::filesystem::is_regular_file(staged_apk, ec)) {
-        const std::string path = staged_apk.lexically_normal().string();
-        BD_LOG("DATADIR", "getPackageCodePath -> %s", path.c_str());
-        return std::make_shared<FakeJni::JString>(path.c_str());
-    }
-    return std::make_shared<FakeJni::JString>(config["paths"]["android_package_code"].value_or<std::string>("./path_not_defined_code"));
+    // Same source of truth as ApplicationInfo.sourceDir -- see
+    // bd_compute_source_dir(). Unity concatenates this into the StreamingAssets
+    // URL ("jar:file://<this>!/assets/..."), so returning the raw config value
+    // here was what produced the hostless jar:file://!/... URL below.
+    const std::string path = bd_compute_source_dir();
+    BD_LOG("DATADIR", "getPackageCodePath -> %s", path.c_str());
+    return std::make_shared<FakeJni::JString>(path.c_str());
 }
 
 std::shared_ptr<jnivm::java::io::File>
@@ -745,8 +794,36 @@ jnivm::android::content::Context::getExternalCacheDir()
     return std::make_shared<jnivm::java::io::File>(std::make_shared<FakeJni::JString>(config["paths"]["android_cache"].value_or<std::string>("./path_not_defined_cache")));
 }
 
-// getObbDir / getObbDirs return null — left to the STUB-MISS path
-// (defaultVal<jobject> returns nullptr by default, same as before).
+static std::string bd_compute_obb_dir()
+{
+    auto* dirs = config["paths"]["android_obb_dirs"].as_array();
+    std::string value = "./";
+    if (dirs && !dirs->empty()) {
+        if (auto* first = dirs->get(0)->as_string())
+            value = std::string(first->get());
+    }
+    std::filesystem::path path(value);
+    if (path.is_relative())
+        path = std::filesystem::current_path() / path;
+    return bd_abs_path(path.lexically_normal().string());
+}
+
+std::shared_ptr<jnivm::java::io::File>
+jnivm::android::content::Context::getObbDir()
+{
+    const std::string path = bd_compute_obb_dir();
+    BD_LOG("DATADIR", "getObbDir -> %s", path.c_str());
+    return std::make_shared<jnivm::java::io::File>(
+        std::make_shared<FakeJni::JString>(path.c_str()));
+}
+
+std::shared_ptr<jnivm::Array<jnivm::java::io::File>>
+jnivm::android::content::Context::getObbDirs()
+{
+    auto result = std::make_shared<jnivm::Array<jnivm::java::io::File>>(1);
+    (*result)[0] = getObbDir();
+    return result;
+}
 
 int jnivm::android::content::Context::checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission)
 {
@@ -843,12 +920,15 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Function<&Context::getApplicationInfo> {}, "getApplicationInfo", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getPackageName> {}, "getPackageName", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getPackageCodePath> {}, "getPackageCodePath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getApplicationContext> {}, "getApplicationContext", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getSharedPreferences> {}, "getSharedPreferences", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getExternalFilesDir> {}, "getExternalFilesDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getFilesDir> {}, "getFilesDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getDataDir> {}, "getDataDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getCacheDir> {}, "getCacheDir", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getExternalCacheDir> {}, "getExternalCacheDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDir> {}, "getObbDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Context::getObbDirs> {}, "getObbDirs", FakeJni::JMethodID::PUBLIC },
     // getAssets / getPackageManager / getResources / getWindow /
     // getContentResolver -> registerFactory in android_descriptors.cpp.
     // getObbDir / getObbDirs -> STUB-MISS path returns null (same as before).

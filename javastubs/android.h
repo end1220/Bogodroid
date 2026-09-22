@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>   // FILE* on AssetReader
 #include <map>
 #include <memory>
 #include <mutex>
@@ -959,17 +960,26 @@ namespace android {
             std::shared_ptr<jnivm::android::content::pm::ApplicationInfo> getApplicationInfo();
             std::shared_ptr<FakeJni::JString> getPackageCodePath();
             std::shared_ptr<FakeJni::JString> getPackageName();
+            // android.content.Context.getApplicationContext() hands back the
+            // context itself. Unity reaches it through ReflectionHelper with the
+            // *generic* signature ()Ljava/lang/Object;, which cannot match a
+            // concrete ()Landroid/content/Context; return type, and several
+            // callers treat the null result as fatal ("JNI: Init'd
+            // AndroidJavaObject with null ptr!" / AndroidTvChecker NPE).
+            std::shared_ptr<jnivm::android::content::Context> getApplicationContext();
             std::shared_ptr<jnivm::android::content::SharedPreferences> getSharedPreferences(std::shared_ptr<FakeJni::JString> str, int num);
             std::shared_ptr<jnivm::java::io::File> getFilesDir();
             std::shared_ptr<jnivm::java::io::File> getDataDir();
             std::shared_ptr<jnivm::java::io::File> getExternalCacheDir();
             std::shared_ptr<jnivm::java::io::File> getCacheDir();
             std::shared_ptr<jnivm::java::io::File> getExternalFilesDir(std::shared_ptr<FakeJni::JString> path);
+            std::shared_ptr<jnivm::java::io::File> getObbDir();
+            std::shared_ptr<jnivm::Array<jnivm::java::io::File>> getObbDirs();
             static std::shared_ptr<jnivm::java::io::File> getExternalFilesDirInternal();
             int checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission);
             // getAssets / getPackageManager / getResources / getWindow /
-            // getContentResolver / getObbDir / getObbDirs -> STUB-MISS path
-            // (registerFactory in android_descriptors.cpp).
+            // getAssets / getPackageManager / getResources / getWindow are
+            // factory-backed in android_descriptors.cpp.
         };
 
         class Intent : public FakeJni::JObject {
@@ -1109,6 +1119,125 @@ public:
     std::shared_ptr<jnivm::Array<int>> getInputDeviceIds();
     std::shared_ptr<jnivm::android::view::InputDevice> getInputDevice(int device);
     void registerInputDeviceListener(std::shared_ptr<jnivm::android::hardware::input::InputManager::InputDeviceListener> listener, std::shared_ptr<jnivm::android::os::Handler> handler);
+};
+}
+
+namespace jnivm::com::mobge::assetlocator {
+// com.mobge.assetlocator.AssetLocator — Oddmar's own Java helper over the APK
+// asset tree.
+//
+// MobGe.Storage.AndroidAssetManager.GetRelativeFilePaths() calls ListAssets()
+// and iterates what comes back, so a missing method (the lookup returned null,
+// because jnivm had no such class and minted an empty auto-stub) turns into a
+// managed NullReferenceException inside AndroidAssetManager.Create() and the
+// game never locates a single asset — the window stays black even though Unity
+// keeps presenting frames. The constructor signature the game uses is
+// (Ljava/lang/Object;Ljava/lang/String;)V, i.e. (Context, rootPath).
+// com.mobge.assetlocator.AssetReader — the random-access reader
+// AssetLocator.GetReaderWrapper() hands back.
+//
+// MobGe.Storage.NativeAndroidReaderWrapper is a System.IO.Stream that forwards
+// every Stream operation to this object by name. The names are not guesses:
+// they sit in global-metadata's literal pool as one contiguous run
+// (idx 5278..5284), in this order —
+//
+//     Close  Read  GetBytes  Seek  <"The stream does not support writing.">  GetLength  GetPosition
+//
+// — which is exactly IAssetReader's surface plus the message that
+// ThrowWriteNotSupportedException raises. The two signatures that actually got
+// invoked while the object was still an inert stub came out of the dispatcher
+// (jnivm matches name + signature byte for byte):
+//
+//     Seek(JI)J      long Seek(long offset, int origin)
+//     Read(I)I       int  Read(int count)
+//
+// Read() only *reports how many bytes are available*; the bytes themselves come
+// from GetBytes(). That two-step shape is why the bundle header never parsed
+// when everything returned the stub default of 0: Read() answered "0 bytes" and
+// Unity bailed with "Unable to read header from archive file:" before it ever
+// asked for the payload.
+//
+// Stream semantics: SeekOrigin { Begin = 0, Current = 1, End = 2 }, matching
+// both .NET's SeekOrigin and C's SEEK_SET/CUR/END, so the int passes through
+// unchanged.
+class AssetReader : public FakeJni::JObject {
+public:
+    DEFINE_CLASS_NAME("com/mobge/assetlocator/AssetReader")
+
+    explicit AssetReader(const std::string& path);
+    // No `override`: jnivm::Object declares no virtual destructor (it is always
+    // owned through shared_ptr created as the concrete type).
+    ~AssetReader();
+
+    // Repositions the cursor, returns the new absolute position.
+    jlong Seek(jlong offset, jint origin);
+    // Number of bytes available from the cursor forward (bounded by `count`).
+    // Deliberately does NOT consume them: GetBytes() is the half that advances.
+    // Stashing here and returning the payload there keeps both plausible call
+    // orders correct — Read(n) then GetBytes(n), or GetBytes(n) on its own.
+    jint Read(jint count);
+    // Hands back the payload Read() just measured, or reads `count` bytes from
+    // the cursor when called standalone. Advances the cursor exactly once.
+    std::shared_ptr<FakeJni::JByteArray> GetBytes(jint count);
+    // Same Java name, no argument. The literal pool does not record which arity
+    // the managed side uses, so both are registered; the C++ name differs only
+    // because FakeJni cannot take the address of an overload set.
+    std::shared_ptr<FakeJni::JByteArray> GetBytesNoArg();
+    jlong GetLength();
+    jlong GetPosition();
+    void Close();
+
+private:
+    // Should this call be logged in full? The first calls are the interesting
+    // ones (they reveal the real fetch pattern); after that only a trickle, so
+    // a 13 MB bundle does not turn the log into a payload dump.
+    bool trace_call(const char* what, long long a1, long long a2);
+
+    void close_file();
+
+    FILE*     mFile = nullptr;
+    long long mPos = 0;
+    long long mSize = 0;
+    long long mCalls = 0;
+    std::string mPath;
+    // Bytes measured by the last Read() but not yet handed to GetBytes().
+    std::vector<jbyte> mPending;
+};
+
+class AssetLocator : public FakeJni::JObject {
+public:
+    DEFINE_CLASS_NAME("com/mobge/assetlocator/AssetLocator")
+    AssetLocator(std::shared_ptr<FakeJni::JObject> context,
+                 std::shared_ptr<FakeJni::JString> root);
+    // Mirrors android.content.res.AssetManager.list(): returns the *child
+    // names* of the given asset directory, not full paths. The managed caller
+    // re-prefixes the directory itself while recursing.
+    std::shared_ptr<jnivm::Array<FakeJni::JString>> ListAssets(
+        std::shared_ptr<FakeJni::JString> path);
+    // MobGe.Storage.NativeAndroidReaderWrapper asks the AssetLocator for a
+    // random-access reader over one file and wraps whatever comes back in a
+    // System.IO.Stream. The managed wrapper then drives it with the Java-side
+    // methods Close/Read/GetBytes/Seek/GetLength/GetPosition (those six literals
+    // sit next to `IAssetReader` / `JavaReadResults` / `NativeAndroidReaderWrapper`
+    // in global-metadata's literal pool).
+    //
+    // Returning null here (the method was simply absent from this class) made
+    // NativeAndroidReaderWrapper.Seek dereference a null _javaObject, which
+    // aborted every AssetBundle load with "Unable to read header from archive
+    // file:" -- eight times, then the boot stops.
+    //
+    // Declared with the Object return type the guest actually looks up:
+    // (Ljava/lang/String;)Ljava/lang/Object;
+    //
+    // The returned instance is a real com/mobge/assetlocator/AssetReader, so
+    // the guest's GetObjectClass() -> GetMethodID("Seek"/"Read"/...) lands on
+    // the class above instead of on java/lang/Object. That distinction is what
+    // makes the dispatcher find the bodies: while the return value was a bare
+    // jnivm::Object every lookup printed `cls=java/lang/Object ... entries=5`.
+    std::shared_ptr<jnivm::Object> GetReaderWrapper(
+        std::shared_ptr<FakeJni::JString> path);
+private:
+    std::string mRoot;
 };
 }
 #endif

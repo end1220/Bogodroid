@@ -41,7 +41,12 @@ ABI_ATTR media_status_t AMediaExtractor_setDataSourceCustom(
 ABI_ATTR size_t AMediaExtractor_getTrackCount(AMediaExtractor*);
 ABI_ATTR AMediaFormat* AMediaExtractor_getTrackFormat(AMediaExtractor*, size_t);
 ABI_ATTR media_status_t AMediaExtractor_selectTrack(AMediaExtractor*, size_t);
+// Unity's AndroidMediaNDK probes its symbol table up front and abandons the
+// whole NDK video path on the first miss, so every entry point it may look up
+// has to exist even where the NDK surface is wider than we implement.
+ABI_ATTR media_status_t AMediaExtractor_unselectTrack(AMediaExtractor*, size_t);
 ABI_ATTR int AMediaExtractor_getSampleTrackIndex(AMediaExtractor*);
+ABI_ATTR uint32_t AMediaExtractor_getSampleFlags(AMediaExtractor*);
 ABI_ATTR ssize_t AMediaExtractor_readSampleData(
     AMediaExtractor*, uint8_t*, size_t);
 ABI_ATTR int64_t AMediaExtractor_getSampleTime(AMediaExtractor*);
@@ -55,9 +60,24 @@ ABI_ATTR bool AMediaFormat_getInt32(AMediaFormat*, const char*, int32_t*);
 ABI_ATTR bool AMediaFormat_getInt64(AMediaFormat*, const char*, int64_t*);
 ABI_ATTR bool AMediaFormat_getFloat(AMediaFormat*, const char*, float*);
 ABI_ATTR bool AMediaFormat_getString(AMediaFormat*, const char*, const char**);
+ABI_ATTR bool AMediaFormat_getDouble(AMediaFormat*, const char*, double*);
+ABI_ATTR bool AMediaFormat_getBuffer(
+    AMediaFormat*, const char*, void**, size_t*);
 ABI_ATTR void AMediaFormat_setInt32(AMediaFormat*, const char*, int32_t);
+ABI_ATTR void AMediaFormat_setInt64(AMediaFormat*, const char*, int64_t);
+ABI_ATTR void AMediaFormat_setFloat(AMediaFormat*, const char*, float);
+ABI_ATTR void AMediaFormat_setDouble(AMediaFormat*, const char*, double);
+ABI_ATTR void AMediaFormat_setString(AMediaFormat*, const char*, const char*);
+ABI_ATTR void AMediaFormat_setBuffer(
+    AMediaFormat*, const char*, const void*, size_t);
+// Unity's AndroidMediaNDK probes this symbol first and abandons the whole
+// NDK video path if it is missing, so it must exist even though we only ever
+// use it to render a debug string.
+ABI_ATTR const char* AMediaFormat_toString(AMediaFormat*);
 
 ABI_ATTR AMediaCodec* AMediaCodec_createDecoderByType(const char*);
+ABI_ATTR AMediaCodec* AMediaCodec_createCodecByName(const char*);
+ABI_ATTR AMediaCodec* AMediaCodec_createEncoderByType(const char*);
 ABI_ATTR media_status_t AMediaCodec_delete(AMediaCodec*);
 ABI_ATTR media_status_t AMediaCodec_configure(
     AMediaCodec*, AMediaFormat*, void*, void*, uint32_t);
@@ -74,8 +94,15 @@ ABI_ATTR ssize_t AMediaCodec_dequeueOutputBuffer(
 ABI_ATTR uint8_t* AMediaCodec_getOutputBuffer(
     AMediaCodec*, size_t, size_t*);
 ABI_ATTR AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec*);
+ABI_ATTR AMediaFormat* AMediaCodec_getInputFormat(AMediaCodec*);
+ABI_ATTR AMediaFormat* AMediaCodec_getBufferFormat(AMediaCodec*);
 ABI_ATTR media_status_t AMediaCodec_releaseOutputBuffer(
     AMediaCodec*, size_t, bool);
+ABI_ATTR media_status_t AMediaCodec_releaseOutputBufferAtTime(
+    AMediaCodec*, size_t, int64_t);
+ABI_ATTR const char* AMediaCodec_getName(AMediaCodec*);
+ABI_ATTR media_status_t AMediaCodec_setParameters(
+    AMediaCodec*, const AMediaFormat*);
 ABI_ATTR media_status_t AMediaCodec_setOutputSurface(
     AMediaCodec*, void*);
 

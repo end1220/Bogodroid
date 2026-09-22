@@ -13,6 +13,7 @@ void HookStringExtensions(FakeJni::Jvm* vm);
 void HookClassExtensions(FakeJni::Jvm* vm);
 void HookIntExtensions(FakeJni::Jvm* vm);
 void HookObjectExtensions(FakeJni::Jvm* vm);
+void HookThrowableExtensions(FakeJni::Jvm* vm);
 
 namespace jnivm {
 namespace java {
@@ -69,6 +70,47 @@ namespace java {
             std::shared_ptr<FakeJni::JString> getMessage();
         private:
             std::shared_ptr<FakeJni::JString> message_;
+        };
+
+        // [BD] java/lang/StackTraceElement.
+        //
+        // Unity's managed-exception path builds one of these per frame --
+        // (String declaringClass, String methodName, String fileName,
+        // int lineNumber) -- collects them into an array and hands it to
+        // Throwable.setStackTrace(). With no class registered the constructor
+        // hits STUB-MISS and every element is a null reference, so anything
+        // downstream that touches the stack trace (Crashlytics deciding whether
+        // the exception is reportable, Unity's own error reporting) sees a
+        // malformed exception.
+        //
+        // Note the constructor is registered through FakeJni::Constructor, which
+        // jnivm matches against a *rewritten* signature: GetMethodID() turns
+        // "<init>(...)V" into the static "(...)Ljava/lang/StackTraceElement;"
+        // before looking it up (internal/method.cpp). Registering a plain
+        // instance <init> would never be found.
+        class StackTraceElement : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("java/lang/StackTraceElement")
+            StackTraceElement() = default;
+            StackTraceElement(std::shared_ptr<FakeJni::JString> declaringClass,
+                std::shared_ptr<FakeJni::JString> methodName,
+                std::shared_ptr<FakeJni::JString> fileName,
+                jint lineNumber);
+            // Named getDeclaringClassName() rather than getClassName(): the
+            // DEFINE_CLASS_NAME macro above already declares a static
+            // getClassName(), and the two would collide. The JNI method name is
+            // set in the descriptor, so Java still sees getClassName().
+            std::shared_ptr<FakeJni::JString> getDeclaringClassName();
+            std::shared_ptr<FakeJni::JString> getMethodName();
+            std::shared_ptr<FakeJni::JString> getFileName();
+            jint getLineNumber();
+            std::shared_ptr<FakeJni::JString> toString();
+
+        private:
+            std::shared_ptr<FakeJni::JString> declaringClass_;
+            std::shared_ptr<FakeJni::JString> methodName_;
+            std::shared_ptr<FakeJni::JString> fileName_;
+            jint lineNumber_ = -1;
         };
 
         // [BD] Shadow class providing additional methods on java/lang/String.

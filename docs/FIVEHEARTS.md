@@ -25,12 +25,17 @@ D-Pad 跳转、`decode worker` flush/restart、稳态 `publish≈19–20 fps`、
 `drop=0`、`exited (0)`；事件写入 `conf/seekprobe.log`（IL2CPP Release 的
 `Debug.Log` 进不了 loader stderr）。
 
+**片源分辨率**：最终保留 **1280×720**（见 §4.5）。目标掌机不止 640×480，
+还有 **960×720** 等面板；不要为单机把片源压到「刚好等于当前 drawable」。
+软解成本由异步 worker + `yuv_gpu` 承担；更小分辨率只作可选性能档，不是默认。
+
 **仍待解决（§4.6 B）**：
 
 1. **`textureMaxDim` 正确识别 RenderTarget**：当前只能设为 `0` 绕过裁切，尚未兼得
-   纹理省内存与 RT 尺寸正确。
+   纹理省内存与 RT 尺寸正确。修法见该节。
 
-**暂缓**：H700 硬解接口不通；全局“稍微偏白”目前无法复现。
+**暂缓**：H700 硬解接口不通（CedarX 缺失，见 spike）。  
+**已关闭**：「稍微偏白」——后续游玩与抓帧均未再出现，不再跟进（原 §4.4）。
 
 ---
 
@@ -226,16 +231,16 @@ limited、SD 用 BT.601 limited；可用 `[video] color_matrix`（`auto/bt601/bt
 H700 VPU 接入探测与 No-Go 依据见
 [`H700_VIDEO_DECODE_SPIKE.md`](H700_VIDEO_DECODE_SPIKE.md)。
 
-### 4.3 当前状态与后续优化边界（2026-09-17）
+### 4.3 当前状态与后续优化边界（2026-09-18）
 
 当前掌机验证基线：
 
-- 异步 worker 诊断版 SHA-256：`be537105…d87097`；
-- 当前无日志 Release SHA-256：`5a733b35…7fbcf37`；
+- 中间态日志 Release（LOG=ON，TRACE 关）为日常上机默认；全关 LOG 仅作对照；
 - `[video] path = "yuv_gpu"`、色彩矩阵/范围均为 `auto`；
-- `[gpu] textureMaxDim = 0`；失败的 sRGB 实验代码未保留；
-- 当前视频为 1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range；
-- 不同离线编码的帧率对照见 §4.5；待办清单见 §4.6。
+- `[gpu] textureMaxDim = 0`；失败的 sRGB 实验代码未保留；「偏白」已关闭（§4.4）；
+- 当前视频为 1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range
+  （兼顾 640×480 与 960×720 等面板，见 §4.5）；
+- 不同离线编码的帧率对照见 §4.5；待办清单见 §4.6（仅剩 B）。
 
 这里的“GPU 优化”不是 H.264 硬解。H.264 仍由 FFmpeg 在 CPU 上解成 I420；
 GPU 只接手原先由 CPU 完成的 I420→RGBA 色转。现阶段最大的剩余成本是软解本身，
@@ -243,10 +248,11 @@ GPU 只接手原先由 CPU 完成的 I420→RGBA 色转。现阶段最大的剩�
 
 软解条件下的后续边界（不替代 §4.6）：
 
-1. 无日志 Release 已复测通过；日常部署继续使用该构建。
+1. 中间态日志已验收；全关 LOG 仅在压体积/对照时用。
 2. `BD_MEDIA_THREADS` 保持 FFmpeg 默认值；当前观感已达标，不再为几帧收益增加
    与 Unity/音频争核的风险。
-3. 若以后还要降 CPU 或体积，优先试 960×540，再考虑 854×480（见 §4.5）。
+3. 默认片源保持 720p；若某一机型仍要降 CPU，可**另打** 960×540 / 854×480
+   性能档 APK，不要改默认去对齐单机 drawable。
 4. 双 PBO/减少 GL 状态保存只能优化约 1.9–3 ms 的上传色转，优先级低。
 
 H700 硬解当前仍是 No-Go：芯片有 Cedar 引擎，但系统没有 aarch64 CedarX，
@@ -254,12 +260,12 @@ H700 硬解当前仍是 No-Go：芯片有 Cedar 引擎，但系统没有 aarch64
 否则不能把 32 位厂商 CedarX 库直接装进 64 位 unityloader。详见
 [`H700_VIDEO_DECODE_SPIKE.md`](H700_VIDEO_DECODE_SPIKE.md)。
 
-### 4.4 “稍微偏白”调查暂结（2026-09-17）
+### 4.4 “稍微偏白”（已关闭，2026-09-18）
 
-Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任该 capability；相关
-代码和配置未保留。`/dev/fb0` 的 swap 300/600/900 抓帧及后续手工启动均正常，问题
-暂时无法复现。若重现，以 `/dev/fb0` 和 Android 同帧数值对比；Mali 下
-`glReadPixels` 曾返回全黑，不能单独作为颜色证据。
+曾怀疑 Mali sRGB capability / fb 路径导致全局偏白；试验性开 sRGB 反而更白，
+相关代码未保留。之后多次掌机游玩与抓帧均**未再出现**，按已消失处理，不再跟进。
+若偶然重现：用 `/dev/fb0` 与 Android 同帧数值对比；Mali 下 `glReadPixels` 曾
+返回全黑，不能单独作为颜色证据。
 
 ### 4.5 离线编码与异步 worker 对照（掌机，`yuv_gpu`，2026-09-17）
 
@@ -286,8 +292,10 @@ Mali 虽回报 sRGB capable，但试验性启用后实屏更白，不能信任�
 - APK 指纹（便于复测）：低开销包 `C1AA5E37…E01479`（16:17）；高画质包 `1952B63D…31A73D2`（16:49）。视频在 AssetBundle 内，经 `AMediaDataSource` 读入；`conf/FiveHearts/video/INTRO.mp4` 若存在只是旧遗留，不参与本次 intro 播放。
 
 最终选型：保留 **1280×720@30、High、B 帧=2、约 900 kbps、BT.709 TV range**。
-中间态日志 / 无日志 Release 的实际游玩主观确认比同步软解流畅；画质与流畅度均满意，
-不再为降码率或取消 B 帧牺牲观感。
+该分辨率同时覆盖 640×480 与 **960×720** 等目标面板（cover-fit / letterbox 由
+游戏 UI 负责）；**不要**为迁就某一台 drawable 把默认片源压到面板像素。
+854×480 / 960×540 仅作「还要再抠软解」时的可选档。中间态日志下实际游玩确认
+画质与流畅度均满意。
 
 ### 4.6 实现状态与剩余问题（唯一权威清单，2026-09-18）
 
@@ -368,17 +376,33 @@ Unity / 渲染相关路径不再同步支付软解时间。
 | 无日志 / 中间态主观流畅度 | 通过：满意，明确高于 21fps |
 | 主动 seek | 通过：SeekProbe 掌机 5 次跳转 + worker flush/restart |
 
-#### B. `textureMaxDim` 识别 RenderTarget（正经修法）
+#### B. `textureMaxDim` 识别 RenderTarget（正经修法，未做）
 
 **现状**：`textureMaxDim = 0` 绕过误缩视频 RT 的裁切；开 `>0` 仍会打到
 `glTexStorage2D` 创建的 RenderTexture（见 §4.1 / CASE_STUDIES 案例三）。
 SeekProbe / FiveHearts 上机配置均保持 `textureMaxDim = 0`。
 
-**目标**：内容上传可继续 cap 省内存；被 `glFramebufferTexture2D` 挂成颜色附件的
-纹理（或明确的 RT 分配）不缩，viewport 与 attachment 尺寸保持一致。
+**根因摘要**：cap 挂在 `bd_glTexStorage2D()`；当前只豁免 LUT/条带，以及
+**尺寸恰好等于面板**。视频 RT 常见 1280×720 ≠ 640×480 / 960×720 → 被缩 →
+viewport 与 attachment 脱钩 → 画面裁切。且 `glTexStorage2D` 不可变：一旦按
+缩小尺寸分配，后面 `glFramebufferTexture2D` 发现是 RT 也**无法再放大**。
 
-**验收**：同一标题可设合理 `textureMaxDimRGBA8>0`，视频 / 后处理 RT 日志中
-`attachment size == viewport`，画面不裁切；rss 相对全关 cap 有可测下降。
+**推荐修法（按优先级）**：
+
+1. **RGBA8 在 `TexStorage2D` 上不缩（首选）**  
+   - `levels == 1` 的大尺寸 RGBA8/SRGB8 多数是 RT / 视频目标；对此**按请求尺寸分配**。  
+   - 内容贴图省内存继续靠离线 ASTC retier（ETC2/ASTC 的 runtime cap 本就无效）。  
+   - 老 Unity 的 `glTexImage2D` 内容上传路径可继续做 box cap（有像素=内容）。
+2. **放宽 RT 启发式（小补丁）**  
+   - 现有 `width==displayW && height==displayH` 不够。可额外豁免：常见
+     1280×720 / 1920×1080 / 半分辨率，或长宽比接近面板且两边都 ≥ 面板短边。  
+   - 启发式会漏/误伤，只宜作过渡。
+3. **不要做的**：在 `FramebufferTexture2D` 时发现已缩再重建纹理——不可变
+   storage + Unity 已持有 name，又脏又险。
+
+**验收**：同一标题设合理 `textureMaxDimRGBA8>0`，视频 RT 日志
+`attachment size == viewport`，画面不裁；内容贴图 rss 相对全关 cap 有可测下降
+（或至少不明显回退）。多机型用 `[device] display*=0` 自动探测，勿写死 640×480。
 
 #### C. 次级优化（待测，非阻塞）
 
@@ -389,7 +413,8 @@ SeekProbe / FiveHearts 上机配置均保持 `textureMaxDim = 0`。
 
 - H700 Cedar / V4L2 硬解：No-Go，见 spike 文档。
 - 仅凭 SDL `FRAMEBUFFER_SRGB_CAPABLE` 向 Unity 谎称 sRGB：已证会更白，实验代码不保留。
-- 「稍微偏白」全局调查：已暂结（§4.4）。
+- 「稍微偏白」：已关闭（§4.4），问题已消失。
+- 默认片源压到「等于当前面板」：否。多机型（640×480 / 960×720 等）共用 720p。
 - seek 窗口内的短暂掉帧：worker flush/restart 固有成本，不做专项优化。
 ---
 

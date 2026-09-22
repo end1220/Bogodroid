@@ -30,6 +30,11 @@ template<bool returnZero=false>
 jclass FindClass(JNIEnv *env, const char *name) {
 	auto&& nenv = *ENV::FromJNIEnv(env);
 	std::lock_guard<std::mutex> lock(nenv.GetVM()->mtx);
+	// Explicit guest -> VM class lookups, in order. Cheap (a handful per boot)
+	// and it is the only place that names classes the guest reaches without
+	// ever calling GetMethodID on them - which is exactly the case for a class
+	// Unity only ever hands to `new AndroidJavaClass(...)`.
+	LOG("BD-FINDCLASS", "FindClass(%s)", name ? name : "(null)");
 	return InternalFindClass(env, name, returnZero, true);
 };
 jmethodID FromReflectedMethod(JNIEnv *env, jobject obj) {
@@ -93,8 +98,16 @@ jobject ToReflectedField(JNIEnv * env, jclass c, jfieldID fid, jboolean isStatic
 	return 0;
 };
 jint Throw(JNIEnv *env, jthrowable ex) {
-	auto except = JNITypes<std::shared_ptr<jnivm::Throwable>>::JNICast(ENV::FromJNIEnv(env), ex);
-	(ENV::FromJNIEnv(env))->current_exception = except ? except : nullptr;
+	auto th = JNITypes<std::shared_ptr<jnivm::Throwable>>::JNICast(ENV::FromJNIEnv(env), ex);
+	// Deliberately leaves `except` empty: a throwable handed in here is a
+	// modelled Java object from game code, so it has no C++ exception behind it.
+	// That is what marks it, for Method's invoke(), as "pending" rather than
+	// "unwind me" -- see RethrowThrowable(). Attaching a synthetic exception
+	// instead turns Unity's managed-exception path into a std::terminate(),
+	// because the rethrow escapes into libunity's native frames, which have no
+	// try/catch: Unity expects to observe the exception through
+	// ExceptionCheck()/ExceptionOccurred(), exactly as on Android.
+	(ENV::FromJNIEnv(env))->current_exception = th ? th : nullptr;
 #ifndef NDEBUG
 	LOG("BD-EXC", "Throw() ex=%p", (void*)ex);
 #endif
@@ -122,7 +135,7 @@ jthrowable ExceptionOccurred(JNIEnv * env) {
 void ExceptionDescribe(JNIEnv *env) {
 	if((ENV::FromJNIEnv(env))->current_exception) {
 		try {
-			std::rethrow_exception((ENV::FromJNIEnv(env))->current_exception->except);
+			RethrowThrowable((ENV::FromJNIEnv(env))->current_exception.get());
 		} catch (const std::exception& ex) {
 			LOG("JNIVM", "Exception with Message `%s` was thrown", ex.what());
 		} catch (...) {
@@ -286,12 +299,33 @@ jboolean IsInstanceOf(JNIEnv *env, jobject jo, jclass cl) {
 
 #include "internal/array.hpp"
 
+// Every Method created here is handed out to native code as a raw jmethodID.
+// UnregisterNatives() erases native Methods from clazz->methods, dropping the
+// last shared_ptr and freeing them; a caller that cached the id -- FakeJni's
+// MethodProxy does exactly that -- then dereferences freed memory. Because the
+// allocator reuses the block for the next same-sized Method, the stale id does
+// not crash cleanly: it silently starts naming a *different* native function
+// (observed on Oddmar: a cached fmodGetInfo id began resolving to
+// fmodProcessMicData, which then fed the infoId straight into
+// GetDirectBufferAddress and segfaulted). Pin registered native Methods for the
+// process lifetime so a cached id can never go stale.
+static std::vector<std::shared_ptr<Method>>& bd_registered_method_keepalive() {
+	static std::vector<std::shared_ptr<Method>> keep;
+	return keep;
+}
+static std::mutex& bd_registered_method_mtx() {
+	static std::mutex mtx;
+	return mtx;
+}
+
 jint RegisterNatives(JNIEnv *env, jclass c, const JNINativeMethod *method, jint i) {
 	auto&& clazz = JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(ENV::FromJNIEnv(env), c);
 	if(!clazz) {
 		LOG("JNIVM", "RegisterNatives failed, class is nullptr");
 	} else {
 		std::lock_guard<std::mutex> lock(clazz->mtx);
+		LOG("BD-REG", "RegisterNatives class=%s count=%d methods_before=%zu",
+			clazz->nativeprefix.c_str(), (int)i, clazz->methods.size());
 		while(i--) {
 			clazz->natives[method->name] = method->fnPtr;
 #ifdef JNI_TRACE
@@ -303,7 +337,13 @@ jint RegisterNatives(JNIEnv *env, jclass c, const JNINativeMethod *method, jint 
 			m->name = method->name;
 			m->signature = method->signature;
 			m->native = method->fnPtr;
+			LOG("BD-REG", "  %s %s -> %p Method=%p",
+				method->name, method->signature, method->fnPtr, (void*)m.get());
 			clazz->methods.push_back(m);
+			{
+				std::lock_guard<std::mutex> klock(bd_registered_method_mtx());
+				bd_registered_method_keepalive().push_back(m);
+			}
 			method++;
 		}
 	}
@@ -315,6 +355,8 @@ jint UnregisterNatives(JNIEnv *env, jclass c) {
 		LOG("JNIVM", "UnRegisterNatives failed, class is nullptr");
 	} else {
 		std::lock_guard<std::mutex> lock(clazz->mtx);
+		LOG("BD-REG", "UnregisterNatives class=%s methods_before=%zu",
+			clazz->nativeprefix.c_str(), clazz->methods.size());
 		clazz->natives.clear();
 		for(size_t i = 0; i < clazz->methods.size(); ++i) {
 			if(clazz->methods[i]->native) {

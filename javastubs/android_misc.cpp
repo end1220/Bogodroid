@@ -166,6 +166,14 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
     { FakeJni::Function<&Activity::getWindow> {}, "getWindow", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Activity::findViewById> {}, "findViewById", FakeJni::JMethodID::PUBLIC },
+    // Unity frequently resolves these on Activity rather than walking the
+    // Context base class. Keep explicit entries so the package path cannot
+    // fall back to the null-returning auto-stub.
+    { FakeJni::Function<&Activity::getPackageCodePath> {}, "getPackageCodePath", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getApplicationInfo> {}, "getApplicationInfo", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getPackageName> {}, "getPackageName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getObbDir> {}, "getObbDir", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Activity::getObbDirs> {}, "getObbDirs", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::NativeActivity) { FakeJni::Constructor<NativeActivity> {} },

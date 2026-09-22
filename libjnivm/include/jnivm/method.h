@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <functional>
 #include <jni.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include "methodhandlebase.h"
 
@@ -98,6 +100,14 @@ namespace jnivm {
 template<class T, class... param> jvalue jnivm::Method::j2invoke(JNIEnv &env, T cl, param ...params) {
     jvalue ret;
     if(native) {
+        // Diagnostic hook for ports chasing "the game's native entry point does
+        // not match the name it was registered under". BD_J2_TRACE=1 prints the
+        // exact fnPtr about to be called together with the Method it came from.
+        static const bool bd_j2_trace = ::getenv("BD_J2_TRACE") != nullptr;
+        if(bd_j2_trace) {
+            ::fprintf(stderr, "[BD-J2] native=%p sig=%s name=%s\n",
+                      native, signature.c_str(), name.c_str());
+        }
         auto type = signature[signature.find_last_of(')') + 1];
         switch (type) {
         case 'V':
@@ -139,8 +149,17 @@ template<class T, class... param> jvalue jnivm::Method::j2invoke(JNIEnv &env, T 
         jvalue args[sizeof...(params) > 0 ? sizeof...(params) : 1] = { toJValue(JNITypes<param>::ToJNIReturnType(ENV::FromJNIEnv(&env), params))... };
         ret = jinvoke(*ENV::FromJNIEnv(&env), cl, args);
     }
-    if((ENV::FromJNIEnv(&env))->current_exception) {
-        std::rethrow_exception((ENV::FromJNIEnv(&env))->current_exception->except);
+    // A pending Java exception is unwound as a C++ exception only when it came
+    // out of a real catch(...) inside a native method implementation. One that
+    // the game itself raised through JNI Throw() has no C++ exception behind it
+    // and must stay pending instead: on Android that call returns normally and
+    // the caller collects the exception with ExceptionCheck()/ExceptionOccurred().
+    // Unwinding here would escape into the game's native frames, which have no
+    // try/catch, and end as std::terminate() -- Unity's managed-exception path
+    // does exactly that (see javac.h on java/lang/Error), so it must not.
+    if((ENV::FromJNIEnv(&env))->current_exception &&
+       (ENV::FromJNIEnv(&env))->current_exception->except) {
+        jnivm::RethrowThrowable((ENV::FromJNIEnv(&env))->current_exception.get());
     }
     return ret;
 }

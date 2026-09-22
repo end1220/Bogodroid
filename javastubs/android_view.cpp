@@ -11,6 +11,7 @@ extern toml::table config;
 #include <fstream>
 #include <input_backend.h>
 #include <inttypes.h>
+#include <mutex>
 #include <pthread.h>
 
 ///// SurfaceTexture / Surface
@@ -144,6 +145,31 @@ long jnivm::android::view::Display::getPresentationDeadlineNanos() { return 0; }
 
 void jnivm::android::view::Display::getRealMetrics(std::shared_ptr<jnivm::android::util::DisplayMetrics> metrics)
 {
+    if (!metrics) {
+        // [BD] Unity fills this argument by resolving <init> on
+        // android/util/DisplayMetrics itself and new-ing one. A null pointer
+        // means that lookup missed and the call handed back a default -- and
+        // since the very next thing this function does is write through it,
+        // that used to end in a SIGSEGV at fault addr 0x58 before the game
+        // ever got a frame on screen. Dump what the class actually registered
+        // so the registration and the lookup key can be compared directly.
+        BD_LOG("JBRIDGE", "getRealMetrics: metrics is NULL");
+        auto env = jnivm::ENV::FromJNIEnv(&FakeJni::JniEnvContext().getJniEnv());
+        auto cl = env->GetClass<jnivm::android::util::DisplayMetrics>(
+            "android/util/DisplayMetrics");
+        if (cl) {
+            std::lock_guard<std::mutex> lock(cl->mtx);
+            BD_LOG("JBRIDGE", "  DisplayMetrics class=%p prefix='%s': %zu methods, %zu fields",
+                   (void*)cl.get(), cl->nativeprefix.c_str(),
+                   cl->methods.size(), cl->fields.size());
+            for (auto& m : cl->methods)
+                BD_LOG("JBRIDGE", "   reg %p name='%s' sig='%s' static=%d native=%p handle=%p",
+                       (void*)m.get(), m->name.c_str(), m->signature.c_str(), (int)m->_static,
+                       m->native, (void*)m->nativehandle.get());
+        }
+        return;
+    }
+
     metrics->widthPixels = bd_device_display_width();
     metrics->heightPixels = bd_device_display_height();
     metrics->densityDpi = config["device"]["displayDpi"].value_or<int>(100);

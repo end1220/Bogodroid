@@ -30,19 +30,72 @@ void jnivm::log_stub_miss_once(const char* kind, const char* cls, const char* me
     }
 }
 
+// Rewrite every `L...;` class component of a signature to JNI slash form.
+//
+// Unity builds constructor signatures out of java.lang.Class.getName(), so a
+// parameter class arrives dotted ("Lcom.unity3d.player.UnityPlayerActivity;")
+// while every class in this tree registers itself in slash form. On a device
+// that string is parsed by the Java half, which wants dots; jnivm uses it
+// verbatim as a lookup key, so without this the two can never agree.
+//
+// Only L-components can contain dots, so one pass is enough; `$` (nested
+// classes) and `[` (arrays) are passed through untouched.
+static std::string normalize_jni_sig(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    bool inClass = false;
+    for (char c : in) {
+        if (c == 'L')
+            inClass = true;
+        else if (c == ';')
+            inClass = false;
+
+        out.push_back(inClass && c == '.' ? '/' : c);
+    }
+    return out;
+}
+
 template<bool isStatic, bool ReturnNull, bool AllowNative, bool trace>
 jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const char *str1) {
     std::shared_ptr<Method> next;
     std::string sname = str0 ? str0 : "";
     std::string ssig = str1 ? str1 : "";
     auto cur = JNITypes<std::shared_ptr<Class>>::JNICast(ENV::FromJNIEnv(env), cl);
+    if(str0 && std::strcmp(str0, "<init>") == 0) {
+        LOG("BD-JNIVM", "[BD-CTOR-ENTER] cls=%s sig='%s' static=%d retNull=%d allowNative=%d trace=%d entries=%zu",
+            cur ? cur->nativeprefix.c_str() : "(null)", str1 ? str1 : "(null)",
+            (int)isStatic, (int)ReturnNull, (int)AllowNative, (int)trace,
+            cur ? cur->methods.size() : 0);
+    }
     if(cur) {
         // Rewrite init to Static external function
-        if(!isStatic && sname == "<init>") {
+        //
+        // The `!isStatic` guard that used to be here assumed a constructor is
+        // only ever looked up through GetMethodID. Unity's IL2CPP
+        // AndroidJNIHelper.GetConstructorID path reaches the static overload
+        // instead, and with the guard in place that lookup skipped the rewrite,
+        // compared the raw "(...)V" against constructors this tree registers in
+        // the static "(...)L<class>;" form, missed, and degraded to an empty
+        // stub. The caller then invoked that stub and got a default (null)
+        // object back -- which is how com.mobge.assetlocator.AssetLocator
+        // silently never existed.
+        // Only rewrite the un-rewritten form. After the rewrite the return
+        // slot holds L<class>; instead of V, which both marks the string as
+        // already canonical and stops the recursion below from firing again.
+        //
+        // Both tests have to gate the rewrite *and* the else. An earlier
+        // revision nested the void test inside the if body, so a lookup that
+        // arrived already canonical (that same recursion) matched the name,
+        // failed the inner test, and then fell past the search altogether --
+        // reporting a miss against a table whose entry matched byte for byte.
+        const auto close = ssig.find(')');
+        const bool bdVoidCtor = close != std::string::npos &&
+                                close + 1 < ssig.size() && ssig[close + 1] == 'V';
+        if(sname == "<init>" && bdVoidCtor) {
             {
                 std::lock_guard<std::mutex> lock(cur->mtx);
-                auto acbrack = ssig.find(')') + 1;
-                ssig.erase(acbrack, std::string::npos);
+                ssig = normalize_jni_sig(ssig);
+                ssig.erase(close + 1, std::string::npos);
                 ssig.append("L");
                 ssig.append(cur->nativeprefix);
                 ssig.append(";");
@@ -67,6 +120,40 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
 #endif
     }
     if(!next) {
+        LOG("BD-JNIVM", "[BD-ANY-MISS] cls=%s str0='%s' str1='%s' static=%d allowNative=%d trace=%d entries=%zu",
+            cur ? cur->nativeprefix.c_str() : "(null)", str0 ? str0 : "(null)",
+            str1 ? str1 : "(null)", (int)isStatic, (int)AllowNative, (int)trace,
+            cur ? cur->methods.size() : 0);
+        // [BD] Report *every* miss, not only the ones that give up.
+        //
+        // Stock jnivm logs a miss only when ReturnNull makes it return null,
+        // and only with NDEBUG off -- so the case that actually hurts a port
+        // stayed invisible: a miss that silently materialises an empty stub
+        // (nativehandle == nullptr) and hands it back as a valid jmethodID.
+        // The caller invokes that stub, gets a default value, and carries on
+        // holding a null object.
+        if(trace) {
+            log_stub_miss_once(
+                AllowNative ? "Native MethodID" : isStatic ? "Static MethodID" : "MethodID",
+                cur ? cur->nativeprefix.data() : "(null)",
+                str0 ? str0 : "(null)",
+                str1 ? str1 : "(null)");
+        }
+        // [BD] A miss on a class that already has entries, or on a constructor,
+        // is the shape that matters: something is registered under that name and
+        // the key still did not match it. Dump both sides.
+        if(trace && cur) {
+            std::lock_guard<std::mutex> lock(cur->mtx);
+            if(!cur->methods.empty() || (str0 && std::strcmp(str0, "<init>") == 0)) {
+                LOG("BD-JNIVM", "[BD-MISS] %s str0='%s' str1='%s' static=%d allowNative=%d entries=%zu",
+                    cur->nativeprefix.c_str(), str0 ? str0 : "(null)", str1 ? str1 : "(null)",
+                    (int)isStatic, (int)AllowNative, cur->methods.size());
+                for (auto& m : cur->methods)
+                    LOG("BD-JNIVM", "[BD-MISS]   name='%s' sig='%s' static=%d native=%p handle=%d",
+                        m->name.c_str(), m->signature.c_str(), (int)m->_static, m->native,
+                        (int)(bool)m->nativehandle);
+            }
+        }
         if(cur && cur->baseclasses) {
             for(auto&& i : cur->baseclasses(ENV::FromJNIEnv(env))) {
                 if(i) {
@@ -78,15 +165,6 @@ jmethodID jnivm::GetMethodID(JNIEnv *env, jclass cl, const char *str0, const cha
             }
         }
         if(ReturnNull) {
-#ifndef NDEBUG
-            if(trace) {
-                log_stub_miss_once(
-                    AllowNative ? "Native MethodID" : isStatic ? "Static MethodID" : "MethodID",
-                    cur ? cur->nativeprefix.data() : "(null)",
-                    str0 ? str0 : "(null)",
-                    str1 ? str1 : "(null)");
-            }
-#endif
             return nullptr;
         }
         next = std::make_shared<Method>();

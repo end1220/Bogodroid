@@ -7,7 +7,47 @@
 #include "logging.h"
 #include "toml++/toml.hpp"
 
+#include <mutex>
+
 extern toml::table config;
+
+namespace {
+
+// Unity does not hand ReflectionHelper.getConstructorID() a JNI signature: the
+// managed side builds the string from java.lang.Class.getName(), so its class
+// components come back dotted --
+//
+//     (Lcom.unity3d.player.UnityPlayerActivity;Ljava/lang/String;)V
+//
+// On a real device that is fine, because the Java half parses the string and
+// feeds Class.forName(), which wants dots. jnivm does not parse anything: the
+// string is used verbatim as a key into Class::methods, and every stub in this
+// tree registers JNI (slash) form, so the lookup could never match. The miss
+// silently degraded into a STUB-MISS `<init>` stub, Constructor.newInstance()
+// returned null, and com.mobge.assetlocator.AssetLocator never came into
+// existence -- which is what made MobGe.Storage.AndroidAssetManager throw
+// NullReferenceException and the game present black frames.
+//
+// Rewrite every `L...;` class component to slash form. Only L-componenets can
+// contain dots, so a single pass is enough; `$` (nested classes) and `[`
+// (arrays) are left alone.
+std::string bd_normalize_jni_sig(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    bool inClass = false;
+    for (char c : in) {
+        if (c == 'L')
+            inClass = true;
+        else if (c == ';')
+            inClass = false;
+
+        out.push_back(inClass && c == '.' ? '/' : c);
+    }
+    return out;
+}
+
+} // namespace
 
 ///// Long
 
@@ -22,7 +62,10 @@ jnivm::java::lang::reflect::Constructor::Constructor(
 {
     const char* sig = constructorSignature ? constructorSignature->c_str() : "()V";
     name = "<init>";
-    signature = sig;
+    signature = bd_normalize_jni_sig(sig);
+    if (signature != sig)
+        verbose("JavaReflect", "Constructor signature normalised '%s' -> '%s'",
+                sig, signature.c_str());
 }
 
 std::shared_ptr<jnivm::Object>
@@ -41,10 +84,35 @@ jnivm::java::lang::reflect::Constructor::newInstance(std::shared_ptr<jnivm::Arra
     }
 
     auto cls = jnivm::JNITypes<std::shared_ptr<jnivm::Class>>::ToJNIType(jnivm::ENV::FromJNIEnv(env), targetClass);
+    BD_LOG("JavaReflect", "newInstance(%s) ctor sig='%s' argc=%d",
+           targetClass->getName().c_str(), signature.c_str(), (int)argCount);
     auto constructor = env->GetMethodID(cls, "<init>", signature.c_str());
+    BD_LOG("JavaReflect", "  lookup -> %p", (void*)constructor);
+    if (constructor) {
+        auto* m = (jnivm::Method*)constructor;
+        BD_LOG("JavaReflect", "  hit: name='%s' sig='%s' static=%d native=%p handle=%d",
+               m->name.c_str(), m->signature.c_str(), (int)m->_static, m->native,
+               (int)(bool)m->nativehandle);
+    }
     if (!constructor) {
         BD_LOG("JavaReflect", "Constructor.newInstance could not resolve %s%s",
                targetClass->getName().c_str(), signature.c_str());
+        // [BD] Temporary: a <init> lookup that fails against a class we *did*
+        // register means the registration key and the lookup key disagree.
+        // Print every entry so the two can be diffed directly instead of
+        // reasoning about how Hook() renders the signature.
+        auto c = jnivm::JNITypes<std::shared_ptr<jnivm::Class>>::JNICast(
+            jnivm::ENV::FromJNIEnv(env), cls);
+        if (c) {
+            std::lock_guard<std::mutex> lock(c->mtx);
+            BD_LOG("JavaReflect", "  lookup: name='<init>' sig='%s' prefix='%s' entries=%zu",
+                   signature.c_str(), c->nativeprefix.c_str(), c->methods.size());
+            for (auto& m : c->methods) {
+                BD_LOG("JavaReflect", "  reg: name='%s' sig='%s' static=%d native=%p handle=%d",
+                       m->name.c_str(), m->signature.c_str(), (int)m->_static, m->native,
+                       (int)(bool)m->nativehandle);
+            }
+        }
         return nullptr;
     }
     auto obj = env->NewObjectA(cls, constructor, values.empty() ? nullptr : values.data());
@@ -268,6 +336,64 @@ jnivm::java::lang::Exception::Exception(std::shared_ptr<FakeJni::JString> messag
 std::shared_ptr<FakeJni::JString> jnivm::java::lang::Exception::getMessage()
 {
     return message_;
+}
+
+///// java/lang/StackTraceElement
+
+jnivm::java::lang::StackTraceElement::StackTraceElement(
+    std::shared_ptr<FakeJni::JString> declaringClass,
+    std::shared_ptr<FakeJni::JString> methodName,
+    std::shared_ptr<FakeJni::JString> fileName,
+    jint lineNumber)
+    : declaringClass_(declaringClass)
+    , methodName_(methodName)
+    , fileName_(fileName)
+    , lineNumber_(lineNumber)
+{
+    // Unity's exception path is the only caller, and it fails silently when this
+    // yields a null element, so name every frame as it is built.
+    BD_LOG("StackTrace", "%s.%s(%s:%d)",
+           declaringClass_ ? declaringClass_->asStdString().c_str() : "?",
+           methodName_ ? methodName_->asStdString().c_str() : "?",
+           fileName_ ? fileName_->asStdString().c_str() : "Unknown Source",
+           (int)lineNumber_);
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::StackTraceElement::getDeclaringClassName()
+{
+    return declaringClass_;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::StackTraceElement::getMethodName()
+{
+    return methodName_;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::StackTraceElement::getFileName()
+{
+    return fileName_;
+}
+
+jint jnivm::java::lang::StackTraceElement::getLineNumber()
+{
+    return lineNumber_;
+}
+
+std::shared_ptr<FakeJni::JString> jnivm::java::lang::StackTraceElement::toString()
+{
+    std::string s = declaringClass_ ? declaringClass_->asStdString() : "Unknown";
+    s += ".";
+    s += methodName_ ? methodName_->asStdString() : "?";
+    if (fileName_) {
+        s += "(";
+        s += fileName_->asStdString();
+        if (lineNumber_ >= 0)
+            s += ":" + std::to_string(lineNumber_);
+        s += ")";
+    } else {
+        s += "(Unknown Source)";
+    }
+    return std::make_shared<FakeJni::JString>(s);
 }
 
 ///// Thread
@@ -595,6 +721,19 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     { FakeJni::Function<&Exception::getMessage> {}, "getMessage", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
+    // Unity builds one per frame while reporting a managed exception. jnivm
+    // rewrites the "<init>(...)V" Unity asks for into the static
+    // "(...)Ljava/lang/StackTraceElement;" it actually looks up, which is what
+    // FakeJni::Constructor here produces.
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::StackTraceElement)
+    { FakeJni::Constructor<StackTraceElement, std::shared_ptr<FakeJni::JString>, std::shared_ptr<FakeJni::JString>, std::shared_ptr<FakeJni::JString>, jint> {} },
+    { FakeJni::Function<&StackTraceElement::getDeclaringClassName> {}, "getClassName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StackTraceElement::getMethodName> {}, "getMethodName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StackTraceElement::getFileName> {}, "getFileName", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StackTraceElement::getLineNumber> {}, "getLineNumber", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&StackTraceElement::toString> {}, "toString", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
     BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Boolean) { FakeJni::Constructor<Boolean, jboolean> {} },
     { FakeJni::Function<&Boolean::booleanValue> {}, "booleanValue", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Boolean::valueOf> {}, "valueOf", FakeJni::JMethodID::STATIC },
@@ -714,6 +853,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::java::lang::Long) { FakeJni::Constructor<Long, jl
     vm->registerClass<jnivm::java::lang::Long>();
     vm->registerClass<jnivm::java::lang::Error>();
     vm->registerClass<jnivm::java::lang::Exception>();
+    vm->registerClass<jnivm::java::lang::StackTraceElement>();
     vm->registerClass<jnivm::java::lang::Boolean>();
     vm->registerClass<jnivm::java::lang::ClassLoader>();
     vm->registerClass<jnivm::java::lang::StringBuilder>();
@@ -823,9 +963,44 @@ void HookClassExtensions(FakeJni::Jvm* vm)
     });
 
     // Class.forName (static)
-    classClass->Hook(&frame.getJniEnv(), "forName", [vm](std::shared_ptr<FakeJni::JString> name, bool b, std::shared_ptr<jnivm::java::lang::ClassLoader> loader) {
-        verbose("JBRIDGE", "Class forName %s", name.get()->c_str());
-        return vm->findClass(name.get()->c_str());
+    //
+    // Registered with ONE parameter on purpose, even though the JVM also has
+    // forName(String, boolean, ClassLoader) and ReflectionHelper::getMethodID's
+    // name-only search will happily hand this method out for a lookup done with
+    // the 3-arg signature.
+    //
+    // jnivm's varargs dispatch builds the argument list from the *lambda's*
+    // arity, so a 3-arg hook reads values[1] and values[2] unconditionally. When
+    // the caller only built a 1-element jvalue array -- Unity's
+    // AndroidJavaClass path does exactly that -- those two reads land in
+    // untouched stack slots, and the ClassLoader unpack dynamic_casts a stack
+    // address. Under-reading, by contrast, is harmless: extra jvalues the hook
+    // never looks at are simply ignored. forName(name) is also semantically
+    // identical to forName(name, true, null), which is what our ClassLoader stub
+    // would resolve to anyway.
+    //
+    // The name also has to be translated: java.lang.Class.forName() takes a
+    // *binary* name ("com.unity3d.player.UnityPlayer") while jnivm's class
+    // registry is keyed by the JNI name it was registered under
+    // ("com/unity3d/player/UnityPlayer", findclass.cpp assigns nativeprefix =
+    // the name findClass was called with). Passing the dotted form straight
+    // through used to miss the registered class and silently mint a fresh,
+    // empty auto-stub in its place. Everything downstream then read that empty
+    // class: Unity's getFieldID("currentActivity") found no such field, so the
+    // managed side saw currentActivity == null and MobGe's Android platform
+    // layer threw NullReferenceException out of
+    // AndroidAssetLocator..cctor / PlatformHolderNativeAndroid..ctor before a
+    // single frame was ever presented.
+    classClass->Hook(&frame.getJniEnv(), "forName", [vm](std::shared_ptr<FakeJni::JString> name) {
+        if (name == nullptr) {
+            verbose("JBRIDGE", "Class forName (null name)");
+            return std::shared_ptr<jnivm::Class>(nullptr);
+        }
+        std::string binaryName = name->asStdString();
+        verbose("JBRIDGE", "Class forName %s", binaryName.c_str());
+        std::string jniName = binaryName;
+        std::replace(jniName.begin(), jniName.end(), '.', '/');
+        return vm->findClass(jniName.c_str());
     });
 
     // Class.getName
@@ -887,4 +1062,87 @@ void HookObjectExtensions(FakeJni::Jvm* vm)
         verbose("JBRIDGE", "toString for Object %s", self->getClass().getName().c_str());
         return std::make_shared<FakeJni::JString>("I dunno");
     });
+}
+
+///// Throwable extensions
+
+// jnivm::Throwable is on the codegen blacklist (internal/codegen/class.cpp), so
+// it has no DEFINE_CLASS_NAME and cannot own a BEGIN_NATIVE_DESCRIPTOR block.
+// Its extra methods therefore have to be attached to the live Class objects,
+// exactly the way HookClassExtensions() attaches Class.getName.
+//
+// Why it matters: Unity's managed-exception path calls
+// Throwable.setStackTrace([Ljava/lang/StackTraceElement;)V on the java/lang/Error
+// it has just built. jnivm first looks on java/lang/Error, then walks its
+// baseclasses, finds nothing on java/lang/Throwable either, and answers with the
+// STUB-MISS default -- so the exception reaches Unity's reporter with a null
+// stack trace. Hooking every plausible throwable name means the lookup succeeds
+// whichever class the object happens to report.
+//
+// getStackTrace() is the read side of the same storage; it is registered even
+// though Oddmar has not been seen calling it, because a missing getter turns a
+// "null stack trace" into a "method not found" on any Unity version that does.
+namespace {
+    // Class::HookInstanceFunction() deduces its signature from the callable's
+    // operator(). Passing a lambda *variable* would bind it as an lvalue
+    // reference, which jnivm::Function cannot introspect ("'operator()' is not a
+    // member of ...&"), so hand the hooks over as prvalues from these factories.
+    // The hook is stored by value per class, hence one factory call per class.
+    auto makeSetStackTraceHook()
+    {
+        return [](jnivm::ENV* env, jnivm::Object* self,
+                std::shared_ptr<jnivm::Array<jnivm::java::lang::StackTraceElement>> trace) {
+            auto throwable = dynamic_cast<jnivm::Throwable*>(self);
+            const jsize frames = trace ? trace->getSize() : 0;
+            if (throwable)
+                throwable->stack_trace = trace;
+            BD_LOG("Throwable", "setStackTrace(%d frame%s)%s", (int)frames,
+                   frames == 1 ? "" : "s",
+                   throwable ? "" : " on a non-throwable receiver");
+        };
+    }
+
+    auto makeGetStackTraceHook()
+    {
+        return [](jnivm::ENV* env, jnivm::Object* self)
+                -> std::shared_ptr<jnivm::Array<jnivm::java::lang::StackTraceElement>> {
+            auto throwable = dynamic_cast<jnivm::Throwable*>(self);
+            if (!throwable || !throwable->stack_trace)
+                return nullptr;
+            return std::dynamic_pointer_cast<jnivm::Array<jnivm::java::lang::StackTraceElement>>(
+                throwable->stack_trace);
+        };
+    }
+}
+
+void HookThrowableExtensions(FakeJni::Jvm* vm)
+{
+    verbose("JBRIDGE", "Hooking Throwable Extensions");
+    FakeJni::LocalFrame frame(*vm);
+
+    // Unity names the throwable after the class it constructed; covering the
+    // common java.lang ones as well means a RuntimeException from game code gets
+    // the same treatment as the Error we have actually seen.
+    static const char* const throwableClasses[] = {
+        "java/lang/Throwable",
+        "java/lang/Error",
+        "java/lang/Exception",
+        "java/lang/RuntimeException",
+        "java/lang/NullPointerException",
+        "java/lang/IllegalStateException",
+        "java/lang/IllegalArgumentException",
+        "java/lang/UnsupportedOperationException",
+        "java/lang/ClassNotFoundException",
+        "java/lang/NoClassDefFoundError",
+        "java/lang/UnsatisfiedLinkError",
+    };
+
+    for (const char* name : throwableClasses) {
+        auto clazz = vm->findClass(name);
+        if (!clazz)
+            continue;
+        clazz->HookInstanceFunction(&frame.getJniEnv(), "setStackTrace", makeSetStackTraceHook());
+        clazz->HookInstanceFunction(&frame.getJniEnv(), "getStackTrace", makeGetStackTraceHook());
+        verbose("JBRIDGE", "setStackTrace/getStackTrace hooked on %s", name);
+    }
 }

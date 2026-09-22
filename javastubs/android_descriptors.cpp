@@ -103,6 +103,16 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::provider::Settings>();
     vm->registerClass<jnivm::android::provider::Settings::Secure>();
 
+    // Game-specific Java helpers (Oddmar ships these in its own DEX; the port
+    // answers them natively). Without it, MobGe.Storage.AndroidAssetManager
+    // throws NullReferenceException during Create() and no asset is ever found.
+    vm->registerClass<jnivm::com::mobge::assetlocator::AssetLocator>();
+    // The reader GetReaderWrapper() hands back. Registered so that the guest's
+    // GetObjectClass() on the return value yields this class and its Seek/Read/
+    // GetBytes/... lookups find real bodies instead of falling through to
+    // java/lang/Object.
+    vm->registerClass<jnivm::com::mobge::assetlocator::AssetReader>();
+
     // Factory registrations — classes whose only role is "be a non-null
     // instance the guest can hold and ignore". defaultVal<jobject> parses
     // the JNI signature, looks up the JNI class name here, and builds the

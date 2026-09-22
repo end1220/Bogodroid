@@ -73,6 +73,9 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     HookClassExtensions(vm);
     HookIntExtensions(vm);
     HookObjectExtensions(vm);
+    // Attaches Throwable.setStackTrace/getStackTrace, which Unity's
+    // managed-exception path needs before it can report anything.
+    HookThrowableExtensions(vm);
 
     FakeJni::LocalFrame frame(*vm);
     auto classClass = vm->findClass("java/lang/Class");

@@ -107,6 +107,31 @@ extern "C" ABI_ATTR void* dlopen_impl(const char* filename, int flags)
         head = head->next;
     }
 
+    // [BD] Fallback: match on basename.
+    //
+    // IL2CPP resolves [DllImport("Foo")] with a bare soname -- dlopen("libFoo.so")
+    // -- and expects the platform linker to search the app's native library
+    // directory for it. realpath() cannot resolve that name from the game's
+    // working directory, so the exact-path loop above never hits and we would
+    // report failure for a library that is in fact already mapped. Comparing
+    // basenames lets libunity/libil2cpp (which the loader always preloads) and
+    // any eagerly loaded plugin answer those requests.
+    {
+        so_module* byName = so_get_head();
+        while (byName)
+        {
+            if (byName->path) {
+                const char* otherSlash = strrchr(byName->path, '/');
+                const char* otherBase = otherSlash ? otherSlash + 1 : byName->path;
+                if (strcmp(base, otherBase) == 0) {
+                    BD_DEBUG("DLOPEN", "%s -> preloaded module by basename", base);
+                    return byName;
+                }
+            }
+            byName = byName->next;
+        }
+    }
+
     return (void*)0xDEAD;
 }
 
@@ -172,10 +197,34 @@ extern "C" ABI_ATTR int* __errno_impl(void)
     return __errno_location();
 }
 
+// Android's logging entry points.
+//
+// These used to go through warning(), which only exists when BD_ENABLE_TRACE is
+// on. The build that ships is LOG-only, TRACE off -- so all three compiled to
+// ((void)0) and every line Unity said, including its managed-exception
+// reporting, was dropped on the floor. Route them through BD_LOG instead, under
+// the ANDROID category, so they land in the layer that actually ships on the
+// handheld. BD_ANDROID_LOG=0 silences them for a throughput run, the same way
+// BD_MEM_LOG_MS controls the RSS sampler.
+static bool bd_android_log_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_ANDROID_LOG");
+        return !(value && *value && strcmp(value, "0") == 0);
+    }();
+    return enabled;
+}
+
+static void bd_android_log_out(const char* tag, const char* text)
+{
+    if (!bd_android_log_enabled())
+        return;
+    BD_LOG("ANDROID", "%s: %s", tag ? tag : "?", text ? text : "");
+}
+
 extern "C" ABI_ATTR int __android_log_write_impl(int prio, const char* tag, const char* text)
 {
-    char andlog[2048] = {};
-    warning("LOG[%s]: %s\n", tag, text);
+    bd_android_log_out(tag, text);
     return 1;
 }
 
@@ -184,19 +233,17 @@ extern "C" ABI_ATTR int __android_log_print_impl(int prio, const char* tag, cons
     char andlog[2048] = {};
     va_list va;
     va_start(va, fmt);
-    warning("LOG[%s]: ", tag);
-    int r = vsnprintf(andlog, 2047, fmt, va);
-    warning("%s\n", andlog);
+    int r = vsnprintf(andlog, sizeof(andlog) - 1, fmt, va);
     va_end(va);
+    bd_android_log_out(tag, andlog);
     return r;
 }
 
 extern "C" ABI_ATTR int __android_log_vprint_impl(int prio, const char* tag, const char* fmt, va_list va)
 {
     char andlog[2048] = {};
-    warning("LOG[%s]: ", tag);
-    int r = vsnprintf(andlog, 2047, fmt, va);
-    warning("%s\n", andlog);
+    int r = vsnprintf(andlog, sizeof(andlog) - 1, fmt, va);
+    bd_android_log_out(tag, andlog);
     return r;
 }
 
@@ -204,7 +251,8 @@ extern "C" ABI_ATTR const char* __strchr_chk(const char* __s, int __ch, size_t _
 extern "C" ABI_ATTR const char* __strrchr_chk(const char* __s, int __ch, size_t __n) { return strrchr(__s, __ch); }
 extern "C" ABI_ATTR size_t __strlen_chk(const char* __s, size_t __n) { return strnlen(__s, __n); }
 
-// Resolve one address to "module+offset" for the abort backtrace below.
+// Resolve one address to "module+offset" for the backtrace dumps below
+// (Bionic's abort hook and the SIGSEGV handler in platform/common/debug_utils.cpp).
 //
 // dladdr() only knows about libraries the dynamic loader mapped; the game's .so
 // files are mapped by hand (so_util) and are invisible to it, so fall back to
@@ -299,12 +347,12 @@ static bool bd_is_call_site(const uint32_t* insn)
 // unwind info our runtime can use, so rebuild the chain by hand: first walk the
 // aarch64 frame-pointer chain (Unity is built with frame pointers on), then fall
 // back to a conservative stack scan for words that look like return addresses.
-static void bd_scan_caller_frames()
+static void bd_scan_caller_frames(const char* tag)
 {
     uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
     char where[512];
 
-    fprintf(stderr, "BD-ABORT: -- fp chain from 0x%zx --\n", (size_t)fp);
+    fprintf(stderr, "%s: -- fp chain from 0x%zx --\n", tag, (size_t)fp);
     int shown = 0;
     for (int i = 0; i < 64 && fp && (fp & 7) == 0; ++i) {
         const uintptr_t* frame = (const uintptr_t*)fp;
@@ -312,7 +360,7 @@ static void bd_scan_caller_frames()
         const uintptr_t ret = frame[1];
         if (ret) {
             bd_describe_address((void*)ret, where, sizeof(where));
-            fprintf(stderr, "BD-ABORT:   fp#%02d %s\n", i, where);
+            fprintf(stderr, "%s:   fp#%02d %s\n", tag, i, where);
             ++shown;
         }
         if (next <= fp || next - fp > 1u << 20) break;
@@ -322,7 +370,7 @@ static void bd_scan_caller_frames()
 
     // Conservative scan: any word in the first 48 KB of stack that points into a
     // loaded module and sits right after a call instruction is a candidate.
-    fprintf(stderr, "BD-ABORT: -- stack scan --\n");
+    fprintf(stderr, "%s: -- stack scan --\n", tag);
     const uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
     shown = 0;
     for (uintptr_t p = sp; p < sp + (48u << 10) && shown < 40; p += sizeof(uintptr_t)) {
@@ -332,29 +380,52 @@ static void bd_scan_caller_frames()
         if (!bd_find_module(value - 4)) continue;  // call site must be in a module too
         if (!bd_is_call_site((const uint32_t*)(value - 4))) continue;
         bd_describe_address((void*)value, where, sizeof(where));
-        fprintf(stderr, "BD-ABORT:   @%04zx %s\n", (size_t)(p - sp), where);
+        fprintf(stderr, "%s:   @%04zx %s\n", tag, (size_t)(p - sp), where);
         ++shown;
     }
     fflush(stderr);
 }
 
-static void bd_dump_abort_backtrace()
+static void bd_dump_backtrace(const char* tag)
 {
     void* frames[48];
     const int count = backtrace(frames, 48);
-    fprintf(stderr, "BD-ABORT: tid=%d frames=%d\n", (int)syscall(__NR_gettid), count);
+    fprintf(stderr, "%s: tid=%d frames=%d\n", tag, (int)syscall(__NR_gettid), count);
     for (int i = 0; i < count; ++i) {
         char where[512];
         bd_describe_address(frames[i], where, sizeof(where));
-        fprintf(stderr, "BD-ABORT:   #%02d %s\n", i, where);
+        fprintf(stderr, "%s:   #%02d %s\n", tag, i, where);
     }
-    bd_scan_caller_frames();
+    bd_scan_caller_frames(tag);
+    fflush(stderr);
+}
+
+// Shared entry point for platform/common/debug_utils.cpp's SIGSEGV handler
+// (declared in debug_utils.h; kept out of the include graph on purpose -- this
+// file only needs the extern "C" name to match).
+//
+// Unity installs its own handler for SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT from
+// libunity's JNI_OnLoad and chains into the one it replaced, which is ours. By
+// the time we run, the stack belongs to Unity's handler, so backtrace(3)'s
+// frame-pointer walk cannot be trusted there either -- exactly the situation
+// bd_scan_caller_frames() was written for.
+extern "C" void bd_dump_crash_backtrace(const char* tag)
+{
+    bd_dump_backtrace(tag);
+}
+
+extern "C" void bd_describe_crash_address(const char* tag, const char* label,
+                                          unsigned long long addr)
+{
+    char where[512];
+    bd_describe_address((void*)(uintptr_t)addr, where, sizeof(where));
+    fprintf(stderr, "%s:   %s %s\n", tag, label, where);
     fflush(stderr);
 }
 
 extern "C" ABI_ATTR void android_set_abort_message_impl(const char* msg)
 {
-    bd_dump_abort_backtrace();
+    bd_dump_backtrace("BD-ABORT");
     fatal_error("%s", msg);
     //   abort();
 }

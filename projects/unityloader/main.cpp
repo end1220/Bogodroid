@@ -169,6 +169,7 @@ namespace il2cpp_patch {
     typedef const char* (*p_image_get_name)(void* image);
     typedef void* (*p_class_from_name)(void* image, const char* ns, const char* name);
     typedef void* (*p_class_get_method_from_name)(void* klass, const char* name, int argc);
+    typedef void* (*p_runtime_invoke)(void* method, void* obj, void** params, void** exc);
 
     static p_domain_get                 il2cpp_domain_get;
     static p_domain_get_assemblies      il2cpp_domain_get_assemblies;
@@ -176,6 +177,8 @@ namespace il2cpp_patch {
     static p_image_get_name             il2cpp_image_get_name;
     static p_class_from_name            il2cpp_class_from_name;
     static p_class_get_method_from_name il2cpp_class_get_method_from_name;
+    static p_runtime_invoke             il2cpp_runtime_invoke;
+    static bool                         g_probe_app_paths = false;
 
     typedef void* (*p_il2cpp_init)(const char*);
 
@@ -282,6 +285,55 @@ namespace il2cpp_patch {
             if (nm && strstr(nm, want)) return img;
         }
         return nullptr;
+    }
+
+    // ---- Application.*Path probe (BD_PROBE_APPPATHS=1) ----------------------
+    // Pure diagnostics: ask the managed runtime what Unity itself believes its
+    // data/streaming-assets paths are, at several points during startup. The
+    // port has no Java side, so Unity derives these from Context/ApplicationInfo
+    // JNI calls the loader fakes; when a StreamingAssets URL comes out as
+    // "jar:file://!/assets/..." (empty host) this is the fastest way to see
+    // whether dataPath is really empty or whether something else builds the URL.
+    struct Il2CppStringLayout {
+        void*    klass;
+        void*    monitor;
+        int32_t  length;
+        uint16_t chars[1];
+    };
+    static std::string il2cpp_to_utf8(void* s) {
+        if (!s) return std::string("<null>");
+        const Il2CppStringLayout* str = (const Il2CppStringLayout*)s;
+        int32_t n = str->length;
+        if (n < 0 || n > 8192) return std::string("<bad-length>");
+        std::string out;
+        out.reserve((size_t)n);
+        for (int32_t i = 0; i < n; i++) {
+            uint16_t c = str->chars[i];
+            out.push_back(c < 0x80 ? (char)c : '?');
+        }
+        return out;
+    }
+    static void probe_app_paths(const char* tag) {
+        if (!g_probe_app_paths || !il2cpp_runtime_invoke || !il2cpp_class_from_name) return;
+        void* img = find_image("UnityEngine.CoreModule");
+        if (!img) img = find_image("UnityEngine");
+        if (!img) { BD_LOG("PATH-PROBE", "[%s] UnityEngine image not found", tag); return; }
+        void* klass = il2cpp_class_from_name(img, "UnityEngine", "Application");
+        if (!klass) { BD_LOG("PATH-PROBE", "[%s] class Application not found", tag); return; }
+        static const char* props[] = {
+            "get_dataPath",
+            "get_streamingAssetsPath",
+            "get_persistentDataPath",
+            "get_temporaryCachePath",
+        };
+        for (const char* prop : props) {
+            void* m = il2cpp_class_get_method_from_name(klass, prop, 0);
+            if (!m) { BD_LOG("PATH-PROBE", "[%s] %s -> (method not found)", tag, prop); continue; }
+            void* exc = nullptr;
+            void* ret = il2cpp_runtime_invoke(m, nullptr, nullptr, &exc);
+            BD_LOG("PATH-PROBE", "[%s] Application.%s = '%s'%s",
+                   tag, prop + 4, il2cpp_to_utf8(ret).c_str(), exc ? "  <-- THREW" : "");
+        }
     }
 
     static void install_once() {
@@ -1082,6 +1134,25 @@ int main(int argc, char* argv[])
     }
     loaded_modules[module_count++] = &lunity;
     BD_TIME("after loading libunity.so");
+
+    // libAkSoundEngine.so (Wwise). IL2CPP resolves [DllImport("AkSoundEngine")]
+    // by dlopen("libAkSoundEngine.so") + dlsym, and dlopen_impl only answers for
+    // modules that are already registered in its head list. Left out here, the
+    // dlopen falls through to the 0xDEAD sentinel, every dlsym miss becomes an
+    // EntryPointNotFoundException in the managed layer, and the whole
+    // AkSoundEngineController.Init / RegisterGameObj chain throws on startup.
+    // Loading it eagerly up front is what the Android linker would have done
+    // anyway (it lives in the app's own lib/arm64-v8a alongside libunity).
+    BOOT_LOG("Loading libAkSoundEngine\n");
+    so_module lak = {};
+    uintptr_t addr_lak = 0x3A00000000;
+    const char* path_lak = "lib/arm64-v8a/libAkSoundEngine.so";
+    if (!load_so_from_file(&lak, path_lak, addr_lak)) {
+        BOOT_LOG("No libAkSoundEngine found\n");
+    } else {
+        loaded_modules[module_count++] = &lak;
+    }
+    BD_TIME("after loading libAkSoundEngine.so");
 
     BOOT_LOG("Loading libburst\n");
     so_module lburst = {};

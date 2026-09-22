@@ -8,6 +8,8 @@
 #include <bsd/stdio.h>
 
 #include "platform.h"
+#include "logging.h"
+#include "debug_utils.h"
 #include "bionic_file.h"
 
 #define _get_from(x) ((FILE*)((x)->_cookie))
@@ -52,6 +54,13 @@ static void bd_mkdir_parents(const char* path)
 
 ABI_ATTR BIONIC_FILE *fopen_impl(const char *arg1, const char* arg2)
 {
+    // See open_impl() in fcntl.cpp: an empty path means the caller derived it
+    // from something that returned "". Report who instead of silently failing.
+    if (!arg1 || !*arg1) {
+        BD_LOG("NATIVE", "fopen() called with an EMPTY path (mode=%s)", arg2 ? arg2 : "(null)");
+        bd_dump_crash_backtrace("fopen-empty");
+        return NULL;
+    }
     arg1 = bd_kill_analytics_check(arg1);
 
     char* redirected = bd_redirect_datadir(arg1);

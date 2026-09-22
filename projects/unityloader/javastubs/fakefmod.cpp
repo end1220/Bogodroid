@@ -7,6 +7,7 @@
 #include <cmath> 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <jnivm/bytebuffer.h>
 #include <thread>
 #include <chrono>
@@ -21,6 +22,30 @@ FMODAudioDevice::~FMODAudioDevice() {
 
 static FakeJni::JClass* fmodClass = nullptr;
 
+// One-shot diagnostic: dump every native entry jnivm holds for
+// org/fmod/FMODAudioDevice, so a mis-resolved entry can be spotted against the
+// JNINativeMethod table the game's libunity registers (fmodGetInfo must be
+// libunity+0xafb5e4, fmodProcess +0xafb6ac, fmodProcessMicData +0xafb738 for
+// this build; see tools/fmodtab.py).
+static void bd_dump_fmod_methods(FakeJni::JClass* cl) {
+    if (!cl) {
+        BD_LOG("AUDIO", "fmodClass is null");
+        return;
+    }
+    BD_LOG("AUDIO", "FMODAudioDevice class=%s methods=%zu natives=%zu",
+           cl->nativeprefix.c_str(), cl->methods.size(), cl->natives.size());
+    for (auto& m : cl->methods) {
+        if (!m) continue;
+        if (m->name.rfind("fmod", 0) != 0) continue;
+        BD_LOG("AUDIO", "  reg name=%-22s sig=%-30s native=%p static=%d handle=%p",
+               m->name.c_str(), m->signature.c_str(), m->native, (int)m->_static,
+               (void*)m->nativehandle.get());
+    }
+    for (auto& kv : cl->natives) {
+        BD_LOG("AUDIO", "  map name=%-22s native=%p", kv.first.c_str(), kv.second);
+    }
+}
+
 void FMODAudioDevice::start() {
     if (mAudioThread) {
         stop();
@@ -28,6 +53,7 @@ void FMODAudioDevice::start() {
 
     if (!fmodClass) {
         fmodClass = vm.findClass("org/fmod/FMODAudioDevice").get();
+        bd_dump_fmod_methods(fmodClass);
     }
 
     mRunning.store(true);
@@ -124,18 +150,107 @@ void FMODAudioDevice::runAudio() {
     mAudioDevice = 0;
 }
 
+// Resolve one of org/fmod/FMODAudioDevice's registered natives and hand back its
+// raw entry point.
+//
+// A jmethodID in jnivm is a bare Method*, and RegisterNatives() results are not
+// stable: UnregisterNatives() erases registered Methods from Class::methods,
+// which drops the last shared_ptr and frees them. The allocator then reuses the
+// block for the next same-sized Method, so a cached id does not fail loudly --
+// it silently starts naming a *different* native function. On Oddmar a cached
+// fmodGetInfo id began naming fmodProcessMicData (libunity+0xafb738), which fed
+// the infoId straight into JNIEnv::GetDirectBufferAddress and segfaulted inside
+// UnpackJObject<ByteBuffer>'s dynamic_cast. libjnivm now pins registered natives
+// (see vm.cpp), and this helper re-resolves on every call and re-checks the
+// name/signature so that even a future invalidation cannot be mistaken for the
+// method we asked for.
+//
+// The three fmod entry points never read their `thiz` argument (fmodGetInfo:
+// `mov w19, w2` then a jump table over w2; fmodProcess/fmodProcessMicData:
+// `mov x1, x2`), so passing the raw class pointer is equivalent and avoids
+// building a throwaway jclass handle per audio callback.
+static jnivm::Method* bd_fmod_native(const char* sig, const char* name,
+                                     bool logMiss) {
+    try {
+        auto proxy = fmodClass->getMethod(sig, name);
+        if (!proxy) return nullptr;
+        auto* mid = (jnivm::Method*)proxy;
+        if (!mid || !mid->native || mid->name != name || mid->signature != sig) {
+            if (logMiss) {
+                BD_LOG("AUDIO", "resolve %s %s -> rejected Method=%p name=%s sig=%s native=%p",
+                       name, sig, (void*)mid,
+                       mid ? mid->name.c_str() : "(null)",
+                       mid ? mid->signature.c_str() : "(null)",
+                       mid ? mid->native : nullptr);
+            }
+            return nullptr;
+        }
+        if (logMiss) {
+            BD_LOG("AUDIO", "resolve %s %s -> Method=%p native=%p",
+                   name, sig, (void*)mid, mid->native);
+        }
+        return mid;
+    } catch (const std::exception& e) {
+        BD_LOG("AUDIO", "resolve %s %s threw: %s", name, sig, e.what());
+        return nullptr;
+    } catch (...) {
+        BD_LOG("AUDIO", "resolve %s %s threw", name, sig);
+        return nullptr;
+    }
+}
+
 int FMODAudioDevice::local_fmodGetInfo(int info_id) {
     FakeJni::LocalFrame frame(vm);
-    static auto fmodGetInfo = fmodClass->getMethod("(I)I", "fmodGetInfo");
-    return fmodGetInfo.invoke(frame.getJniEnv(),fmodClass,info_id).i;
+    auto* mid = bd_fmod_native("(I)I", "fmodGetInfo", true);
+    if (!mid) {
+        BD_LOG("AUDIO", "local_fmodGetInfo(id=%d): no entry point, returning 0", info_id);
+        return 0;
+    }
+    using Fn = jint (*)(JNIEnv*, jobject, jint);
+    int r = (int)((Fn)mid->native)(&frame.getJniEnv(), (jobject)fmodClass, (jint)info_id);
+    BD_LOG("AUDIO", "local_fmodGetInfo(id=%d) native=%p -> %d", info_id, mid->native, r);
+    return r;
 }
 
 int FMODAudioDevice::local_fmodProcess()
 {
     FakeJni::LocalFrame frame(vm);
-    static auto buffer = frame.getJniEnv().NewDirectByteBuffer(mAudioBuffer.data(),mAudioBuffer.size());
-    static auto fmodProcess = fmodClass->getMethod("(Ljava/nio/ByteBuffer;)I", "fmodProcess");
-    return fmodProcess.invoke(frame.getJniEnv(),fmodClass,buffer).i;
+
+    // The direct ByteBuffer must be handed out as a *global* reference.
+    //
+    // jnivm owns returned object references through the ENV's local frame:
+    // NewDirectByteBuffer() files the new ByteBuffer into
+    // env->localframe.front(), and PopLocalFrame() clears that frame, dropping
+    // the last shared_ptr. Holding the raw jobject in a function-local static
+    // (the previous shape of this code) therefore caches a pointer to a
+    // destroyed object: the first call is fine, every call after the frame pops
+    // passes a dangling handle to org/fmod/FMODAudioDevice.fmodProcess(), whose
+    // native implementation in libunity answers with
+    // JNIEnv::GetDirectBufferAddress() and then memcpy()s through whatever
+    // pointer that returns.
+    //
+    // NewGlobalRef pins the object in the VM's global list instead, so it
+    // survives every local frame. The handle is rebuilt if runAudio() ever
+    // reallocates mAudioBuffer and moves its data pointer.
+    static jobject buffer = nullptr;
+    static void* cachedData = nullptr;
+    static size_t cachedSize = 0;
+    if (buffer == nullptr || cachedData != mAudioBuffer.data() || cachedSize != mAudioBuffer.size()) {
+        auto local = frame.getJniEnv().NewDirectByteBuffer(mAudioBuffer.data(), (jlong)mAudioBuffer.size());
+        buffer = frame.getJniEnv().NewGlobalRef(local);
+        cachedData = mAudioBuffer.data();
+        cachedSize = mAudioBuffer.size();
+        BD_LOG("AUDIO", "fmodProcess direct buffer -> data=%p size=%zu handle=%p",
+                cachedData, cachedSize, (void*)buffer);
+    }
+
+    auto* mid = bd_fmod_native("(Ljava/nio/ByteBuffer;)I", "fmodProcess", false);
+    if (!mid) {
+        BD_LOG("AUDIO", "local_fmodProcess: no entry point, returning 0");
+        return 0;
+    }
+    using Fn = jint (*)(JNIEnv*, jobject, jobject);
+    return (int)((Fn)mid->native)(&frame.getJniEnv(), (jobject)fmodClass, buffer);
 }
 
 int FMODAudioDevice::startAudioRecord(int v1, int v2, int v3) {

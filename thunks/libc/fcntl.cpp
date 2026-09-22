@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include "platform.h"
 #include "logging.h"
+#include "debug_utils.h"
 #include "so_util.h"
 #include <cstdio>
 #include <cstring>
@@ -341,6 +342,16 @@ extern "C" ABI_ATTR int fstatfs64_impl(int fd, struct statfs64* buf)
 ABI_ATTR int open_impl(const char *filename, int flags, mode_t mode)
 {
     verbose("NATIVE","Opening file %s",filename);
+    // An empty path means a caller built a filename out of a property or method
+    // that returned "" -- typically an unimplemented stub -- and it used to be
+    // indistinguishable from "file missing" in the log: the only trace was an
+    // "Opening file" line with nothing after it. Report who asked. Also covers
+    // the NULL case, which the strcmp() probes below would otherwise fault on.
+    if (!filename || !*filename) {
+        BD_LOG("NATIVE", "open() called with an EMPTY path (flags=0x%x)", flags);
+        bd_dump_crash_backtrace("open-empty");
+        return -1;
+    }
     filename = bd_kill_analytics(filename);
 
     char* redirected = bd_redirect_datadir(filename);

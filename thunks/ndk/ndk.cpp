@@ -16,21 +16,67 @@ extern toml::table config;
 #include "media.h"
 
 extern "C" {
+extern const char* AMEDIAFORMAT_KEY_AAC_PROFILE;
+extern const char* AMEDIAFORMAT_KEY_BIT_RATE;
 extern const char* AMEDIAFORMAT_KEY_CHANNEL_COUNT;
+extern const char* AMEDIAFORMAT_KEY_CHANNEL_MASK;
 extern const char* AMEDIAFORMAT_KEY_COLOR_FORMAT;
 extern const char* AMEDIAFORMAT_KEY_COLOR_RANGE;
 extern const char* AMEDIAFORMAT_KEY_COLOR_STANDARD;
+extern const char* AMEDIAFORMAT_KEY_COLOR_TRANSFER;
 extern const char* AMEDIAFORMAT_KEY_DURATION;
 extern const char* AMEDIAFORMAT_KEY_ENCODER_DELAY;
+extern const char* AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL;
 extern const char* AMEDIAFORMAT_KEY_FRAME_RATE;
 extern const char* AMEDIAFORMAT_KEY_HEIGHT;
+extern const char* AMEDIAFORMAT_KEY_IS_ADTS;
+extern const char* AMEDIAFORMAT_KEY_IS_AUTOSELECT;
+extern const char* AMEDIAFORMAT_KEY_IS_DEFAULT;
+extern const char* AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE;
+extern const char* AMEDIAFORMAT_KEY_I_FRAME_INTERVAL;
 extern const char* AMEDIAFORMAT_KEY_LANGUAGE;
+extern const char* AMEDIAFORMAT_KEY_MAX_INPUT_SIZE;
 extern const char* AMEDIAFORMAT_KEY_MIME;
+extern const char* AMEDIAFORMAT_KEY_PCM_BIG_ENDIAN;
+extern const char* AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP;
+extern const char* AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER;
 extern const char* AMEDIAFORMAT_KEY_ROTATION;
 extern const char* AMEDIAFORMAT_KEY_SAMPLE_RATE;
 extern const char* AMEDIAFORMAT_KEY_SLICE_HEIGHT;
 extern const char* AMEDIAFORMAT_KEY_STRIDE;
 extern const char* AMEDIAFORMAT_KEY_WIDTH;
+extern const char* AMEDIAFORMAT_KEY_AAC_DRC_ATTENUATION_FACTOR;
+extern const char* AMEDIAFORMAT_KEY_AAC_DRC_BOOST_FACTOR;
+extern const char* AMEDIAFORMAT_KEY_AAC_DRC_HEAVY_COMPRESSION;
+extern const char* AMEDIAFORMAT_KEY_AAC_DRC_TARGET_REFERENCE_LEVEL;
+extern const char* AMEDIAFORMAT_KEY_AAC_ENCODED_TARGET_LEVEL;
+extern const char* AMEDIAFORMAT_KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT;
+extern const char* AMEDIAFORMAT_KEY_AAC_SBR_MODE;
+extern const char* AMEDIAFORMAT_KEY_AUDIO_SESSION_ID;
+extern const char* AMEDIAFORMAT_KEY_BITRATE_MODE;
+extern const char* AMEDIAFORMAT_KEY_CAPTURE_RATE;
+extern const char* AMEDIAFORMAT_KEY_COLOR_TRANSFER_REQUEST;
+extern const char* AMEDIAFORMAT_KEY_COMPLEXITY;
+extern const char* AMEDIAFORMAT_KEY_CREATE_INPUT_SURFACE_SUSPENDED;
+extern const char* AMEDIAFORMAT_KEY_GRID_COLUMNS;
+extern const char* AMEDIAFORMAT_KEY_GRID_ROWS;
+extern const char* AMEDIAFORMAT_KEY_HDR_STATIC_INFO;
+extern const char* AMEDIAFORMAT_KEY_INTRA_REFRESH_PERIOD;
+extern const char* AMEDIAFORMAT_KEY_IS_TIMED_TEXT;
+extern const char* AMEDIAFORMAT_KEY_LATENCY;
+extern const char* AMEDIAFORMAT_KEY_LEVEL;
+extern const char* AMEDIAFORMAT_KEY_MAX_B_FRAMES;
+extern const char* AMEDIAFORMAT_KEY_MAX_FPS_TO_ENCODER;
+extern const char* AMEDIAFORMAT_KEY_MAX_HEIGHT;
+extern const char* AMEDIAFORMAT_KEY_MAX_PTS_GAP_TO_ENCODER;
+extern const char* AMEDIAFORMAT_KEY_MAX_WIDTH;
+extern const char* AMEDIAFORMAT_KEY_OPERATING_RATE;
+extern const char* AMEDIAFORMAT_KEY_PREPEND_HEADER_TO_SYNC_FRAMES;
+extern const char* AMEDIAFORMAT_KEY_PRIORITY;
+extern const char* AMEDIAFORMAT_KEY_PROFILE;
+extern const char* AMEDIAFORMAT_KEY_QUALITY;
+extern const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYERING;
+extern const char* AMEDIAFORMAT_KEY_TRACK_ID;
 }
 
 static ANativeWindow* default_native_window;
@@ -220,21 +266,67 @@ NO_THUNK("AAsset_getBuffer",(uintptr_t)&AAsset_getBuffer),
 NO_THUNK("AAsset_getLength",(uintptr_t)&AAsset_getLength),
 NO_THUNK("AAsset_close",(uintptr_t)&AAsset_close),
 NO_THUNK("AAsset_read", (uintptr_t)&AAsset_read),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_PROFILE", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_PROFILE),
+NO_THUNK("AMEDIAFORMAT_KEY_BIT_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_BIT_RATE),
 NO_THUNK("AMEDIAFORMAT_KEY_CHANNEL_COUNT", (uintptr_t)&AMEDIAFORMAT_KEY_CHANNEL_COUNT),
+NO_THUNK("AMEDIAFORMAT_KEY_CHANNEL_MASK", (uintptr_t)&AMEDIAFORMAT_KEY_CHANNEL_MASK),
 NO_THUNK("AMEDIAFORMAT_KEY_COLOR_FORMAT", (uintptr_t)&AMEDIAFORMAT_KEY_COLOR_FORMAT),
 NO_THUNK("AMEDIAFORMAT_KEY_COLOR_RANGE", (uintptr_t)&AMEDIAFORMAT_KEY_COLOR_RANGE),
 NO_THUNK("AMEDIAFORMAT_KEY_COLOR_STANDARD", (uintptr_t)&AMEDIAFORMAT_KEY_COLOR_STANDARD),
+NO_THUNK("AMEDIAFORMAT_KEY_COLOR_TRANSFER", (uintptr_t)&AMEDIAFORMAT_KEY_COLOR_TRANSFER),
 NO_THUNK("AMEDIAFORMAT_KEY_DURATION", (uintptr_t)&AMEDIAFORMAT_KEY_DURATION),
 NO_THUNK("AMEDIAFORMAT_KEY_ENCODER_DELAY", (uintptr_t)&AMEDIAFORMAT_KEY_ENCODER_DELAY),
+NO_THUNK("AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL", (uintptr_t)&AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL),
 NO_THUNK("AMEDIAFORMAT_KEY_FRAME_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_FRAME_RATE),
 NO_THUNK("AMEDIAFORMAT_KEY_HEIGHT", (uintptr_t)&AMEDIAFORMAT_KEY_HEIGHT),
+NO_THUNK("AMEDIAFORMAT_KEY_IS_ADTS", (uintptr_t)&AMEDIAFORMAT_KEY_IS_ADTS),
+NO_THUNK("AMEDIAFORMAT_KEY_IS_AUTOSELECT", (uintptr_t)&AMEDIAFORMAT_KEY_IS_AUTOSELECT),
+NO_THUNK("AMEDIAFORMAT_KEY_IS_DEFAULT", (uintptr_t)&AMEDIAFORMAT_KEY_IS_DEFAULT),
+NO_THUNK("AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE", (uintptr_t)&AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE),
+NO_THUNK("AMEDIAFORMAT_KEY_I_FRAME_INTERVAL", (uintptr_t)&AMEDIAFORMAT_KEY_I_FRAME_INTERVAL),
 NO_THUNK("AMEDIAFORMAT_KEY_LANGUAGE", (uintptr_t)&AMEDIAFORMAT_KEY_LANGUAGE),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_INPUT_SIZE", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_INPUT_SIZE),
 NO_THUNK("AMEDIAFORMAT_KEY_MIME", (uintptr_t)&AMEDIAFORMAT_KEY_MIME),
+NO_THUNK("AMEDIAFORMAT_KEY_PCM_BIG_ENDIAN", (uintptr_t)&AMEDIAFORMAT_KEY_PCM_BIG_ENDIAN),
+NO_THUNK("AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP", (uintptr_t)&AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP),
+NO_THUNK("AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER", (uintptr_t)&AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER),
 NO_THUNK("AMEDIAFORMAT_KEY_ROTATION", (uintptr_t)&AMEDIAFORMAT_KEY_ROTATION),
 NO_THUNK("AMEDIAFORMAT_KEY_SAMPLE_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_SAMPLE_RATE),
 NO_THUNK("AMEDIAFORMAT_KEY_SLICE_HEIGHT", (uintptr_t)&AMEDIAFORMAT_KEY_SLICE_HEIGHT),
 NO_THUNK("AMEDIAFORMAT_KEY_STRIDE", (uintptr_t)&AMEDIAFORMAT_KEY_STRIDE),
 NO_THUNK("AMEDIAFORMAT_KEY_WIDTH", (uintptr_t)&AMEDIAFORMAT_KEY_WIDTH),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_DRC_ATTENUATION_FACTOR", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_DRC_ATTENUATION_FACTOR),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_DRC_BOOST_FACTOR", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_DRC_BOOST_FACTOR),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_DRC_HEAVY_COMPRESSION", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_DRC_HEAVY_COMPRESSION),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_DRC_TARGET_REFERENCE_LEVEL", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_DRC_TARGET_REFERENCE_LEVEL),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_ENCODED_TARGET_LEVEL", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_ENCODED_TARGET_LEVEL),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT),
+NO_THUNK("AMEDIAFORMAT_KEY_AAC_SBR_MODE", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_SBR_MODE),
+NO_THUNK("AMEDIAFORMAT_KEY_AUDIO_SESSION_ID", (uintptr_t)&AMEDIAFORMAT_KEY_AUDIO_SESSION_ID),
+NO_THUNK("AMEDIAFORMAT_KEY_BITRATE_MODE", (uintptr_t)&AMEDIAFORMAT_KEY_BITRATE_MODE),
+NO_THUNK("AMEDIAFORMAT_KEY_CAPTURE_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_CAPTURE_RATE),
+NO_THUNK("AMEDIAFORMAT_KEY_COLOR_TRANSFER_REQUEST", (uintptr_t)&AMEDIAFORMAT_KEY_COLOR_TRANSFER_REQUEST),
+NO_THUNK("AMEDIAFORMAT_KEY_COMPLEXITY", (uintptr_t)&AMEDIAFORMAT_KEY_COMPLEXITY),
+NO_THUNK("AMEDIAFORMAT_KEY_CREATE_INPUT_SURFACE_SUSPENDED", (uintptr_t)&AMEDIAFORMAT_KEY_CREATE_INPUT_SURFACE_SUSPENDED),
+NO_THUNK("AMEDIAFORMAT_KEY_GRID_COLUMNS", (uintptr_t)&AMEDIAFORMAT_KEY_GRID_COLUMNS),
+NO_THUNK("AMEDIAFORMAT_KEY_GRID_ROWS", (uintptr_t)&AMEDIAFORMAT_KEY_GRID_ROWS),
+NO_THUNK("AMEDIAFORMAT_KEY_HDR_STATIC_INFO", (uintptr_t)&AMEDIAFORMAT_KEY_HDR_STATIC_INFO),
+NO_THUNK("AMEDIAFORMAT_KEY_INTRA_REFRESH_PERIOD", (uintptr_t)&AMEDIAFORMAT_KEY_INTRA_REFRESH_PERIOD),
+NO_THUNK("AMEDIAFORMAT_KEY_IS_TIMED_TEXT", (uintptr_t)&AMEDIAFORMAT_KEY_IS_TIMED_TEXT),
+NO_THUNK("AMEDIAFORMAT_KEY_LATENCY", (uintptr_t)&AMEDIAFORMAT_KEY_LATENCY),
+NO_THUNK("AMEDIAFORMAT_KEY_LEVEL", (uintptr_t)&AMEDIAFORMAT_KEY_LEVEL),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_B_FRAMES", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_B_FRAMES),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_FPS_TO_ENCODER", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_FPS_TO_ENCODER),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_HEIGHT", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_HEIGHT),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_PTS_GAP_TO_ENCODER", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_PTS_GAP_TO_ENCODER),
+NO_THUNK("AMEDIAFORMAT_KEY_MAX_WIDTH", (uintptr_t)&AMEDIAFORMAT_KEY_MAX_WIDTH),
+NO_THUNK("AMEDIAFORMAT_KEY_OPERATING_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_OPERATING_RATE),
+NO_THUNK("AMEDIAFORMAT_KEY_PREPEND_HEADER_TO_SYNC_FRAMES", (uintptr_t)&AMEDIAFORMAT_KEY_PREPEND_HEADER_TO_SYNC_FRAMES),
+NO_THUNK("AMEDIAFORMAT_KEY_PRIORITY", (uintptr_t)&AMEDIAFORMAT_KEY_PRIORITY),
+NO_THUNK("AMEDIAFORMAT_KEY_PROFILE", (uintptr_t)&AMEDIAFORMAT_KEY_PROFILE),
+NO_THUNK("AMEDIAFORMAT_KEY_QUALITY", (uintptr_t)&AMEDIAFORMAT_KEY_QUALITY),
+NO_THUNK("AMEDIAFORMAT_KEY_TEMPORAL_LAYERING", (uintptr_t)&AMEDIAFORMAT_KEY_TEMPORAL_LAYERING),
+NO_THUNK("AMEDIAFORMAT_KEY_TRACK_ID", (uintptr_t)&AMEDIAFORMAT_KEY_TRACK_ID),
 NO_THUNK("AMediaDataSource_new", (uintptr_t)&AMediaDataSource_new),
 NO_THUNK("AMediaDataSource_delete", (uintptr_t)&AMediaDataSource_delete),
 NO_THUNK("AMediaDataSource_setUserdata", (uintptr_t)&AMediaDataSource_setUserdata),
@@ -249,7 +341,9 @@ NO_THUNK("AMediaExtractor_setDataSourceCustom", (uintptr_t)&AMediaExtractor_setD
 NO_THUNK("AMediaExtractor_getTrackCount", (uintptr_t)&AMediaExtractor_getTrackCount),
 NO_THUNK("AMediaExtractor_getTrackFormat", (uintptr_t)&AMediaExtractor_getTrackFormat),
 NO_THUNK("AMediaExtractor_selectTrack", (uintptr_t)&AMediaExtractor_selectTrack),
+NO_THUNK("AMediaExtractor_unselectTrack", (uintptr_t)&AMediaExtractor_unselectTrack),
 NO_THUNK("AMediaExtractor_getSampleTrackIndex", (uintptr_t)&AMediaExtractor_getSampleTrackIndex),
+NO_THUNK("AMediaExtractor_getSampleFlags", (uintptr_t)&AMediaExtractor_getSampleFlags),
 NO_THUNK("AMediaExtractor_readSampleData", (uintptr_t)&AMediaExtractor_readSampleData),
 NO_THUNK("AMediaExtractor_getSampleTime", (uintptr_t)&AMediaExtractor_getSampleTime),
 NO_THUNK("AMediaExtractor_advance", (uintptr_t)&AMediaExtractor_advance),
@@ -260,8 +354,18 @@ NO_THUNK("AMediaFormat_getInt32", (uintptr_t)&AMediaFormat_getInt32),
 NO_THUNK("AMediaFormat_getInt64", (uintptr_t)&AMediaFormat_getInt64),
 NO_THUNK("AMediaFormat_getFloat", (uintptr_t)&AMediaFormat_getFloat),
 NO_THUNK("AMediaFormat_getString", (uintptr_t)&AMediaFormat_getString),
+NO_THUNK("AMediaFormat_getDouble", (uintptr_t)&AMediaFormat_getDouble),
+NO_THUNK("AMediaFormat_getBuffer", (uintptr_t)&AMediaFormat_getBuffer),
+NO_THUNK("AMediaFormat_toString", (uintptr_t)&AMediaFormat_toString),
 NO_THUNK("AMediaFormat_setInt32", (uintptr_t)&AMediaFormat_setInt32),
+NO_THUNK("AMediaFormat_setInt64", (uintptr_t)&AMediaFormat_setInt64),
+NO_THUNK("AMediaFormat_setFloat", (uintptr_t)&AMediaFormat_setFloat),
+NO_THUNK("AMediaFormat_setDouble", (uintptr_t)&AMediaFormat_setDouble),
+NO_THUNK("AMediaFormat_setString", (uintptr_t)&AMediaFormat_setString),
+NO_THUNK("AMediaFormat_setBuffer", (uintptr_t)&AMediaFormat_setBuffer),
 NO_THUNK("AMediaCodec_createDecoderByType", (uintptr_t)&AMediaCodec_createDecoderByType),
+NO_THUNK("AMediaCodec_createCodecByName", (uintptr_t)&AMediaCodec_createCodecByName),
+NO_THUNK("AMediaCodec_createEncoderByType", (uintptr_t)&AMediaCodec_createEncoderByType),
 NO_THUNK("AMediaCodec_delete", (uintptr_t)&AMediaCodec_delete),
 NO_THUNK("AMediaCodec_configure", (uintptr_t)&AMediaCodec_configure),
 NO_THUNK("AMediaCodec_start", (uintptr_t)&AMediaCodec_start),
@@ -273,7 +377,12 @@ NO_THUNK("AMediaCodec_queueInputBuffer", (uintptr_t)&AMediaCodec_queueInputBuffe
 NO_THUNK("AMediaCodec_dequeueOutputBuffer", (uintptr_t)&AMediaCodec_dequeueOutputBuffer),
 NO_THUNK("AMediaCodec_getOutputBuffer", (uintptr_t)&AMediaCodec_getOutputBuffer),
 NO_THUNK("AMediaCodec_getOutputFormat", (uintptr_t)&AMediaCodec_getOutputFormat),
+NO_THUNK("AMediaCodec_getInputFormat", (uintptr_t)&AMediaCodec_getInputFormat),
+NO_THUNK("AMediaCodec_getBufferFormat", (uintptr_t)&AMediaCodec_getBufferFormat),
 NO_THUNK("AMediaCodec_releaseOutputBuffer", (uintptr_t)&AMediaCodec_releaseOutputBuffer),
+NO_THUNK("AMediaCodec_releaseOutputBufferAtTime", (uintptr_t)&AMediaCodec_releaseOutputBufferAtTime),
+NO_THUNK("AMediaCodec_getName", (uintptr_t)&AMediaCodec_getName),
+NO_THUNK("AMediaCodec_setParameters", (uintptr_t)&AMediaCodec_setParameters),
 NO_THUNK("AMediaCodec_setOutputSurface", (uintptr_t)&AMediaCodec_setOutputSurface),
 NO_THUNK("AImageReader_newWithUsage", (uintptr_t)&AImageReader_newWithUsage),
 NO_THUNK("AImageReader_setImageListener", (uintptr_t)&AImageReader_setImageListener),

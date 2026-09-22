@@ -9,12 +9,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 extern toml::table config;
 
 namespace {
+
+// BD_CTOR_FALLBACK_NULL=1 restores the pre-fallback behaviour where an
+// unbound <init> made ReflectionHelper::getConstructorID() hand back an empty
+// wrapper (construction -> null). Only for A/B debugging.
+bool bd_ctor_fallback_null()
+{
+    const char* v = ::getenv("BD_CTOR_FALLBACK_NULL");
+    return v && *v && ::strcmp(v, "0") != 0;
+}
 
 bool pad_enabled()
 {
@@ -707,7 +718,164 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
     if (clazz == nullptr)
         return nullptr;
     auto ctor = std::make_shared<jnivm::java::lang::reflect::Constructor>(clazz, signature);
-    verbose("UnityReflection", "getConstructorID(%s, %s) = 0x%p \n",
+
+    // Keep the Constructor alive for the lifetime of the VM.
+    //
+    // Unlike getMethodID()/getFieldID(), which hand back non-owning shared_ptrs
+    // into the Class's own methods/fields vectors, this one is freshly allocated
+    // and its only owner would be the caller's local frame. jnivm clears that
+    // frame on PopLocalFrame, but Unity keeps the pointer we return and uses it
+    // as a jmethodID long afterwards.
+    //
+    // Note this is *not* about Constructor.newInstance(): an entry log confirmed
+    // Unity never calls it (HANDOFF §4.4). Unity instead invokes the pointer
+    // directly through the NewObject* slot, which reads name/signature/
+    // nativehandle straight off this object -- so a destroyed object means a
+    // dangling jmethodID, not just a failed lookup. An earlier version of this
+    // comment blamed newInstance; the symptom that prompted it (a STUB-MISS whose
+    // `Sig=` was heap garbage while `Member=<init>` still read back correctly)
+    // is just what a partly-recycled std::string looks like -- "<init>" fits in
+    // the small-string buffer and survives, the real signature lives on the heap
+    // and does not.
+    static std::mutex bd_ctor_mutex;
+    static std::vector<std::shared_ptr<jnivm::java::lang::reflect::Constructor>> bd_ctor_keepalive;
+    {
+        std::lock_guard<std::mutex> lock(bd_ctor_mutex);
+        bd_ctor_keepalive.push_back(ctor);
+    }
+
+    // [BD] Temporary (remove once the AssetLocator path is confirmed on
+    // screen -- HANDOFF §4.2): dump what this class actually registered, so the
+    // "bound ... -> ..." line below can be read against a known table.
+    {
+        std::lock_guard<std::mutex> lock(clazz->mtx);
+        BD_LOG("JavaReflect", "getConstructorID: %s prefix='%s' methods=%zu",
+               clazz->nativeprefix.c_str(), clazz->nativeprefix.c_str(),
+               clazz->methods.size());
+        for (auto& m : clazz->methods) {
+            BD_LOG("JavaReflect", "   reg name='%s' sig='%s' static=%d native=%p handle=%d",
+                   m->name.c_str(), m->signature.c_str(), (int)m->_static, m->native,
+                   (int)(bool)m->nativehandle);
+        }
+    }
+
+    // [BD] Give the wrapper an execution body.
+    //
+    // Unity takes the pointer returned here and uses it as a jmethodID for the
+    // NewObject* slot, and jnivm dispatches that slot as a *static* call
+    // (MDispatch<jobject, jclass>::CallMethod, see vm.cpp). That path can only
+    // run a method through mid->dynamic or mid->nativehandle -- and a freshly
+    // built reflect::Constructor has neither, because javac.cpp's constructor
+    // fills in name and signature and nothing else. So every construction Unity
+    // performed through this id fell into the "Unknown Static" branch and came
+    // back null. That is why com.mobge.assetlocator.AssetLocator never came into
+    // existence and ListAssets was never reached
+    // (docs/HANDOFF-ODDMAR.md P0; the mid printed there *is* this object, so
+    // GetMethodID's <init> rewriting was never the missing piece).
+    //
+    // The class does carry the body: FakeJni registers every constructor as a
+    // *static* Method whose signature ends in its own class -- "(args)L<class>;"
+    // (HANDOFF §3.2). Resolve that entry and copy the execution body across.
+    //
+    // Bound here rather than at call time so the wrapper is self-contained:
+    // nothing has to still be alive when Unity eventually invokes it.
+    {
+        std::lock_guard<std::mutex> lock(clazz->mtx);
+
+        // Compare argument lists only. The lookup arrives as "(args)V" while the
+        // registered entry carries the class as its return type, so the complete
+        // signatures are never equal.
+        const auto wantClose = ctor->signature.find(')');
+        const std::string wantArgs = wantClose == std::string::npos
+            ? ctor->signature
+            : ctor->signature.substr(0, wantClose + 1);
+
+        std::shared_ptr<Method> body;
+        for (auto& m : clazz->methods) {
+            if (m->name != "<init>" || (!m->nativehandle && !m->dynamic))
+                continue;
+            const auto close = m->signature.find(')');
+            const std::string args = close == std::string::npos
+                ? m->signature
+                : m->signature.substr(0, close + 1);
+            if (args == wantArgs) {
+                body = m;
+                break;
+            }
+        }
+
+        // Nothing matched the argument list. Fall back to the first registered
+        // constructor that actually has a body: Unity's signature strings are
+        // routinely imprecise, and a constructor reached with the wrong static
+        // argument type still beats no constructor at all (all entries funnel
+        // into the same C++ constructor -- see javastubs/bd_assetlocator.cpp).
+        if (!body) {
+            for (auto& m : clazz->methods) {
+                if (m->name == "<init>" && (m->nativehandle || m->dynamic)) {
+                    body = m;
+                    break;
+                }
+            }
+        }
+
+        if (body) {
+            ctor->nativehandle = body->nativehandle;
+            ctor->native = body->native;
+            ctor->_static = true;
+            BD_LOG("JavaReflect", "getConstructorID: bound %s%s -> %s%s",
+                   clazz->nativeprefix.c_str(), ctor->signature.c_str(),
+                   clazz->nativeprefix.c_str(), body->signature.c_str());
+        } else if (bd_ctor_fallback_null()) {
+            // Escape hatch for A/B runs: the old behaviour, kept so the
+            // regression pair can still tell "the fallback caused it" from
+            // "something else did".
+            BD_LOG("JavaReflect",
+                   "getConstructorID: no bound <init> on %s for %s"
+                   " -- constructions through this id will return null"
+                   " (BD_CTOR_FALLBACK_NULL)",
+                   clazz->nativeprefix.c_str(), ctor->signature.c_str());
+        } else {
+            // A missing stub must not become a *null Java object*.
+            //
+            // Unity reaches this id through
+            // _AndroidJNIHelper.GetConstructorID() and then runs it in the
+            // NewObject* slot. With no bound <init> the construction came back
+            // null, and managed code forwarded that null as an *argument* to
+            // the next AndroidJavaObject. Unity then computes the signature of
+            // each argument with obj.GetType() and dies with a
+            // NullReferenceException inside
+            // UnityEngine._AndroidJNIHelper.GetSignature -- which is exactly
+            // what aborted
+            // MobGe.ICloud.AndroidGooglePlayServiceCloudPlatform.get_androidClient()
+            // / CheckAccountStatus() on Oddmar, because
+            // com.mobge.unitygameintegration.SocialImpl is a class we never
+            // stubbed (docs/HANDOFF-ODDMAR.md).
+            //
+            // Java's `new` never yields null, so a class we never implemented
+            // should still hand back a live, inert object of that class: every
+            // call on it misses and returns a default, which the offline path
+            // tolerates, while Unity's own reflection code keeps working.
+            //
+            // Cloned on a per-call basis rather than cached: the object is
+            // pushed onto the caller's local frame by ToJNIType(), and sharing
+            // one instance across frames would let an earlier pop collect it.
+            ctor->_static = true;
+            ctor->dynamic = [clazz](JNIEnv* env, jobject, jclass, const jvalue*) -> jvalue {
+                auto obj = std::make_shared<jnivm::Object>();
+                obj->clazz = clazz;
+                jvalue value{};
+                value.l = jnivm::JNITypes<std::shared_ptr<jnivm::Object>>::ToJNIType(
+                    jnivm::ENV::FromJNIEnv(env), obj);
+                return value;
+            };
+            BD_LOG("JavaReflect",
+                   "getConstructorID: no bound <init> on %s for %s"
+                   " -- synthesising an inert object",
+                   clazz->nativeprefix.c_str(), ctor->signature.c_str());
+        }
+    }
+
+    verbose("UnityReflection", "getConstructorID(%s, %s) = %p \n",
             clazz->getName().c_str(), signature ? signature->c_str() : "(null)", ctor.get());
     return ctor;
 }
@@ -719,6 +887,34 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
 
     const char* name = methodName.get()->c_str();
     const char* sig;
+
+    // Method 0: [BD] exact signature match.
+    //
+    // Run this before the name-only search below. That search ignores the
+    // caller's signature entirely, so a lookup for forName(String) would be
+    // answered with whatever single method named "forName" is registered --
+    // and if that method takes a different number of parameters, the caller
+    // builds a shorter jvalue array than the hook reads, and the varargs
+    // dispatch walks off the end of it. Matching the requested signature when
+    // we actually have such a method keeps arity consistent.
+    //
+    // This is a preference, not a requirement: Unity's own signature strings
+    // are often inaccurate (see the hardcoded table below), so a miss just
+    // falls through to the old heuristics.
+    if (signature != nullptr) {
+        const char* wanted = signature.get()->c_str();
+        if (wanted != nullptr && wanted[0] == '(') {
+            auto exact = std::shared_ptr<Method>(
+                (Method*)clazz->getMethod(wanted, name),
+                [](Method*) { } // No-op deleter
+            );
+            if (exact != nullptr) {
+                verbose("UnityReflection", "getMethodID(type 0/exact, %s, %s, %s, %d) = %p \n",
+                        clazz->getName().c_str(), name, wanted, isStatic, exact.get());
+                return exact;
+            }
+        }
+    }
 
     // Method 1: Search for matching methods in class by name only (bail out if there is ambiguity due to duplicates)
 
@@ -741,8 +937,69 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
         (Method*)clazz->getMethod(foundMethod->signature.c_str(), name),
         [](Method*) { } // No-op deleter
         );
-        verbose("UnityReflection", "getMethodID(type 1, %s, %s, %s, %d) = 0x%p \n", clazz->getName().c_str(), name, foundMethod->signature.c_str(), isStatic, method.get());
+        // Log both the requested and the found signature: the found one is the
+        // stub's, and comparing the two is the only way to tell whether we are
+        // about to hand the caller a method with the wrong arity.
+        verbose("UnityReflection", "getMethodID(type 1, %s, %s, requested=%s found=%s, %d) = %p \n",
+                clazz->getName().c_str(), name,
+                signature != nullptr ? signature.get()->c_str() : "(null)",
+                foundMethod->signature.c_str(), isStatic, method.get());
         return method;
+    }
+
+    // Method 1b: same name-only search, but across the class *and its base
+    // classes*.
+    //
+    // Method 1 only walks clazz->methods, i.e. what was registered directly on
+    // the class. Unity's reflected lookups routinely name an inherited member
+    // with an imprecise signature: getIntent() lives on android/app/Activity,
+    // getPackageManager()/getAssets()/getObbDir() on android/content/Context,
+    // while the lookup is done on com/unity3d/player/UnityPlayerActivity and
+    // asks for them as `()Ljava/lang/Object;`. All three earlier strategies then
+    // miss -- the exact pass wants the concrete return type, the own-class scan
+    // sees no such name, and the hardcoded table below has no entry -- so
+    // getMethodID returned null and the managed side failed with
+    // "JNI: Init'd AndroidJavaObject with null ptr!" or a
+    // NullReferenceException. Reusing the *registered* signature of the unique
+    // name match is the same trick Method 1 uses, so argument arity stays
+    // consistent with what the stub actually reads.
+    if (foundMethod == nullptr || duplicate) {
+        std::shared_ptr<Method> inherited = nullptr;
+        bool inheritedDuplicate = false;
+        if (jnivm::ENV* env = jnivm::ENV::FromJNIEnv(FakeJni::JniEnv::getCurrentEnv())) {
+            std::vector<Class*> work{clazz.get()};
+            for (size_t i = 0; i < work.size() && i < 64; ++i) {
+                Class* current = work[i];
+                if (current == nullptr)
+                    continue;
+                for (std::shared_ptr<Method>& method : current->methods) {
+                    if (method != nullptr && strcmp(method->name.c_str(), name) == 0) {
+                        if (inherited != nullptr && inherited != method)
+                            inheritedDuplicate = true;
+                        inherited = method;
+                    }
+                }
+                if (current->baseclasses) {
+                    for (std::shared_ptr<Class>& base : current->baseclasses(env)) {
+                        if (base)
+                            work.push_back(base.get());
+                    }
+                }
+            }
+        }
+        if (inherited != nullptr && !inheritedDuplicate) {
+            auto method = std::shared_ptr<Method>(
+                (Method*)clazz->getMethod(inherited->signature.c_str(), name),
+                [](Method*) { } // No-op deleter
+            );
+            if (method != nullptr) {
+                verbose("UnityReflection", "getMethodID(type 1b/inherited, %s, %s, requested=%s found=%s, %d) = %p \n",
+                        clazz->getName().c_str(), name,
+                        signature != nullptr ? signature.get()->c_str() : "(null)",
+                        inherited->signature.c_str(), isStatic, method.get());
+                return method;
+            }
+        }
     }
 
     // Method 2: Hardcoded fixes for the signature inaccuracies, then use getMethod
@@ -769,7 +1026,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
         (Method*)clazz->getMethod(sig, name),
         [](Method*) { } // No-op deleter
     );
-    verbose("UnityReflection", "getMethodID(type 2, %s, %s, %s, %d) = 0x%p \n", clazz->getName().c_str(), name, sig, isStatic, method.get());
+    verbose("UnityReflection", "getMethodID(type 2, %s, %s, %s, %d) = %p \n", clazz->getName().c_str(), name, sig, isStatic, method.get());
     return method;
 }
 std::shared_ptr<jnivm::java::lang::reflect::Field> jnivm::com::unity3d::player::ReflectionHelper::getFieldID(std::shared_ptr<jnivm::java::lang::Class> clazz, std::shared_ptr<FakeJni::JString> fieldName, std::shared_ptr<FakeJni::JString> signature, bool isStatic)
@@ -791,7 +1048,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Field> jnivm::com::unity3d::player::
 
     for (auto field : clazz->fields) {
         if (field->name == name && field->type == sig) {
-            verbose("UnityReflection", "getFieldID(%s, %s, %s, %d) = %p \n", clazz->getName().c_str(), fieldName.get()->c_str(), sig, isStatic, field);
+            verbose("UnityReflection", "getFieldID(%s, %s, %s, %d) = %p \n", clazz->getName().c_str(), fieldName.get()->c_str(), sig, isStatic, field.get());
             return field;
         }
     }
@@ -819,6 +1076,28 @@ std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::ne
     return std::make_shared<jnivm::bitter::jnibridge::JNIBridgeProxy>(
         nativeHandle, std::set<std::string>{interfaceName},
         jnivm::bitter::jnibridge::JNIBridgeProxy::InvocationMode::ManagedGCHandle);
+}
+
+// Two-argument form, see the declaration in unity.h.
+//
+// Unity's `_AndroidJNIHelper.CreateJNIArgArray()` builds the jvalue array for
+// `new AndroidJavaObject(...)` by calling AndroidJavaProxy.GetProxy(), and that
+// ends up here with (int proxyId, Class interfaceClass). With no such overload
+// registered the lookup missed, GetProxy() returned IntPtr.Zero,
+// AndroidJavaObjectDeleteLocalRef(0) was called on it, and the resulting
+// exception aborted the caller -- on Oddmar that is
+// MobGe.ICloud.AndroidGooglePlayServiceCloudPlatform.CheckAccountStatus(),
+// reached from MGLOProgressData.construct() in MRLevelContext.Awake(), i.e. the
+// save/progress system never came up.
+//
+// proxyId carries the same native handle the three-argument overload takes, so
+// forward to it; the `player` argument is only used for a log line there.
+std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::newProxyInstanceById(
+    jint proxyId, std::shared_ptr<jnivm::Class> interface)
+{
+    verbose("UnityReflection", "newProxyInstanceById(%d, %s) \n",
+            (int)proxyId, interface ? interface->getName().c_str() : "(null)");
+    return newProxyInstance(nullptr, (long)proxyId, interface);
 }
 
 std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::createInvocationError(long nativeHandle, bool toggle)
@@ -900,6 +1179,10 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Function<&ReflectionHelper::getFieldID> {}, "getFieldID", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::getFieldSignature> {}, "getFieldSignature", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::newProxyInstance> {}, "newProxyInstance", FakeJni::JMethodID::STATIC },
+    // (int proxyId, Class) -- the overload Unity's AndroidJavaProxy.GetProxy()
+    // actually resolves. Same JNI name, different signature; FakeJni keys its
+    // registrations by name+signature, so both coexist.
+    { FakeJni::Function<&ReflectionHelper::newProxyInstanceById> {}, "newProxyInstance", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::setNativeExceptionOnProxy> {}, "setNativeExceptionOnProxy", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&ReflectionHelper::createInvocationError> {}, "createInvocationError", FakeJni::JMethodID::STATIC },
     END_NATIVE_DESCRIPTOR

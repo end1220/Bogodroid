@@ -19,6 +19,7 @@ extern "C" {
 #include <cstring>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -203,6 +204,12 @@ struct AMediaFormat {
     std::map<std::string, int64_t> longs;
     std::map<std::string, float> floats;
     std::map<std::string, std::string> strings;
+    std::map<std::string, std::vector<uint8_t>> buffers;
+    // Backing store for AMediaFormat_toString. The NDK contract publishes a
+    // borrowed pointer that the caller may hold for as long as it keeps the
+    // format, so the text has to live on the format object rather than in a
+    // temporary. Rebuilt on each call.
+    std::string text;
     AVCodecParameters* codecpar{};
 
     ~AMediaFormat() {
@@ -663,21 +670,76 @@ extern "C" void bd_media_dump_state()
 }
 
 extern "C" {
+// The full NDK key set. Unity's AndroidMediaNDK walks this table by name and
+// gives up on the entire NDK video path at the first dlsym miss, so a constant
+// nobody asked for yet is still part of the contract.
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_PROFILE = "aac-profile";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_BIT_RATE = "bitrate";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_CHANNEL_COUNT = "channel-count";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_CHANNEL_MASK = "channel-mask";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_COLOR_FORMAT = "color-format";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_COLOR_RANGE = "color-range";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_COLOR_STANDARD = "color-standard";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_COLOR_TRANSFER = "color-transfer";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_DURATION = "durationUs";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_ENCODER_DELAY = "encoder-delay";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL = "flac-compression-level";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_FRAME_RATE = "frame-rate";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_HEIGHT = "height";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_IS_ADTS = "is-adts";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_IS_AUTOSELECT = "is-autoselect";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_IS_DEFAULT = "is-default";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE = "is-forced-subtitle";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_I_FRAME_INTERVAL = "i-frame-interval";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_LANGUAGE = "language";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_INPUT_SIZE = "max-input-size";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_MIME = "mime";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_PCM_BIG_ENDIAN = "pcm-big-endian";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP = "push-blank-buffers-on-shutdown";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER = "repeat-previous-frame-after";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_ROTATION = "rotation-degrees";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_SAMPLE_RATE = "sample-rate";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_SLICE_HEIGHT = "slice-height";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_STRIDE = "stride";
 ABI_ATTR const char* AMEDIAFORMAT_KEY_WIDTH = "width";
+// Unity's table reaches past the NDK header into the wider Java
+// android.media.MediaFormat key set (KEY_MAX_HEIGHT and friends), so the probe
+// keeps finding names the NDK surface never had. Values follow the Java
+// constants; only the symbol names matter for dlsym, but a wrong value would
+// make a set/get pair silently disagree.
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_DRC_ATTENUATION_FACTOR = "aac-drc-cut-level";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_DRC_BOOST_FACTOR = "aac-drc-boost-level";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_DRC_HEAVY_COMPRESSION = "aac-drc-heavy-compression";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_DRC_TARGET_REFERENCE_LEVEL = "aac-drc-target-ref-level";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_ENCODED_TARGET_LEVEL = "aac-encoded-target-level";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT = "aac-max-output-channel_count";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AAC_SBR_MODE = "aac-sbr-mode";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_AUDIO_SESSION_ID = "audio-session-id";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_BITRATE_MODE = "bitrate-mode";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_CAPTURE_RATE = "capture-rate";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_COLOR_TRANSFER_REQUEST = "color-transfer-request";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_COMPLEXITY = "complexity";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_CREATE_INPUT_SURFACE_SUSPENDED = "create-input-buffers-suspended";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_GRID_COLUMNS = "grid-columns";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_GRID_ROWS = "grid-rows";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_HDR_STATIC_INFO = "hdr-static-info";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_INTRA_REFRESH_PERIOD = "intra-refresh-period";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_IS_TIMED_TEXT = "is-timed-text";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_LATENCY = "latency";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_LEVEL = "level";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_B_FRAMES = "max-bframes";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_HEIGHT = "max-height";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_PTS_GAP_TO_ENCODER = "max-pts-gap-to-encoder";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_MAX_WIDTH = "max-width";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_OPERATING_RATE = "operating-rate";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_PREPEND_HEADER_TO_SYNC_FRAMES = "prepend-sps-pps-to-idr-frames";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_PRIORITY = "priority";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_PROFILE = "profile";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_QUALITY = "quality";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYERING = "temporal-layering";
+ABI_ATTR const char* AMEDIAFORMAT_KEY_TRACK_ID = "track-id";
+
 
 ABI_ATTR AMediaDataSource* AMediaDataSource_new() {
     BD_LOG("MEDIA", "data source new");
@@ -707,6 +769,51 @@ ABI_ATTR void AMediaDataSource_setClose(
     AMediaDataSource* source, media_data_source_close callback) {
     if (source) source->close = callback;
     BD_LOG("MEDIA", "data source close=%p", reinterpret_cast<void*>(callback));
+}
+
+// Unity hands the NDK extractor the same StreamingAssets URL it prints in its
+// own failure line:
+//
+//   jar:file://!/assets/Videos/mobge_and_senri_splash_video.mp4
+//
+// That hostless shape is "jar:file://" + package path + "!/assets", with the
+// package path collapsing to nothing (the port's config value is a bare "./").
+// The asset path after "!/" is still exact, and the file really does exist under
+// the staged tree, so resolve it here rather than depend on how Unity assembled
+// the URL -- that assembly is not ours to fix, the lookup is.
+static std::string bd_local_media_path(const char* path) {
+    if (!path) return std::string();
+    const std::string raw(path);
+    const std::string jar_prefix = "jar:file://";
+    if (raw.compare(0, jar_prefix.size(), jar_prefix) != 0)
+        return raw;
+    const std::string::size_type bang = raw.find("!/");
+    if (bang == std::string::npos)
+        return raw;
+    const std::string host = raw.substr(jar_prefix.size(), bang - jar_prefix.size());
+    const std::string asset = raw.substr(bang + 2);
+
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    std::vector<std::filesystem::path> candidates;
+    if (!host.empty())
+        candidates.emplace_back(std::filesystem::path(host) / asset);
+    if (!host.empty() && std::filesystem::path(host).extension() == ".apk")
+        candidates.emplace_back(std::filesystem::path(host).parent_path() / asset);
+    if (!host.empty() && std::filesystem::path(host).extension() == ".apk")
+        candidates.emplace_back(std::filesystem::path(host).parent_path() / "gamedata" / asset);
+    candidates.emplace_back(cwd / asset);
+    candidates.emplace_back(cwd / "gamedata" / asset);
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            const std::string resolved = candidate.lexically_normal().string();
+            BD_LOG("MEDIA", "resolved %s -> %s", raw.c_str(), resolved.c_str());
+            return resolved;
+        }
+    }
+    BD_LOG("MEDIA", "unresolved %s (host='%s' asset='%s')", raw.c_str(),
+           host.c_str(), asset.c_str());
+    return raw;
 }
 
 static media_status_t extractor_open_io(
@@ -758,8 +865,9 @@ ABI_ATTR media_status_t AMediaExtractor_setDataSource(
     AMediaExtractor* extractor, const char* path) {
     BD_LOG("MEDIA", "extractor path source=%s", path ? path : "(null)");
     if (!extractor || !path) return AMEDIA_ERROR_UNKNOWN;
+    const std::string local = bd_local_media_path(path);
     AVFormatContext* format = nullptr;
-    if (avformat_open_input(&format, path, nullptr, nullptr) < 0 ||
+    if (avformat_open_input(&format, local.c_str(), nullptr, nullptr) < 0 ||
         avformat_find_stream_info(format, nullptr) < 0) {
         if (format) avformat_close_input(&format);
         return AMEDIA_ERROR_UNKNOWN;
@@ -838,9 +946,21 @@ ABI_ATTR media_status_t AMediaExtractor_selectTrack(
     extractor->selected[index] = true;
     return AMEDIA_OK;
 }
+ABI_ATTR media_status_t AMediaExtractor_unselectTrack(
+    AMediaExtractor* extractor, size_t index) {
+    if (!extractor || index >= extractor->selected.size())
+        return AMEDIA_ERROR_UNKNOWN;
+    extractor->selected[index] = false;
+    return AMEDIA_OK;
+}
 ABI_ATTR int AMediaExtractor_getSampleTrackIndex(AMediaExtractor* extractor) {
     return extractor && extractor->ensure_packet()
         ? extractor->packet->stream_index : -1;
+}
+ABI_ATTR uint32_t AMediaExtractor_getSampleFlags(AMediaExtractor* extractor) {
+    // Only used to spot the end-of-stream / keyframe markers on the sample that
+    // was just read, so the decoder's own packet flags are the right answer.
+    return extractor && extractor->ensure_packet() ? extractor->packet->flags : 0;
 }
 ABI_ATTR ssize_t AMediaExtractor_readSampleData(
     AMediaExtractor* extractor, uint8_t* buffer, size_t capacity) {
@@ -926,6 +1046,83 @@ ABI_ATTR void AMediaFormat_setInt32(
     AMediaFormat* format, const char* key, int32_t value) {
     if (format && key) format->ints[key] = value;
 }
+ABI_ATTR void AMediaFormat_setInt64(
+    AMediaFormat* format, const char* key, int64_t value) {
+    if (format && key) format->longs[key] = value;
+}
+ABI_ATTR void AMediaFormat_setFloat(
+    AMediaFormat* format, const char* key, float value) {
+    if (format && key) format->floats[key] = value;
+}
+ABI_ATTR void AMediaFormat_setDouble(
+    AMediaFormat* format, const char* key, double value) {
+    // The NDK type is a distinct getDouble/setDouble pair; we keep no doubles of
+    // our own, so round-trip through the float table rather than refusing.
+    if (format && key) format->floats[key] = (float)value;
+}
+ABI_ATTR void AMediaFormat_setString(
+    AMediaFormat* format, const char* key, const char* value) {
+    if (format && key && value) format->strings[key] = value;
+}
+ABI_ATTR void AMediaFormat_setBuffer(
+    AMediaFormat* format, const char* key, const void* data, size_t size) {
+    if (!format || !key || !data) return;
+    auto& slot = format->buffers[key];
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    slot.assign(bytes, bytes + size);
+}
+ABI_ATTR bool AMediaFormat_getDouble(
+    AMediaFormat* format, const char* key, double* value) {
+    if (!format || !key || !value) return false;
+    auto found = format->floats.find(key);
+    if (found == format->floats.end()) return false;
+    *value = found->second;
+    return true;
+}
+ABI_ATTR bool AMediaFormat_getBuffer(
+    AMediaFormat* format, const char* key, void** data, size_t* size) {
+    if (!format || !key || !data || !size) return false;
+    auto found = format->buffers.find(key);
+    if (found == format->buffers.end()) return false;
+    // Same borrowed-pointer contract as getString: the storage belongs to the
+    // format and stays valid until it is deleted.
+    *data = found->second.data();
+    *size = found->second.size();
+    return true;
+}
+ABI_ATTR const char* AMediaFormat_toString(AMediaFormat* format) {
+    if (!format) return nullptr;
+    std::string out = "AMediaFormat{";
+    bool first = true;
+    const auto comma = [&]() {
+        if (!first) out += ", ";
+        first = false;
+    };
+    for (const auto& entry : format->ints) {
+        comma();
+        out += entry.first + "=" + std::to_string(entry.second);
+    }
+    for (const auto& entry : format->longs) {
+        comma();
+        out += entry.first + "=" + std::to_string(entry.second);
+    }
+    for (const auto& entry : format->floats) {
+        comma();
+        out += entry.first + "=" + std::to_string(entry.second);
+    }
+    for (const auto& entry : format->strings) {
+        comma();
+        out += entry.first + "=\"" + entry.second + "\"";
+    }
+    for (const auto& entry : format->buffers) {
+        comma();
+        out += entry.first + "=buffer(" + std::to_string(entry.second.size()) + ")";
+    }
+    out += "}";
+    format->text = std::move(out);
+    BD_LOG("MEDIA", "format toString -> %s", format->text.c_str());
+    return format->text.c_str();
+}
 
 ABI_ATTR AMediaCodec* AMediaCodec_createDecoderByType(const char* mime) {
     AVCodecID id = codec_for_mime(mime);
@@ -938,6 +1135,51 @@ ABI_ATTR AMediaCodec* AMediaCodec_createDecoderByType(const char* mime) {
     codec->decoder = decoder;
     bd_media_register(codec);
     return codec;
+}
+ABI_ATTR AMediaCodec* AMediaCodec_createCodecByName(const char* name) {
+    // This entry point takes a component name ("c2.android.avc.decoder",
+    // "OMX.google.aac.decoder") rather than a MIME type, and Unity reaches for
+    // it when it wants a named codec. Map the common families onto the same
+    // FFmpeg decoders createDecoderByType would have picked; anything else is a
+    // miss, exactly as it would be on a device that lacks that component.
+    std::string lower;
+    if (name) {
+        for (const char* p = name; *p; ++p)
+            lower.push_back(*p >= 'A' && *p <= 'Z' ? (char)(*p + 32) : *p);
+    }
+    const char* mime = nullptr;
+    if (lower.find("avc") != std::string::npos ||
+        lower.find("h264") != std::string::npos)
+        mime = "video/avc";
+    else if (lower.find("hevc") != std::string::npos ||
+             lower.find("h265") != std::string::npos)
+        mime = "video/hevc";
+    else if (lower.find("vp9") != std::string::npos)
+        mime = "video/x-vnd.on2.vp9";
+    else if (lower.find("vp8") != std::string::npos)
+        mime = "video/x-vnd.on2.vp8";
+    else if (lower.find("mp4a") != std::string::npos ||
+             lower.find("aac") != std::string::npos)
+        mime = "audio/mp4a-latm";
+    else if (lower.find("vorbis") != std::string::npos)
+        mime = "audio/vorbis";
+    else if (lower.find("opus") != std::string::npos)
+        mime = "audio/opus";
+    if (!mime) {
+        BD_LOG("MEDIA", "createCodecByName %s -> no mapping",
+               name ? name : "(null)");
+        return nullptr;
+    }
+    return AMediaCodec_createDecoderByType(mime);
+}
+ABI_ATTR AMediaCodec* AMediaCodec_createEncoderByType(const char* mime) {
+    // This port only ever plays. Handing back a decoder here would be worse
+    // than handing back null: Unity would treat it as a working encoder and
+    // stall on the first drain. Declining matches a device whose codec list has
+    // no encoder for that type.
+    BD_LOG("MEDIA", "createEncoderByType %s -> unsupported",
+           mime ? mime : "(null)");
+    return nullptr;
 }
 ABI_ATTR media_status_t AMediaCodec_delete(AMediaCodec* codec) {
     bd_media_unregister(codec);
@@ -1291,6 +1533,40 @@ ABI_ATTR media_status_t AMediaCodec_setOutputSurface(
         codec->surface_mode = window != nullptr;
     BD_LOG("MEDIA", "setOutputSurface window=%p surface=%d", window,
            codec ? (int)codec->surface_mode : -1);
+    return AMEDIA_OK;
+}
+ABI_ATTR media_status_t AMediaCodec_releaseOutputBufferAtTime(
+    AMediaCodec* codec, size_t index, int64_t timestamp_ns) {
+    // The timestamped form only exists so a Surface-backed codec can pin the
+    // frame to a presentation time. Our bridge publishes on release, and the
+    // render flag carries the same meaning here, so forward it.
+    (void)timestamp_ns;
+    return AMediaCodec_releaseOutputBuffer(codec, index, true);
+}
+ABI_ATTR AMediaFormat* AMediaCodec_getInputFormat(AMediaCodec* codec) {
+    // Caller owns the result. Hand out a fresh format carrying the mime we were
+    // configured with; nothing else about the input side is meaningful here.
+    if (!codec) return nullptr;
+    auto* format = new AMediaFormat;
+    format->strings["mime"] = mime_for_codec(codec->codec_id);
+    return format;
+}
+ABI_ATTR AMediaFormat* AMediaCodec_getBufferFormat(AMediaCodec* codec) {
+    // Same shape as getOutputFormat: the decoder's current output description.
+    return codec ? codec->clone_output_format() : nullptr;
+}
+ABI_ATTR const char* AMediaCodec_getName(AMediaCodec* codec) {
+    if (!codec || !codec->decoder) return nullptr;
+    // AVCodec::name points at static storage, so the pointer outlives the call
+    // exactly as the NDK contract expects.
+    return codec->decoder->name;
+}
+ABI_ATTR media_status_t AMediaCodec_setParameters(
+    AMediaCodec* codec, const AMediaFormat* format) {
+    // Only used for runtime tuning hints (bitrate, request-sync-frame, ...).
+    // Accepting and ignoring them is correct for a decoder we own outright.
+    (void)codec;
+    (void)format;
     return AMEDIA_OK;
 }
 

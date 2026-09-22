@@ -87,9 +87,16 @@ std::shared_ptr<jnivm::Class> jnivm::InternalFindClass(ENV *env, const char *nam
 		curc = ccl->second;
 	} else {
 		if(returnZero) return nullptr;
-#ifndef NDEBUG
+		// Always on (was #ifndef NDEBUG, i.e. compiled out of every Release /
+		// RelWithDebInfo build - exactly the builds we ship).
+		//
+		// This is the list of Java classes the port never stubbed, in the order
+		// the guest asks for them. It is the cheapest way to find the class
+		// behind a managed NullReferenceException whose stack only names
+		// Unity-side frames, because the class is only ever reached through
+		// FindClass() and never through GetMethodID() (which is what the
+		// [BD-ANY-MISS] / [BD-MISS] lines report).
 		LOG("BD-PHANTOM", "FindClass(%s) - not registered, auto-stub", name);
-#endif
 		curc = std::make_shared<Class>();
 		const char * lastslash = strrchr(name, '/');
 		curc->name = lastslash != nullptr ? lastslash + 1 : name;
@@ -100,6 +107,45 @@ std::shared_ptr<jnivm::Class> jnivm::InternalFindClass(ENV *env, const char *nam
 	}
 #endif
 	// curc->nativeprefix = std::move(prefix);
+
+	// Every Java class extends java/lang/Object -- including the ones we never
+	// stubbed.
+	//
+	// Attached here, at the single exit, because with JNI_DEBUG on (which it
+	// always is in this tree: CMakeLists forces JNIVM_ENABLE_DEBUG=ON) an
+	// unknown name is minted by the namespace-walking branch above and never
+	// reaches the `vm->classes.find()` fallback at all.
+	//
+	// Why it matters: jnivm::GetMethodID() walks the inheritance chain only
+	// through `cur->baseclasses` (method.cpp, the branch just before it mints
+	// an empty stub). A class with no chain therefore missed
+	// Object.getClass / toString / equals / hashCode and answered null to all
+	// of them.
+	//
+	// That is not cosmetic. Unity's managed _AndroidJNIHelper signatures a
+	// constructor argument by asking the argument's object for its class; a
+	// null getClass() result makes it dereference null and throw
+	// NullReferenceException out of GetSignature, which is what aborted
+	// MobGe.ICloud.AndroidGooglePlayServiceCloudPlatform.get_androidClient()
+	// for com.mobge.unitygameintegration.SocialImpl
+	// (docs/HANDOFF-ODDMAR.md). The same trap is already documented at the
+	// Object.getClass hook in javastubs/javac.cpp: reporting the wrong class
+	// there also produces a "spurious NullReferenceException" from
+	// AndroidJNIHelper.
+	//
+	// Only fills the gap: FakeJni-registered classes already carry their own
+	// chain via ENV::GetClass<T>(), and java/lang/Object must not parent itself.
+	if (curc && !curc->baseclasses && std::strcmp(prefix, "java/lang/Object") != 0) {
+		curc->baseclasses = [](ENV *env) -> std::vector<std::shared_ptr<Class>> {
+			static std::weak_ptr<Class> objectClass;
+			auto cached = objectClass.lock();
+			if (!cached) {
+				cached = InternalFindClass(env, "java/lang/Object", true, false);
+				objectClass = cached;
+			}
+			return { cached };
+		};
+	}
 	return curc;
 }
 

@@ -122,6 +122,17 @@ namespace com {
                 static std::shared_ptr<jnivm::java::lang::reflect::Field> getFieldID(std::shared_ptr<jnivm::java::lang::Class> clazz, std::shared_ptr<FakeJni::JString> fieldName, std::shared_ptr<FakeJni::JString> signature, bool isStatic);
                 static std::shared_ptr<FakeJni::JString> getFieldSignature(std::shared_ptr<jnivm::java::lang::reflect::Field> field);
                 static std::shared_ptr<jnivm::Object> newProxyInstance(std::shared_ptr<UnityPlayer> player, long nativeHandle, std::shared_ptr<jnivm::Class> interfaces);
+                // Unity's AndroidJavaProxy.GetProxy() reaches ReflectionHelper through
+                // THIS two-argument overload -- (int proxyId, Class interfaceClass) --
+                // and not the three-argument one above. It matters because every
+                // `new AndroidJavaObject(cls, proxyArg)` builds its argument array
+                // through it: a miss makes the proxy come back null and
+                // AndroidJavaObject's constructor logs "JNI: Init'd AndroidJavaObject
+                // with null ptr!" and throws (observed on Oddmar from
+                // MobGe.SocialPlatforms.SocialPlatformAndroid.initNativePart).
+                // Kept under a distinct C++ name so `&ReflectionHelper::newProxyInstance`
+                // stays unambiguous; the JNI name is set in the descriptor.
+                static std::shared_ptr<jnivm::Object> newProxyInstanceById(jint proxyId, std::shared_ptr<jnivm::Class> interfaces);
                 static void setNativeExceptionOnProxy(std::shared_ptr<jnivm::Object> proxy, long nativeHandle, bool hasException);
                 static std::shared_ptr<jnivm::Object> createInvocationError(long nativeHandle, bool toggle);
 

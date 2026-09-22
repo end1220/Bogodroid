@@ -9,9 +9,12 @@
 #include <cstdio>
 #include <cstring>
 #include <csignal>
+#include <cstdarg>
+#include <cstdint>
 #include <ctime>
 #include <execinfo.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
@@ -126,11 +129,61 @@ void print_native_callbacks(ANativeActivity nActivity)
 #endif
 }
 
-void segfault_handler(int signal) {
-    void *array[50];
-    size_t size = backtrace(array, 50);
-    BD_LOG("SEGV", "signal %d", signal);
-    backtrace_symbols_fd(array, size, STDERR_FILENO);
+// Crash diagnostics.
+//
+// Unity installs its own handler for SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT from
+// libunity's JNI_OnLoad -- after main() has already installed segfault_handler()
+// -- and chains into the handler it replaced (libunity+0x319b2c re-enters the
+// saved one), so this function is still reached. Two consequences:
+//
+//  * The ucontext Unity forwards is the only trustworthy record of the fault,
+//    hence SA_SIGINFO and the register dump below. si_addr plus the saved pc
+//    name the actual faulting instruction; the frame-pointer walk cannot,
+//    because by now it runs on a stack Unity's handler has already rewritten
+//    (it keeps the TLS base in x29 instead of a frame pointer).
+//  * backtrace(3) therefore reports a bogus outer frame that lands inside
+//    Unity's own crash handler. bd_dump_crash_backtrace() recovers the real
+//    chain by scanning the stack for return addresses instead of frame links.
+//
+// Output goes through write(2)/vsnprintf rather than BD_LOG so a crash dump
+// survives a build configured with BD_ENABLE_LOG=OFF (see AGENTS.md).
+static void bd_crash_printf(const char* fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        const size_t len = (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1;
+        ssize_t written = write(STDERR_FILENO, buf, len);
+        (void)written;
+    }
+}
+
+void segfault_handler(int signal, siginfo_t* info, void* context) {
+    bd_crash_printf("\n[BD-SEGV] signal %d si_code=%d si_addr=%p\n",
+                    signal, info ? info->si_code : -1,
+                    info ? info->si_addr : (void*)0);
+
+#if defined(__aarch64__)
+    if (context) {
+        const mcontext_t& mc = ((ucontext_t*)context)->uc_mcontext;
+        bd_crash_printf("  sp %016llx pstate %#llx\n",
+                        (unsigned long long)mc.sp, (unsigned long long)mc.pstate);
+        for (int i = 0; i + 2 < 30; i += 3) {
+            bd_crash_printf("  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n",
+                            i, (unsigned long long)mc.regs[i],
+                            i + 1, (unsigned long long)mc.regs[i + 1],
+                            i + 2, (unsigned long long)mc.regs[i + 2]);
+        }
+        bd_describe_crash_address("BD-SEGV", "pc", mc.pc);
+        bd_describe_crash_address("BD-SEGV", "lr", mc.regs[30]);
+        bd_describe_crash_address("BD-SEGV", "fp", mc.regs[29]);
+    }
+#endif
+
+    bd_dump_crash_backtrace("BD-SEGV");
     _exit(1);
 }
 
@@ -146,7 +199,18 @@ void exit_handler(int signal) {
 
 void print_backtrace_on_segfault()
 {
-    signal(SIGSEGV, segfault_handler);
+    // SA_SIGINFO, not signal(2): the handler is chained onto from Unity's own
+    // crash handler, which forwards the original siginfo and ucontext. Without
+    // it the fault address and pc are unrecoverable once the stack is gone.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = segfault_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+
+    static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    for (int s : signals)
+        sigaction(s, &sa, nullptr);
 }
 
 void exit_on_signals()
