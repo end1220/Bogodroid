@@ -25,14 +25,194 @@
 
 ---
 
+## 0.6 第三场（2026-09-22 白天）：分支 `ddmar` + 两个绕过点，以及 hook 契约的定论
+
+> 本场**没有解决黑屏**，但把"为什么这个 hook 一定不生效"钉死了：**打的是一个虚调用转发 thunk，
+> 它的契约是 `bool` + 两个输出槽，而现在返回的是指针。** 同时更正了上一场三条既有结论。
+
+### A. 分支与提交
+
+- 新分支 **`ddmar`**（从 `video` 切出）。切出时工作区干净，两个提交都在这条分支上。
+  （**本文件这一版的改动本身尚未提交**，见 §13 版本行。）
+- `beab38d` *oddmar: continue offline video startup fixes* — 34 个文件：两份文档、`javastubs/android*.{h,cpp}`、
+  `bd_assetlocator.cpp`、`javac.cpp`、`libjnivm` 三处（`method.cpp`/`vm.cpp`/`findclass.cpp`）、
+  `thunks/ndk/media*`+`ndk.cpp`、`libc/fcntl.cpp`+`misc.cpp`+`stdio.cpp`、`platform/common/debug_utils.*`、
+  `projects/unityloader/main.cpp`+`javastubs/*`、`scripts/container-run-game-seq.sh`。
+- `eb68cf7` *oddmar: add opt-in Unity video translation bypass* — `projects/unityloader/main.cpp`(+37)、
+  `thunks/libc/fcntl.cpp`(+27/−3)。
+
+### B. 本场新增的两个"离线视频绕过点"
+
+**B-1. `clean_jar_path()` 增加 `<cwd>/gamedata/assets` 映射**（`thunks/libc/fcntl.cpp:82-101`）
+
+通用清理把 hostless 的 jar 前缀 `jar:file://!` 映射成 `<cwd>/assets/...`；新增块在这之上找 `/assets/`，
+若 `<cwd>/gamedata/assets/...` **`stat` 存在**就改返回它。
+
+⚠️ **实测这个映射本轮一次都没被行使**：本场日志里对视频文件**零 `stat`/`open`**（`grep "Videos/mobge_and_senri_splash_video" log-args3.txt` 只有 2 条：hook 的打印 + Unity 的失败行）。
+原因见 D：Unity 的翻译步骤发生在**文件层之前**就返回了"失败"。所以它是"备用"，只有在 Unity 真的去开文件时才有意义。
+
+**B-2. `BD_BYPASS_VIDEO_TRANSLATE=1`：hook Oddmar `libunity.so + 0x4c124c`**
+
+- 实现：`projects/unityloader/main.cpp:34-60`（`bypass_video_translate`）+ `main()` 里 `~1166` 处
+  `hook_address_detour(&lunity, addr_lunity + 0x4c124c, …)`，**只在环境变量存在时装**，默认路径不受影响。
+- 实测触发 **1 次**（与视频翻译被调用次数一致），路径也打印对了（`/game/Oddmar/gamedata/assets/Videos/mobge_and_senri_splash_video.mp4`，文件确实存在 979 746 B），
+  **但 Unity 依旧报 `could not translate` → `-10004`**。
+
+### C. 🔴 核心结论：`0x4c124c` 是"虚调用转发 thunk"，而它返回 `bool`
+
+取证对象：`/game/Oddmar/gamedata/lib/arm64-v8a/libunity.so`，15 287 168 B、stripped、
+BuildID sha1 `664018de51c6af87bf397e4c6d80b2f1c154dfa9`。**下面所有偏移只对这个 build 有效。**
+
+**`0x4c124c` 是函数入口**（全仓 `bl 4c124c` 命中 4 处），但它不是"翻译函数本体"，而是把调用转给 `vtbl[0x138]` 的 thunk：
+
+```asm
+4c124c  mov  x10, x0
+4c1250  ldr  x0, [x10, #0x410]   ; x0 = *(a0 + 0x410)   ← 真正实现对象
+4c1254  mov  x8, x3
+4c1258  mov  x9, x2
+4c125c  mov  x3, x9              ; 参数整体右移一格
+4c1260  ldr  x11, [x0]
+4c1264  mov  x4, x8
+4c1268  ldr  x5, [x11, #312]     ; x5 = vtbl[0x138]
+4c126c  mov  x11, x1
+4c1270  mov  x1, x10             ; 原 a0 变成第 2 个参数
+4c1274  mov  x2, x11
+4c1278  br   x5                  ; 尾调用 —— 结果直接还给调用者
+```
+
+4 个调用点：`0x53f150`、`0x5452dc`、`0x78b81c`、`0x78d534`。
+其中 **`0x53f150` 之后紧跟 `could not translate %s to local file`（行号 327）**，与"hook 恰好只触发 1 次"完全对上。
+
+**调用点的真实契约**（`0x53f138`–`0x53f164`）：
+
+```asm
+53f138  str  xzr, [sp, #16]      ; 先把输出槽清 0
+53f140  add  x0, sp, #0x48       ; a0 = 栈上的包装对象
+53f144  add  x1, sp, #0x480      ; a1 = 输入路径
+53f148  add  x2, sp, #0x10       ; a2 = 输出槽①
+53f14c  add  x3, sp, #0x18       ; a3 = 输出槽②（与①相邻 8 B）
+53f150  bl   4c124c
+53f154  tbz  w0, #0, 53f1cc      ; ★ 返回值按 bool 判：bit0 == 0 ⇒ 走失败分支
+53f158  ldp  x8, x3, [sp, #16]   ; 成功时把 (sp+0x10, sp+0x18) 当 {ptr, size} 读出
+53f160  add  x8, x8, x22
+53f164  cmp  x9, x3              ; 再用 size 做边界检查
+```
+
+⇒ **实质签名**：`bool f(wrapper* ctx, const <path>* in, <out ptr>, <out len>)`；
+返回 **bool（`w0` 的 bit0）**，结果走 **a2/a3 两个相邻 8 字节输出槽**。
+**不是 sret**：调用前 x8 未被设置，而 thunk 自己把 x8 当暂存（`mov x8, x3`）→ 不可能是"结构体按值返回"。
+
+**运行时入参把上面的推断逐项证实**（本场补跑，`log-args3.txt:9707`）：
+
+```
+[BD-MEDIA] video translate args=0x40003a4860d8 0x40003a486510 0x40003a4860a0 0x40003a4860a8
+                                0x400008d7d5e0 0x17f 0x2f7374657373612f 0x6d2f736f65646956
+```
+
+| 观测量 | 与反汇编的对应 |
+|---|---|
+| `a0 - a2 = 0x38` | = `(sp+0x48) - (sp+0x10)` ✅ |
+| `a1 - a2 = 0x470` | = `(sp+0x480) - (sp+0x10)` ✅ |
+| `a3 - a2 = 0x8` | 输出槽①②相邻 8 B ✅ |
+| `a6 = 0x2f7374657373612f`（LE 字节 `/assets/`）、`a7 = 0x6d2f736f65646956`（`Videos/m`） | **上一层的残值，不是真参数** → 真参数只有 a0–a3 ✅ |
+
+> 顺带记住这个判据：**a6/a7 里是 ASCII 常量碎片 = 调用者没设这两个寄存器**，
+> 凡是 `args` 里出现"可读文本当指针用"，基本都能判定该参数位是空的。
+
+### D. 为什么现在的 hook 必然失败 —— 两条都是硬性的
+
+1. **返回类型错位**：现在 `return reinterpret_cast<uintptr_t>(g_bypass_video_path.c_str())`，
+   而调用方用的是 **`tbz w0, #0`**（测 **bit 0**，不是测非零）。`std::string::c_str()` 至少 8 字节对齐
+   ⇒ **低位恒为 0 ⇒ 恒判"翻译失败"**。用"返回指针"去满足"返回 bool"的接口，永远为假。
+2. **输出槽没写**：即使把 bit0 凑成 1 也没用 —— a2/a3 指向的两个槽**从未被写**（ptr 槽还被 `str xzr` 预清零），
+   调用方随后 `ldp` 读到 `{null, 陈旧值}`，还要拿那个 size 做边界检查 → 只会更糟。
+
+这两条合起来，正好逐字解释日志现象：**`bypassing … -> <正确路径>` 打了，`could not translate` 照旧**。
+
+### E. 正确修法（下一步，尚未实施）
+
+```cpp
+// 真实 ABI：a0 = 包装对象, a1 = 输入路径, a2 = 输出 ptr 槽, a3 = 输出 len 槽；返回 bool
+static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1,
+                                        uintptr_t a2, uintptr_t a3)
+{
+    if (a2) *(const char**)a2 = g_bypass_video_path.c_str();
+    if (a3) *(size_t*)a3     = g_bypass_video_path.size();
+    return 1;                       // ← bool true，不是指针
+}
+```
+
+- 返回 **`1`**；路径字符串必须**常驻生命周期**（`static std::string` 的 `c_str()` 满足；别用临时量）；
+- 别碰 a0/a1（a0 是栈上的包装对象）；a4–a7 是残值，别当参数。
+
+### F. 本节更正的三条既有结论
+
+1. **§0.5-C 的因果链被证伪。** `Context.getObbDir()/getObbDirs()` **已经实现**（在 `beab38d` 里，
+   （`javastubs/android_content.cpp:797-826`，`Activity` 侧 `android_misc.cpp:175-176`，
+   由 `bd_compute_obb_dir()` 读 `[paths] android_obb_dirs`），实测
+   `[BD-DATADIR] getObbDir -> /game/Oddmar/gamedata`（`log-args3.txt:668`、`7373`）
+   ——**但视频 URL 依旧是 hostless 的 `jar:file://!/assets/...`**。
+   ⇒ "obb 返回 null ⇒ host 为空" **不成立**，URL 的 host 另有来源。
+   （附带：`javastubs/android_content.cpp:934` 那条注释 "getObbDir / getObbDirs -> STUB-MISS path returns null
+   (same as before)" 已经过期，实现就在它上面 100 行。）
+2. **§0.5-F 的 `[JNIVM] Invalid Reference, Unexpected Type` 与 `JNIVM_ENABLE_RETURN_NON_ZERO=ON` 无关。**
+   本场两次复现证明它由**哨兵 `unity.toml`** 触发（证据见 §⛔ 0-1）。
+3. **"已加入的参数日志"在上一场一次都没打出来。** 全仓历史日志 `grep -c "video translate args"` = **0**
+   （`log-hook-test{,2,3,4}.txt` 全是 `bypass=1 / args=0`）——那两行是在**最后一次运行之后**（容器内 05:12）
+   才进源码并重编的。本场已补跑拿到真值（见 C）。
+
+### G. 本场实测表
+
+| 轮次 | 配置 | 结果 |
+|---|---|---|
+| hook-test 04:42 | 正常 toml | `bypassing`（路径为空）；无 args 行 |
+| hook-test2/3 04:47 / 04:50 | 正常 toml | 路径拼成 `<cwd>/gamedata/gamedata/…`（cwd 已含 `gamedata`，多拼一级） |
+| hook-test4 04:54 | 正常 toml | 路径正确；仍 `could not translate`；40 036 行、`init time`=1、8 bundle 正常 |
+| **args1 / args2**（本场） | **哨兵 toml** | **两次完全一致：1 357 / 1 358 行、`init time`=0、`ZZZSENTINEL`=12、`Invalid Reference`×2** |
+| **args3**（本场） | 正常 toml + `BD_BYPASS_VIDEO_TRANSLATE=1` | 79 168 行、`init time`=1、`Unable to read header`=0、hook 触发 1 次、**拿到 args 真值**；帧仍全 192 B |
+
+**产物留档（容器 `/game/Oddmar/`）**：`log-args1/2/3.txt`、`args1/2/3.out`、`seq-args1/2/3/`、
+`unity.toml.sentinel-0922`。
+
+**复现命令（照抄）**：
+```bash
+docker exec GlES_Dev bash -lc '
+  cp /game/Oddmar/unity.toml.bak-rd9 /game/Oddmar/unity.toml     # 先还原（§⛔ 0-1）
+  cd /game/Oddmar &&
+  GAME_ROOT=/game/Oddmar SEQ_DIR=/game/Oddmar/seq-args3 SECS=60 CAP_MS=500 \
+  BOOT_LOADER=/workspace/Bogodroid/build-oddmar-verbose/unityloader \
+  BD_BYPASS_VIDEO_TRANSLATE=1 \
+  bash /run-oddmar-seq.sh > /game/Oddmar/args3.out 2>&1; echo "exit=$?"'
+# 注意：build-oddmar-verbose（容器 09-22 05:12）才含 hook + 参数日志；
+#       build-regress 里两个字符串都是 0，跑它拿不到 args 行。
+```
+
+**反汇编取证怎么做的（可复用）**：
+```bash
+U=/game/Oddmar/gamedata/lib/arm64-v8a/libunity.so
+objdump -d $U | grep -nE "(bl|b|cbz|tbnz)[[:space:]]+.*4c124c"        # 谁调它
+objdump -d --start-address=0x53f140 --stop-address=0x53f170 $U          # 调用点契约
+python3 -c "f=open('$U','rb');f.seek(0xbde848);print(f.read(160))"      # 字符串 xref 定位
+```
+（`.text` 的 vaddr == file offset，本 build 下 `0x4c124c` 两种解释一致，所以 `addr_lunity + 0x4c124c` 直接能用。）
+
+---
+
 ## ⛔ 接手第 0 步（不看这四条会白跑一轮）
 
-> 以下四条都是**当前环境的真实状态**，不是建议。全部核对于 2026-09-21 晚·第二场结束。
+> 以下四条都是**当前环境的真实状态**，不是建议。全部核对于 2026-09-21 晚·第二场结束；
+> **0-1 已于 2026-09-22 第三场复核并补上硬证据**（见 §0.6-G），其余三条未变。
 
-**0-1. 容器里的 `unity.toml` 现在还是"哨兵"状态，必须先还原**
+**0-1. 容器里的 `unity.toml` 会被留成"哨兵"状态 —— 开工第一件事是核对它**
 
-`/game/Oddmar/unity.toml` 目前被上一轮实验改坏，**会直接打断启动**（`init time` 与 8 个 bundle 全部消失）。
-还原（备份就在旁边）：
+**2026-09-22 新增硬证据**：哨兵配置必然让启动死在 **1 35x 行**左右，两次跑完全一致（§0.6-G 的 args1/args2）。
+先核对，再决定要不要还原：
+
+```bash
+docker exec GlES_Dev bash -lc 'grep -n "android_package_code\|android_source_dirs" /game/Oddmar/unity.toml'
+```
+
+出现 `ZZZSENTINELPACK` 或 `android_source_dirs=[]` ⇒ 是哨兵态，还原（备份就在旁边）：
 
 ```bash
 docker exec GlES_Dev bash -lc 'cp /game/Oddmar/unity.toml.bak-rd9 /game/Oddmar/unity.toml && \
@@ -43,14 +223,41 @@ docker exec GlES_Dev bash -lc 'cp /game/Oddmar/unity.toml.bak-rd9 /game/Oddmar/u
 哨兵版与备份版的差异**只有两行**（`diff` 实测）：`android_package_code` 被改成 `/tmp/ZZZSENTINELPACK.apk`，
 `android_source_dirs` 被清空成 `[]`。
 
+> 2026-09-22 第三场已照此还原；**哨兵版另存为 `/game/Oddmar/unity.toml.sentinel-0922`**（没删，做对照用）。
+> 注意 `unity.toml` 与 `unity.toml.bak-rd9` 的 mtime 都是 09-21 14:42 —— **别靠 mtime 判断当前是哪个版本，只能 grep 内容**。
+
+**哨兵态的死法（本场两次复现，别再误判成 `JNIVM_ENABLE_RETURN_NON_ZERO=ON`）**：
+
+```
+[NATIVE] stat(/tmp/ZZZSENTINELPACK.apk/assets/bin/Data/globalgamemanagers)
+[JBRIDGE] RunOnUiThread Running runnable!          ← Unity 在弹错误对话框
+[JNIBridge] Invoking native handle … for java/lang/Runnable->run
+Expected N5jnivm7android3app31DialogInterfaceOnCancelListenerE
+[JNIVM]: Exception with Message `Invalid Reference, Unexpected Type` was thrown
+[BD-PREFS] flush_all: wrote 1 dirty file(s)        ← 日志到此为止，之后由 timeout -s INT 收尾
+```
+
+典型计数：**1 35x 行**、`init time` = **0**、`Unable to read header` = 0、`BD-ASSETLOC` = 0。
+（与 §0.6-F 第 2 条同源：`Invalid Reference` 是哨兵的连带症状，不是缓存项污染。）
+
 **0-2. `BOOT_LOADER` 默认指向旧产物**，每次运行都必须显式传（见 §1.4 第 1 条）。
-本轮用的是 `/workspace/Bogodroid/build-regress/unityloader`（RelWithDebInfo，14:31）。
 
-**0-3. 宿主机 `projects/unityloader/main.cpp` 里有一份"半成品探针"，容器里没有**
+**2026-09-22 更新**：要跑"视频 hook / `PATH-PROBE` 探针"就必须用
+`/workspace/Bogodroid/build-oddmar-verbose/unityloader`（容器 09-22 05:12，**含 hook + 参数日志 + 探针字符串**）；
+`build-regress`（09-21 14:31）**三样都没有**，跑它拿不到任何相关日志。
 
-host md5 `b4e0ba39769703b3168347ee608317c8` ≠ container md5 `1dad86c24186eaf3daab5219c1b922d4`
-（container 版本停在 11:29，**不含探针**）。探针能编过但**完全没接线**（详见 §0.5-D）。
-⚠️ 谁要 `docker cp` 这份 main.cpp，就会把死探针一起带进构建。
+**0-3. `projects/unityloader/main.cpp` 里的 il2cpp 探针：已在源码与二进制里，但*依然没接线***
+
+**2026-09-22 更新**：宿主 md5 与容器 md5 **现在一致**（都是 `e16f8c132c7ea8b4eac4730efa05a66b`，随 `beab38d` 同步过去），
+且 `grep -c "PATH-PROBE" build-oddmar-verbose/unityloader` = **4**（代码在二进制里）。
+但**四处断点一个都没补**（行号为本版实测）：
+
+1. `main.cpp:209` `static bool g_probe_app_paths = false;` —— **无人从 `BD_PROBE_APPPATHS` 赋值**；
+2. `init()` 里**没有**解析 `il2cpp_runtime_invoke`（`grep -n "il2cpp_runtime_invoke\s*=" main.cpp` 无命中）；
+3. `main.cpp:440` 早退条件仍是不含探针的 `if (g_n == 0 && g_post_init_n == 0) return;`；
+4. `probe_app_paths(` 在 `main.cpp:344` 只有定义、**没有任何调用点**。
+
+⇒ 想用探针，仍要按 §0.5-D 的四步改（改之前先读 §7.0 第 1 组，顺序有变）。
 
 **0-4. 容器内 `seq*` 临时目录已堆到 50 个、日志备份 7 个**，新会话开工前建议先清（§9 有清单）。
 
@@ -118,8 +325,13 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 不是因为 URL 被拼正确了。**这个实验什么都没证明。**
 
 **正确做法**：重做 A/B 时**只改 `android_package_code`**，`android_source_dirs=["./"]` 必须保留。
+（2026-09-22 补充：`android_source_dirs=[]` 必然致死已由两次复现坐实，见 §0.6-G 的 args1/args2；
+这条 A/B 已排进 §7.0 第 0-b 步。）
 
 ### C. 🔴 更正后的**真嫌疑**：`getObbDir()` / `getObbDirs()` 是 STUB-MISS 返回 null
+
+> ⛔ **本节结论已于 2026-09-22 被证伪，保留作为排查记录。** `getObbDir`/`getObbDirs` 已实现并返回
+> `/game/Oddmar/gamedata`，**URL 依旧 hostless** ⇒ "obb 为 null ⇒ host 为空"不成立。详见 §0.6-F 第 1 条。
 
 在 rd9b 日志里，紧挨着 `getPackageCodePath` 之后（line 337）就是 obb 查询：
 
@@ -151,6 +363,14 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 `java/io/File` 应已有实现可复用）以及 `Activity.getObbDir(s)`，让 URL 的 host 非空。
 这条**能同时在干净配置下验证**，与 §0.5-B 的重做 A/B 可以合成一轮。
 
+> ⛔ **2026-09-22 更新：这条已经做了，但没解决问题。** 实现见 `javastubs/android_content.cpp:797-826`
+> （`bd_compute_obb_dir()` 读 `[paths] android_obb_dirs`）+ `android_misc.cpp:175-176`（`Activity` 侧），
+> 实测 `[BD-DATADIR] getObbDir -> /game/Oddmar/gamedata`（`log-args3.txt:668`、`7373`），
+> **而视频 URL 仍是 `jar:file://!/assets/...`**。
+> ⇒ 别再沿着"让 obb 非空"往下推；host 的来源还没找到，但**已经可以排除 obb 这一支**。
+> （另：上面列的 3 条注释里，`android_content.cpp:789` / `:896` 和 `android.h:979` 那两句**已经随 09-22 的改动消失**，
+> 全仓现在只剩 `android_content.cpp:934` 一句写着 "STUB-MISS path returns null"，而它就压在实现上面 100 行。）
+
 ### D. ⚠️ 宿主机上的 il2cpp 探针是**半成品**，别直接信它能用
 
 上一轮在宿主机 `projects/unityloader/main.cpp` 里加了 `il2cpp_patch::probe_app_paths()`（tag `PATH-PROBE`），
@@ -166,15 +386,21 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 容器侧实测未受影响：`grep -c "PATH-PROBE" build-regress/unityloader` = **0**，
 且 container 的 main.cpp 停在 11:29 版本（不含探针）。
 
-**要启用探针需要改的四处**（都在这一个文件里）：
+> ⚠️ **2026-09-22 更新**：上面这四处的**行号已变**（本版实测：`g_probe_app_paths` 在 `main.cpp:209`、
+> `probe_app_paths()` 定义在 `:344`、早退条件在 `:440`），**但断点一个都没补**。
+> 探针源码现在**已经同步进容器**、并编进了 `build-oddmar-verbose`（`grep -c "PATH-PROBE"` = 4），
+> 只是永不 arm。详见 §⛔ 0-3。
 
-- `g_probe_app_paths = std::getenv("BD_PROBE_APPPATHS") != nullptr;`（建议放在 `init()` 入口）
+**要启用探针需要改的四处**（都在这一个文件里，按本版行号）：
+
+- `main.cpp:209` 改成 `g_probe_app_paths = std::getenv("BD_PROBE_APPPATHS") != nullptr;`（或放在 `init()` 入口）
 - `init()` 里补 `il2cpp_runtime_invoke = (p_runtime_invoke)so_symbol(lil2cpp, "il2cpp_runtime_invoke");`
-- 早退条件改成 `if (g_n == 0 && g_post_init_n == 0 && !g_probe_app_paths) return;`
+- `main.cpp:440` 早退条件改成 `if (g_n == 0 && g_post_init_n == 0 && !g_probe_app_paths) return;`
 - `il2cpp_init_hook()` 里 `install_once();` 之后加 `probe_app_paths("post-init");`
 
 > 探针价值：如果 **`dataPath` 打印出来就是空/非法**，说明根因在 Java 侧（`sourceDir`/`obb`）；
 > 如果 **打印出来是正确路径**，那就坐实"Unity 拼 URL 用的不是这两个属性"，直接转去查别处，省一轮。
+> （2026-09-22 补充：`obb` 这一支已被排除，探针现在是**最直接的裁判**，见 §7.0 第 1 组。）
 
 ### E. 本轮实测数字
 
@@ -185,7 +411,7 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 | rd9b | 哨兵 120s | 124 | 227 | 全 192 B | **0** | **0** |
 
 - 全部无 `[BD-SEGV]`、无 `terminate`。
-- **192 B = 纯色**（`import -window root` 截的 X 根窗口，`docs/CASE_STUDIES.md` 里 180 KB+ 才算有画面）。
+- **192 B = 纯色**（`import -window root` 截的 X 根窗口，§10 案例 A 里 180 KB+ 才算有画面）。
 - 哨兵两轮的 `seq-rd9*/` 里 **`frame.*.gl.ppm` 一个都没有**（`eglSwapBuffers` 未触发 dump）。
 
 ### F. 同期发现、但**不属于视频线**的阻塞
@@ -194,13 +420,13 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 |------|---------|---------|
 | 云服务回调不触发 | `SocialImpl.authenticate` / `SaveGames.isConnected` 是 `[STUB-MISS]`、`entries=0`（类未注册）→ 回调查不到。**不是轮询卡死**（各仅 1 次 / 12 次调用） | 断网约束下只需"不阻塞"。若证实它卡住 `MGLOProgressData.construct` 链再修 |
 | Wwise 起不来 | `WwiseUnity: Failed to initialize the sound engine. Reason: AK_Fail`，且 `AkInitializer.cs Awake() was not executed yet` 每帧刷 | 不崩，优先级最低 |
-| `[JNIVM] Invalid Reference, Unexpected Type` | rd9b 出现 2 次（line 507/509）。**症状与 `JNIVM_ENABLE_RETURN_NON_ZERO=ON` 的经典崩溃一模一样**，但 `build-regress/CMakeCache.txt` 里明确是 `OFF` | ⚠️ 需在**干净配置**下属复核：若只在哨兵轮出现，就是哨兵连带症状 |
+| `[JNIVM] Invalid Reference, Unexpected Type` | rd9b 出现 2 次（line 507/509）。**症状与 `JNIVM_ENABLE_RETURN_NON_ZERO=ON` 的经典崩溃一模一样**，但 `build-regress/CMakeCache.txt` 里明确是 `OFF` | ✅ **2026-09-22 已复核并结案**：只在**哨兵配置**下出现，是连带症状，与缓存项无关（§0.6-F 第 2 条） |
 
 ---
 
 ## 0. 当前状态速览
 
-> **最后一次更新：2026-09-21 晚·第二场**。目标约束见文首：**只需断网单机可跑**，
+> **最后一次更新：2026-09-22 白天·第三场**（分支 `ddmar`）。目标约束见文首：**只需断网单机可跑**，
 > billing / Firebase / Google Play / 云存档类缺失一律可绕过，只要不阻塞启动、不致命。
 
 | 项目 | 状态 |
@@ -212,13 +438,17 @@ AMEDIAFORMAT_KEY_AAC_PROFILE     ← 第 3 轮
 | X 根窗口截图 | 210–227 帧，**每帧恒 192 B = 纯色**（有画面时应 ≥180 KB） |
 | `eglSwapBuffers` | 帧循环在跑（`Choreographer$FrameCallback.doFrame` ≈21 Hz） |
 | 游戏是否 quit | 未走 Unity 正常 Quit（末尾 `Caught signal, fast-exiting via _exit` 是 `timeout -s INT` 到点） |
-| **主阻塞（新定位）** | `Context.getObbDir()` / `getObbDirs()` **STUB-MISS 返回 null** → StreamingAssets URL 的 host 为空 → `jar:file://!/assets/Videos/mobge_and_senri_splash_video.mp4` → `-10004`（§0.5-C） |
+| **主阻塞（2026-09-22 重定位）** | **Unity 侧"视频路径翻译"调用的返回契约没被满足**：`libunity.so+0x4c124c` 是个虚调用转发 thunk，真实签名是 `bool f(ctx, in_path, out_ptr, out_len)`；现在 hook 返回的是 `char*`（对齐指针 bit0 恒 0）→ 调用方 `tbz w0,#0` 判"失败" → `could not translate` → `-10004`（§0.6-C/D） |
+| **旧结论（已证伪）** | ~~`Context.getObbDir()` / `getObbDirs()` STUB-MISS 返回 null → URL host 为空~~：这两个方法 **09-22 已实现**并实测返回 `/game/Oddmar/gamedata`，**URL 依旧 hostless**，因果不成立（§0.6-F 第 1 条） |
 | **次阻塞** | 云服务 `SocialImpl.authenticate` / `SaveGames.isConnected` 类未注册 → 回调不触发（§0.5-F） |
 
 **一句话**：黑屏已推到最后一层——**引擎本身健康**（跑满 120 s、8 个 bundle 都读进来了、NDK 视频通路已启用），
-唯一挡住画面的是一条**路径拼装缺口**：obb 目录查询返回 null，导致片头视频 URL 的 host 为空、解不成本地文件。
-另需注意：上一轮那个"证明 dataPath 来自 `getPackageCodePath` 的哨兵实验"**是无效实验，结论已作废**（§0.5-B），
-它把另一个改动（清空 `android_source_dirs`）混了进去，导致进程根本没跑到视频那一步。
+唯一挡住画面的仍是片头视频那条链：URL 的 host 为空（`jar:file://!/assets/...`），
+而 09-22 新加的那个 Unity hook **打在了转发 thunk 上、返回类型也对不上**，所以"看着触发了、其实恒判失败"（§0.6-C/D）。
+**下一步最省事的动作是把 hook 改成写 a2/a3 两个输出槽并 `return 1`**（§0.6-E），
+它比重查 host 来源更便宜、且能立刻给出"成败"的干净判据。
+另外两条更正：① `getObbDir` 已实现、旧因果链作废；② `[JNIVM] Invalid Reference, Unexpected Type`
+由**哨兵 `unity.toml`** 触发，与 `JNIVM_ENABLE_RETURN_NON_ZERO` 无关（§0.6-F）。
 
 ### 历史修复（都已实测推进，保留备查）
 
@@ -388,7 +618,7 @@ Unity 的 `ReflectionHelper.getConstructorID` 把 `java.lang.Class.getName()` �
 
 | 文件 | 改动 | 依据 / 收益 |
 |------|------|-------------|
-| `libjnivm/src/jnivm/vm.cpp` | `RegisterNatives` 增进程级 keepalive 表（`bd_registered_method_keepalive()`），pin 住注册的 `Method` | 修"悬垂 jmethodID"：`UnregisterNatives` 释放后，同尺寸 `Method` 复用同一块内存，缓存的 id 会安静地变成一个**合法但错误**的函数。见 `docs/CASE_STUDIES.md` 案例四续 |
+| `libjnivm/src/jnivm/vm.cpp` | `RegisterNatives` 增进程级 keepalive 表（`bd_registered_method_keepalive()`），pin 住注册的 `Method` | 修"悬垂 jmethodID"：`UnregisterNatives` 释放后，同尺寸 `Method` 复用同一块内存，缓存的 id 会安静地变成一个**合法但错误**的函数。见 §11 案例 B |
 | `libjnivm/src/jnivm/internal/method.cpp` | ① `<init>` 改写**去掉 `!isStatic` 守卫**；② 签名点号→斜杠归一化；③ **修 else 绑定 bug**（见 4.3） | ①Unity 的 `AndroidJNIHelper.GetConstructorID` 会走 static 重载，旧守卫使改写被跳过；③ 修复后 `DisplayMetrics`/`Handler` 等构造器首次能真正命中 |
 | `javastubs/javac.cpp` | `Constructor` 构造时归一化签名 | 堵住 Unity 传来的点号签名 |
 | `javastubs/bd_assetlocator.cpp`（新增） | `com.mobge.assetlocator.AssetLocator` 的 C++ 桩：注册 **4 种首参**的构造器（`JObject` / `Context` / `Activity` / `UnityPlayerActivity` + `String`）+ `ListAssets` | 游戏按 `UnityPlayerActivity` 首参查；`ListAssets` 按 `AssetManager.list` 语义返回**子项名** |
@@ -662,7 +892,7 @@ seq28 实测：
 ### P0 —— 回归风险：`libjnivm` 是全局改动
 
 本次改了 `GetMethodID` 的核心行为（`<init>` 改写不再区分 `isStatic`、签名归一化）。**这会同时影响所有其他移植项目**。
-**动手之前务必先跑一遍其他已能跑的游戏**（AGENTS.md / `docs/CASE_STUDIES.md` 里列出的那些），确认没退化。若有退化，优先考虑把归一化与改写收窄到"仅构造器 + 仅该端口"的范围。
+**动手之前务必先跑一遍其他已能跑的游戏**（`AGENTS.md` / `docs/PORTING_PLAYBOOK.md` §6 复测清单里列出的那些），确认没退化。若有退化，优先考虑把归一化与改写收窄到"仅构造器 + 仅该端口"的范围。
 
 ### P1 —— 残留 `STUB-MISS`（去重后各 1 条）
 
@@ -684,6 +914,8 @@ seq28 实测：
 - `android/hardware/display/DisplayManager.registerDisplayListener`
 - `android/content/Intent.getExtras()`
 - `android/app/Activity.{getPackageManager, getObbDir, getObbDirs, getAssets}`
+  （⚠️ 2026-09-22：`getObbDir` / `getObbDirs` 已在 `Context` 与 `Activity` 两侧实现并注册，
+  `[BD-DATADIR] getObbDir -> /game/Oddmar/gamedata` 实测有值；若日志里还见它们的 miss，说明是**旧的调用点缓存了空桩**，见 §5 第 2 条）
 - `java/lang/StackTraceElement.<init>(...)`、`java/lang/Error.<init>(String)`
 
 > 注：`getAssets`/`getPackageManager`/`getIntent` 这类"在基类上"的，理论上已被 Method 1b 覆盖，仍 miss 说明 **1b 未覆盖到该调用点**，值得复查。
@@ -726,34 +958,36 @@ seq28 实测：
 
 ## 7. 建议的下一步（按顺序）
 
-### 7.0 ⭐ 本轮（2026-09-21 晚·第二场）之后的顺序 —— 从这里开始
+### 7.0 ⭐ 第三场（2026-09-22）之后的顺序 —— 从这里开始
 
-> 前置：先做 **§⛔ 接手第 0 步**（还原 `unity.toml`、确认 `BOOT_LOADER`）。
-> 以下第 1 组三件事**可以并成一轮**做，因为它们都为了同一件事：搞清楚 `jar:file://` 的 host 从哪来。
+> 前置：**先做 §⛔ 接手第 0 步**（核对/还原 `unity.toml`、确认 `BOOT_LOADER`、确认二进制里真有你要的字符串）。
+> **动手前先读 §0.6**：那里已经把那个 Unity hook 的调用契约钉死了，别再重复踩。
+> 判读任何一轮，都必须同时看 `init time` / `Unable to read header` / `ZZZSENTINEL` 三个计数（见 §9.2）。
 
-**第 1 组（本轮最高优先级，一轮出结论）**
+**第 0 组（半天内能出结论，最省事，优先）**
 
-1. 🔴 **实现 `Context.getObbDir()` / `getObbDirs()`**，并补 `Activity.getObbDir(s)` / `getObbDirs()`。
-   返回 `File(android_obb_dirs[0])`（`= "./"`），让 Unity 拼出的 URL 有 host。
-   - 参考实现位置：`javastubs/android_content.cpp`（`Context` 的其它方法就在那），
-     声明加在 `javastubs/android.h`。
-   - `java/io/File` 已有实现，直接构造即可；数组返回参考 `splitPublicSourceDirs` 的写法
-     （`android.h:840`）。
-   - **验收**：日志里 `getObbDirs` 的 `[STUB-MISS]` 消失，且视频 URL 变成 `jar:file://<host>!/assets/...`（host 非空）。
-2. 🔴 **重做 A/B，但只改 `android_package_code`**（上一次混入了 `android_source_dirs=[]`，实验无效，见 §0.5-B）。
-   建议三次对照，每次都保证 `android_source_dirs=["./"]`：
+0-a. 🔴 **把 `BD_BYPASS_VIDEO_TRANSLATE` 的 hook 改成真实 ABI**（改法见 §0.6-E，
+   代码在 `projects/unityloader/main.cpp:34-60`）：写 a2（输出 ptr 槽）/ a3（输出 len 槽），**`return 1`**。
+   - **验收（三条同时看）**：`[BD-MEDIA] bypassing …` 之后**不再出现** `could not translate`；
+     日志里出现对 `gamedata/assets/Videos/….mp4` 的 `stat`/`open`；`-10004` 消失。
+   - ⚠️ 这一步只证明"能骗过翻译步骤"，**不代表画面会出来**——但它是往下走的门票：
+     只有 Unity 真去开文件了，B-1 那个 `clean_jar_path` 的 `gamedata` 映射才开始起作用。
+   - 提醒：`build-oddmar-verbose` 才含这个 hook；`build-regress` 里两个字符串都是 0（`grep -c` 自查）。
 
-   | 轮次 | `android_package_code` | 看什么 |
-   |------|----------------------|--------|
-   | A（基线） | `"./"` | URL host 是否为空 |
-   | B | `"/tmp/ZZZSENTINELPACK.apk"` | host 是否跟着变成那个哨兵串 → 判定 host 是否来自 package code |
-   | C | `"/game/Oddmar/gamedata"`（真实目录） | host 变成真实目录后视频能否播 |
+0-b. 🔴 **顺带做一次"只改 `android_package_code`"的干净 A/B**（与 0-a 的迭代合成一轮）：
+   以 `unity.toml.bak-rd9` 为 A（`"./"`），只把 `android_package_code` 改成 `"/game/OddMar/gamedata"`
+   为 B，**`android_source_dirs=["./"]` 必须保留**，看 URL host 是否变化。
+   ⚠️ 判读前先确认该轮 `init time`=1、`Unable to read header`=0；**出现 `ZZZSENTINEL` / 1 35x 行 /
+   `Invalid Reference` 就说明是哨兵态，该轮作废**（§0.6-G 的 args1/args2 就是反例）。
 
-   ⚠️ 判读时**必须先确认该轮跑到 `init time` + 8 bundle**，否则和上次一样白跑。
-3. ⚠️ **接线 il2cpp 探针**（§0.5-D 的四步改法），打印 `Application.dataPath` / `streamingAssetsPath` 真值。
-   这是第 1、2 条的"裁判"：如果 Unity 自己报的 `streamingAssetsPath` 就是 `jar:file://!/assets`，
-   那问题在 Java 侧的路径供给；如果报的是正确路径，说明 URL 由别的输入拼装，转向查 `libunity.so` 的
+**第 1 组（0-a 通过后再做）**
+
+1. ⚠️ **接线 il2cpp 探针**（§0.5-D 的四步改法），打印 `Application.dataPath` / `streamingAssetsPath` 真值。
+   它比上一场更值钱了：host 的来源已排除 obb 一支，现在需要直接问 Unity 自己。
+   打印为空 ⇒ 修 Java 侧路径供给；打印正确 ⇒ URL 由别的输入拼装，转查 `libunity.so` 的
    `GetDataPath` 链（`0x39f800 → 0x4bfbe8 → 0x4bbe14`）。
+2. **顺着 4 个调用点摸清 `0x4c124c` 背后的实体类型**（`[a0+0x410]` → `vtbl[0x138]`）。
+   若要长期保留这个 hook，需要确认它是否只服务于视频链（另三个调用点 `0x5452dc` / `0x78b81c` / `0x78d534`）。
 
 **第 2 组（第 1 组跑通后再动）**
 
@@ -792,10 +1026,16 @@ seq28 实测：
    而 `Class::getMethod` 会用"member + static"双向探测，所以**一次成功的** `getMethod` 也会吐 1~2 行 miss
    （`Choreographer$FrameCallback.doFrame`、`JNIBridge.invoke` 每帧都刷）。本次日志从 26528 涨到 29536 行，
    增量几乎全是它。建议加 `if(trace)` 或改成计数摘要。
-6. ~处理 P1 里与主循环/资源相关的 `Activity.getObbDir(s)`~ → **已升级为 §7.0 第 1 条（本轮最高优先级）**。
+6. ~处理 P1 里与主循环/资源相关的 `Activity.getObbDir(s)`~ → **已于 2026-09-22 实现**（`android_misc.cpp:175-176`、
+   `android_content.cpp:797-826`），但**没解决 host 为空**（§0.6-F 第 1 条）。
    其余的 `Intent.getExtras`、`Bundle.getBoolean`、`Window.getAttributes`、`SurfaceView.*` 仍留在 P1。
 7. 画面真正出内容后，再看 `frame.*.gl.ppm` 是否出现非零像素；若仍黑，再查相机/场景/AssetBundle 挂载。
 8. 清理 4.2 的诊断日志（`getConstructorID` 的注册表 dump 现在多了一行 `bound ...`，一并清）。
+9. **2026-09-22 新增待办**：`javastubs/android_content.cpp:934` 的注释（"getObbDir / getObbDirs -> STUB-MISS path
+   returns null"）已与上面 100 行的实现矛盾，顺手改掉（全仓现在只剩这一处过期注释；
+   `android.h:979`、`android_content.cpp:789`/`:896` 那三处已随 09-22 改动消失）。
+10. **2026-09-22 新增待办**：探针的生命周期管理——`video translate args` 这类一次性诊断在拿到定论后应降级或
+    门控。当前它只在 `BD_BYPASS_VIDEO_TRANSLATE` 打开时才走，**符合"默认路径不受影响"的要求，保持这个形态**。
 
 
 ---
@@ -813,27 +1053,31 @@ seq28 实测：
 | `BD_MEM_LOG_MS`（env）/ `[debug] mem_log_interval_ms`（toml） | `[BD-MEM]` 间隔，默认 2000ms，`0` 关闭 |
 | `BD_CTOR_FALLBACK_NULL=1`（env） | 让 `getConstructorID` 恢复"返回 null"的旧行为（逃生开关） |
 | `BD_PROBE_APPPATHS=1`（env） | ⚠️ **尚未接线**，见 §0.5-D。接线后打印 `Application.dataPath` 等真值的 `[PATH-PROBE]` |
+| `BD_BYPASS_VIDEO_TRANSLATE=1`（env） | **2026-09-22 新增**：在 `libunity.so + 0x4c124c` 装 detour，跳过 Unity 的视频路径翻译。**默认不装**。⚠️ 当前实现返回 `char*`，契约要求 `bool` + 写 a2/a3 输出槽 → 必然失败，见 §0.6-E |
 
-**自检命令**（确认二进制里真的有你以为的代码 —— 这一条本轮又救了一次）：
+**自检命令**（确认二进制里真的有你以为的代码 —— 这一条已救过两次）：
 
 ```bash
-# 本轮用的 loader 是 build-regress（RelWithDebInfo，14:31）
-grep -c "你的日志字符串" /workspace/Bogodroid/build-regress/unityloader
-
-# 反例：探针只写在宿主机源码里、没同步进容器、也没重编 → 这里会是 0
-grep -c "PATH-PROBE" /workspace/Bogodroid/build-regress/unityloader     # 实测 = 0
+U=/workspace/Bogodroid/build-oddmar-verbose/unityloader
+grep -c "bypassing Unity video path" $U    # 2026-09-22 实测：verbose=1 / regress=0
+grep -c "video translate args"      $U    # 2026-09-22 实测：verbose=1 / regress=0
+grep -c "PATH-PROBE" $U                   # 2026-09-22 实测：verbose=4（在二进制里，但探针仍未接线）
 ```
 
-**构建目录速查（2026-09-21 晚实测）**：
+> ⚠️ **`grep` 二进制字符串只证明"代码在里面"，不证明"它打过日志"**。
+> 本轮就踩了：源码里有 `video translate args`，但最后一次运行用的二进制**还没有**这两行
+> → 全仓日志 `grep -c` = 0，白等一轮。**跑完先 `grep -c` 日志，别只 grep 二进制。**
 
-| 目录 | 类型 | 关键开关 | `unityloader` 时间/体积 |
-|------|------|---------|----------------------|
-| `build-regress` | **本轮在用** | RelWithDebInfo / LOG=ON / VERBOSE=OFF / NON_ZERO=OFF | 09-21 14:31，152 MB |
-| `build-oddmar` | **旧产物，勿用** | Release / LOG=ON | 09-21 07:55，6.3 MB |
-| `build-oddmar-sym` | 备用 | RelWithDebInfo | 09-21 08:04，144 MB |
-| `build-oddmar-verbose` | 备用（上一轮在用） | RelWithDebInfo / VERBOSE=ON | 09-21 11:48，150 MB |
-| `build-anbernic-debug` | 上机调试 | Debug / LOG+TRACE=ON | 09-16 08:33，102 MB |
-| `build-anbernic-rel` | **发版用** | Release / LOG=OFF | 09-18 07:22，6.2 MB |
+**构建目录速查（2026-09-22 复核）**：
+
+| 目录 | 类型 | 关键开关 | `unityloader` 时间/体积 | 含视频 bypass？ |
+|------|------|---------|----------------------|---------------|
+| `build-oddmar-verbose` | **2026-09-22 在用** | RelWithDebInfo / LOG=ON / VERBOSE=ON / NON_ZERO=OFF | 09-22 05:12，153 MB | ✅ hook + args 日志 |
+| `build-regress` | 回归对照（上一轮在用） | RelWithDebInfo / LOG=ON / VERBOSE=OFF / NON_ZERO=OFF | 09-21 14:31，152 MB | ❌ 两个字符串都是 0 |
+| `build-oddmar` | **旧产物，勿用** | Release / LOG=ON | 09-21 07:55，6.3 MB | ❌ |
+| `build-oddmar-sym` | 备用 | RelWithDebInfo | 09-21 08:04，144 MB | ❌ |
+| `build-anbernic-debug` | 上机调试 | Debug / LOG+TRACE=ON | 09-16 08:33，102 MB | ❌ |
+| `build-anbernic-rel` | **发版用** | Release / LOG=OFF | 09-18 07:22，6.2 MB | ❌ |
 
 > 七个目录的 `JNIVM_ENABLE_RETURN_NON_ZERO` 实测**全部为 `OFF`**（已逐个 grep 过 `CMakeCache.txt`）。
 > 即便如此，**每次构建仍要显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**（AGENTS.md 的 CMake 缓存陷阱）。
@@ -852,38 +1096,47 @@ grep -c "PATH-PROBE" /workspace/Bogodroid/build-regress/unityloader     # 实测
 | `/regress-run.sh` / `/regress-all.sh` | 回归对照（Samurai2 / Maximus2），用法见脚本头注释 |
 | `/probe-oddmar-window.sh` | X 窗口探测 |
 
-### 9.2 本轮标准运行命令（照抄即可）
+### 9.2 标准运行命令（照抄即可）
 
 ```bash
 docker exec GlES_Dev bash -lc '
   cp /game/Oddmar/unity.toml.bak-rd9 /game/Oddmar/unity.toml     # 先还原（§⛔ 0-1）
   cd /game/Oddmar &&
   GAME_ROOT=/game/Oddmar SEQ_DIR=/game/Oddmar/seq-rd10 SECS=120 \
-  BOOT_LOADER=/workspace/Bogodroid/build-regress/unityloader \
+  BOOT_LOADER=/workspace/Bogodroid/build-oddmar-verbose/unityloader \
+  BD_BYPASS_VIDEO_TRANSLATE=1 \
   bash /run-oddmar-seq.sh > /game/Oddmar/rd10.out 2>&1; echo "exit=$?"'
 ```
 
-判读三件套（**必须同时看**，否则会像上一轮那样误判）：
+判读四件套（**必须同时看**，否则会像前两轮那样误判）：
 
 ```bash
 L=/game/Oddmar/log-seq.txt
 grep -c "init time" $L                    # 必须 >0，否则这轮没跑到关键点，结论无效
-grep -n "BD-ASSETLOC" $L | head           # 必须出现，否则 AssetLocator 没构造
-grep -n "getObbDirs\|could not translate\|-10004" $L | head   # 本轮的观察目标
-awk '{print $4}' /game/Oddmar/seq-rd10/timeline.txt | sort -u | head   # 192 B 之外才有画面
+grep -c ZZZSENTINEL $L                    # 必须 =0；非 0 ⇒ toml 是哨兵态，本轮作废（§⛔ 0-1）
+grep -c "Unable to read header" $L        # 必须 =0；且 grep -c "BD-ASSETLOC" 应 >0
+grep -n "bypassing Unity\|video translate args\|could not translate\|-10004" $L | head
+awk '{print $4}' $SEQ_DIR/timeline.txt | sort -u | head   # 全是 192 就是没画面
 ```
 
 ### 9.3 待清理（新会话建议先清，避免误读旧产物）
 
-- **`/game/Oddmar/seq*` 共 50 个目录**：`seq`、`seq2`…`seq90`、
+- **`/game/Oddmar/seq*` 共 50+ 个目录**：`seq`、`seq2`…`seq90`、
   `seqBASE/BASE2/C32/DEEP/FIX/INERT/LATE/PHANTOM/PROXY/RD2/RD3/RD4/READER/REV/SPLASH`、
-  `seq-rd5`…`seq-rd9b`。全部是历次运行的截图与 timeline，**没有源头价值**。
+  `seq-rd5`…`seq-rd9b`，**2026-09-22 又加了** `seq-obb-test`…`seq-obb-test6`、`seq-jar-bypass{,2}`、
+  `seq-hook-test{,2,3,4}`、`seq-args1/2/3`。全部是历次运行的截图与 timeline，**没有源头价值**
+  （`seq-args3` 想留就留，它是 hook 入参那轮的产物）。
 - **`/game/Oddmar/log*.bak` 7 个**（含 11.9 MB 的 `log-seq.seq90.bak`）：
   `log-seq.before90.bak`(12:17)、`log-seq.seq28.bak`(11:33)、`log-seq.seq90.bak`(12:20)、
   `log-seq.seqC32.bak`(12:25)、`log-seq.seqREV.bak`(11:47)、`log.txt`(08:51)、`log-probe.txt`(09:18)。
   其中 **`seqREV.bak` / `seq28.bak` 是 `getConstructorID` 修复的前后对照，`before90.bak` 是回归基线** ——
   确认不再需要再删。
+- **2026-09-22 新增日志**（可清理，但 `log-args3.txt` 建议留到 hook 修好为止）：
+  `log-obb-test*.txt`、`log-jar-bypass*.txt`、`log-hook-test*.txt`（4 个，每个 4.7–6.3 MB）、
+  `log-args1/2/3.txt`、`args1/2/3.out`。
+  其中 **`log-args1.txt` / `log-args2.txt` 是"哨兵态必死"的对照证据**，`log-args3.txt` 是 hook 入参证据。
 - ⚠️ **`/game/Oddmar/unity.toml.bak-rd9` 不要删**：它是唯一一份正常配置备份。
+- ⚠️ **`/game/Oddmar/unity.toml.sentinel-0922` 不要删**（2026-09-22 新增）：哨兵版留档，做 A/B 对照用。
 - 宿主机 `/tmp/ZZZSENTINELPACK.apk`（0 字节）留在容器里无所谓，但**别把它当真实 APK 推理**。
 
 清理建议（**先只列、确认后再删**）：
@@ -905,9 +1158,348 @@ docker exec GlES_Dev bash -lc 'rm -rf /game/Oddmar/seq /game/Oddmar/seq[0-9]* /g
 
 ---
 
-## 10. 相关文档
+> **案例存档说明（2026-09-22）**：原 `docs/CASE_STUDIES.md` 中与 Oddmar 有关的三个小节
+> 已并入本文下方 §10–§12（小节标题保留原文的"案例四 / 四·续 / 四·续三"编号，
+> 便于与 `.workbuddy/memory/` 里的工作日志逐条对上）。
+>
+> 同文件其余三个案例 —— **Skul / Maximus2 / FiveHearts —— 随该文件一并删除**，
+> 它们的可复用结论保留在 `docs/PORTING_PLAYBOOK.md` §0（止损判据）/§1.2
+> （`JNIVM_ENABLE_RETURN_NON_ZERO` 缓存坑）与 `docs/FIVEHEARTS.md` §4.6 B
+> （`textureMaxDim` 误缩 RenderTexture）。需要原文时用
+> `git show eb68cf7:docs/CASE_STUDIES.md`（注意：不含末次未提交的「续三」一节），
+> 或找回删除前的回收站副本。
+
+---
+
+## 10. 案例 A（原 CASE_STUDIES 案例四）：Oddmar（Unity 2018.4.36f1 / arm64 / Wwise + Firebase）— **启动即退出（进行中）**
+
+### 当前状态
+
+加载器跑满 30 s 干净退出（`exit=0`），**无任何崩溃**：资源全部加载、
+`nativeRender` 首帧正常返回（+2077 ms）、InControl 1.8.6 已进 `active_report`、
+Unity Analytics 拿到 `unity.cloud_userid` / `player_sessionid`，PlayerPrefs 落盘 7 条。
+随后 `[BD-EXIT] nativeRender returned false - Unity requested quit` ——
+**Unity 自己要求退出**，大概率是启动期某个受管异常未被吞掉。首帧仍是纯色（未换帧）。
+下一步是找出那个受管异常。
+
+### 最大的一课：`[BD-SEGV]` 的 backtrace 会骗人
+
+上一轮把崩因判成「`libunity+0x319984` 空指针」，**是错的**。原因有两层：
+
+1. **Unity 自己注册 crash handler**。`libunity` 的 `JNI_OnLoad` 会对
+   SIGILL/SIGABRT/SIGBUS/SIGFPE/**SIGSEGV**/SIGPIPE/SIGSTKFLT 装自己的 handler
+   （`libunity+0x3196bc`），**覆盖** `main()` 里早先装的 `segfault_handler()`。
+   它随后会**链式回调**被它替换掉的旧 handler（`libunity+0x319b2c` 把旧 handler 取出来再进），
+   所以我们最终还是能拿到信号——但栈已经不属于我们了。
+2. **那个 handler 把 TLS 基址放在 `x29`**（`mrs x29, tpidr_el0`），不是 frame pointer。
+   glibc 的 `backtrace(3)` 走 frame pointer 链，于是把 TLS 内存当栈帧读，
+   吐出一个**落在 Unity 自己 handler 里的假外层帧**。
+   `0x319984` 只是 `0x319980: bl 0x319b2c` 的返回地址，不是故障点。
+
+**判据（一眼可辨）**：假帧地址与日志里 `[SIGNALS] handler 0x...` 打印的 handler
+地址只差几百字节（本例 `0x319984` 距 `0x3196bc` 仅 0x2C8），且
+`[SIGNALS]` 段能看到 Unity 对 signum 11 的 install。
+
+**修法（已实现）**：`print_backtrace_on_segfault()` 改用 `sigaction` + **SA_SIGINFO**
+（Unity 的 handler 会把它收到的 `siginfo`/`ucontext` 原样转发过来），
+在 handler 里直接读 `uc_mcontext.pc / regs[29] / regs[30] / sp` 与 `si_addr`，
+再用 `bd_describe_crash_address()` 解析成 `module+offset`；
+栈回溯改用 `bd_dump_crash_backtrace()`（复用 `misc.cpp` 里给 abort 写的
+「fp 链 + 保守栈扫描 + 只认 call site 前一条指令」那套），
+不再依赖被污染的 frame pointer。
+
+### 真因：pending Java 异常 + 空 `std::exception_ptr`
+
+修好诊断后一次就定位：
+
+```
+[BD-SEGV] signal 11 si_code=1 si_addr=0xffffffffffffff80
+BD-SEGV:   pc /tmp/bd-unityloader+0x46fd7c     →  addr2line: std::rethrow_exception
+```
+
+反汇编该点：`sub x1, x20, #0x80` / `ldaxr w0, [x1]` —— x20（exception object）为 **0**。
+libstdc++ 的 `rethrow_exception` 要读 `__cxa_exception` 头（在异常对象**下方 0x80 字节**），
+空 `exception_ptr` 就变成读 `0 - 0x80 = 0xffffffffffffff80`。
+两处调用点都在 `libjnivm`：`method.h` 的 `j2invoke` 尾部与 `vm.cpp` 的 `ExceptionDescribe`。
+
+链路：Unity 的受管异常路径会 new 一个 `java/lang/Error` 并 `JNIEnv::Throw()` 交给 jnivm
+（见 `javastubs/javac.h` 的 `[BD]` 注释，`Error`/`Exception` 就是为它注册的），
+但 `Throw()` 只是把 throwable 存进 `env->current_exception`，**没人填它的 `except`**；
+下一次 JNI 调用走到 `j2invoke` 尾部就 rethrow 空指针 → SEGV。
+
+**修法（已实现）**：
+
+- `libjnivm/include/jnivm/throwable.h`：新增 `jnivm::RethrowThrowable()`，
+  空 `except` 时抛普通 `std::runtime_error` 而不是 `rethrow_exception()`（不变量保护）。
+- `libjnivm/include/jnivm/method.h`：`j2invoke` 只在 `except` 非空时 rethrow。
+- `libjnivm/src/jnivm/vm.cpp`：`Throw()` 保持 `except` 为空（即"pending"），
+  `ExceptionDescribe` 走 `RethrowThrowable()`。
+
+语义依据：**在 Android 上 `Throw()` 只是置起 pending 异常，调用本身正常返回**，
+由调用方用 `ExceptionCheck()`/`ExceptionOccurred()` 取回；把异常解栈进游戏的原生帧
+（libunity 里没有 try/catch）只会 `std::terminate()`。
+
+### 通用教训
+
+1. **不要相信掌机日志里的裸 backtrace**。工程里已有 `addr2line` 可用的 `-g` 构建；
+   先拿 `pc`/`si_addr`，再反汇编，别从 `backtrace_symbols` 的帧序推因果。
+2. **`rethrow_exception(空 exception_ptr)` 是致命而非"抛个空异常"**，
+   故障现象是 `si_addr=0xffffffffffffff80`（= `-0x80`），与任何游戏代码都无关。
+3. **Unity 会抢信号处理器**。若以后要保自己的 SEGV handler，得在 Unity `JNI_OnLoad`
+   之后再装一次，或让 `sigaction_impl` 拒收游戏对 SIGSEGV 的替换；
+   现在靠 SA_SIGINFO 从链式调用里拿 ucontext 已够用。
+4. `open("")` 有专门诊断（`bd_dump_crash_backtrace("open-empty")`）。
+   Oddmar 有 14 次，全来自 `libunity+0x8a2b58`，是良性探测（拿 -1 继续走），
+   别当成崩因。
+
+### 黑屏截图 ≠ 渲染成功：先证明 `eglSwapBuffers` 被调过
+
+Oddmar 修复 SEGV 后的第一次"成功"运行（exit=0）给出的是 640×480 纯黑截图。
+**这张图是真的黑，不是抓图时机问题**，但也不能据此说"渲染坏了"——要先把两件事分开：
+
+`run-oddmar.sh` 的截图点在 `SECS-2`。SECS=30 时它等到 28 s 才 `import -window root`，
+而 Unity 在 3.9 s 就 `nativeRender -> false` 退出了；**窗口早没了，抓到的是空的 root window**。
+这层解释只说明"这张图没意义"，不是"画面是黑的"。
+
+要看真东西，用 `_harness/run-oddmar-seq.sh`：进程存活期间每 250 ms 抓一张，
+同时 `BD_DUMP_FRAME` 让 loader 自己 `glReadPixels` GL drawable（`BD_DUMP_FRAME_AT=1`
+→ swap #1/#2/#3 各出一张 `.gl.ppm`）。判据：
+
+| 观察 | 结论 |
+|------|------|
+| 有 `.gl.ppm`，且 root 截图黑 | 画了但没 present（present 通道问题） |
+| 没有 `.gl.ppm` | `eglSwapBuffers` **一次都没被调用**，Unity 根本没画完一帧 |
+| 两者都有内容 | 渲染+present 正常，问题在别处 |
+
+Oddmar 实测（修复版，`BOOT_LOADER=build-oddmar-verbose/unityloader`）：
+
+```
+帧序列 t=23/575/1114/1763/2294/2827/3357 ms   每张 192 B（1-bit 640×480 全 0，纯黑）
+窗口探测  windows=0 直到 ~1.6 s，之后 windows=1 持续到退出
+swap      eglSwapBuffers 调用次数 = 0，无任何 .gl.ppm
+退出      exit=0 @ 3.9 s  （[BD-EXIT] nativeRender returned false）
+```
+
+即：窗口建起来了、GL 3.2 context 也 `makeCurrent` 过，但 **Unity 两次 `nativeRender`
+都没走到 present**，第二次直接返回 false 退出。所以"最终画面"就是纯黑——因为
+**从来没有过一帧**，不是画黑的。192 B 这个体积本身就是判据：640×480 单色图压完就这么大，
+几十 kB 才说明有内容。
+
+**两个容易踩的点**：
+
+1. **`BOOT_LOADER` 有默认值**，指向 `/workspace/Bogodroid/build-oddmar/unityloader`。
+   只重建了 `build-oddmar-verbose` 而忘了传 `BOOT_LOADER` 时，跑的是修好之前的老二进制，
+   会看到"崩溃又回来了"的假象（`[BD-SEGV]` 还是旧格式 `backtrace_symbols_fd` 的裸地址）。
+   判断方法：新 handler 打 `si_code`/`si_addr`/`pc`/`lr`，旧的只打一行 `[BD-SEGV] signal N`。
+2. **`xwininfo -root -children | grep -c '^     0x'` 数的就是子窗口数**，
+   0 → 还没有 X 窗口（SDL 窗口是在第一次 `nativeRender` 内部创建的），
+   用来把"窗口没建"和"窗口建了但没内容"分开。
+
+---
+
+## 11. 案例 B（原 CASE_STUDIES 案例四·续）：**悬垂的 `jmethodID`** —— 缓存的方法 id 悄悄换了个函数
+
+### 症状
+
+补完 `StackTraceElement` / `setStackTrace` 桩之后，Unity 拿到了正确的 FMOD 音频参数，
+但进程仍然 `SIGSEGV`。崩点非常有规律：
+
+```
+[BD-DBUF]: GetDirectBufferAddress handle=(nil)  from 0x3800afb760
+[BD-DBUF]: GetDirectBufferAddress handle=0x4    from 0x3800afb760   ← 崩在这
+```
+
+`0x3800afb760` = `libunity + 0xafb760`。调用方是
+`FMODAudioDevice::local_fmodGetInfo(4)`：它取 `fmodGetInfo` 的地址去调，`4`（`infoId`）
+被当成了 `ByteBuffer` 句柄传进 `GetDirectBufferAddress`。
+
+### 排除法（这几步都不能省）
+
+1. **表本身没串号**。按 24 字节步长扫 libunity 的 `JNINativeMethod` 三元组
+   （`readelf -rW` 取 `R_AARCH64_RELATIVE` 的 addend，锚定 `name` 串后看 +8/+16）：
+
+   | 表项偏移 | name | signature | fnPtr |
+   |---|---|---|---|
+   | `0xe9d008` | `fmodGetInfo` | `(I)I` | `0xafb5e4` |
+   | `0xe9d020` | `fmodProcess` | `(Ljava/nio/ByteBuffer;)I` | `0xafb6ac` |
+   | `0xe9d038` | `fmodProcessMicData` | `(Ljava/nio/ByteBuffer;I)I` | `0xafb738` |
+
+   全文件 42 条 native 表项，`fmod*` 只有这三条，**没有重复注册**。
+2. **`fmodGetInfo` 不可能调 JNI**。反汇编 `0xafb5e4`：`mov w19, w2` 存下 `infoId`，
+   然后 `cmp w19, #4 / br` 跳表；跳表 `0xcb871c` 的 5 个 32 位相对偏移分别指向
+   `0xafb678 / afb694 / afb69c / afb684 / afb6a4`，全是"返回一个 int"。整个函数
+   **一条 `blr` 都没有**。
+3. **0xafb760 确实属于 `fmodProcessMicData`**（`0xafb738` 起，`blr x8` 在 `0xafb75c`）
+   ——它才是那个 `GetDirectBufferAddress(env, x2)` 的调用者。
+4. **jnivm 侧的注册是对的**。运行时打印 `org/fmod/FMODAudioDevice` 的 `methods`：
+   `fmodGetInfo → 0x3800afb5e4`、`fmodProcess → 0xafb6ac`、`fmodProcessMicData → 0xafb738`，
+   与文件表完全一致。`getMethod("(I)I","fmodGetInfo")` 解析出的 `Method` 也打印了
+   `native=0x3800afb5e4`。
+
+### 真因
+
+在 `local_fmodGetInfo` 里**每次调用都打印缓存的 `Method*` 和它的 `native`**，两次
+`runAudio` 之间出现了这一幕：
+
+```
+1128: local_fmodGetInfo(id=0) mid=0x4001e15da420 native=0x3800afb5e4   ← 第一次正常
+1317: [FMODAudioDevice] Exiting audio loop.
+1320: local_fmodGetInfo(id=0) mid=0x4001e15da420 native=0x3800afb738   ← 同一个指针，值变了
+1322: local_fmodGetInfo(id=4) mid=0x4001e15da420 native=0x3800afb738   ← 于是崩
+```
+
+**同一个 `Method` 对象的 `native` 字段换了值**，而且换成了一个合法的、
+就在表里紧挨着的函数地址。这不是内存被写花，是**对象被释放后同尺寸分配复用了**：
+
+- jnivm 的 `jmethodID` 就是裸的 `Method*`；
+- `RegisterNatives()` 把每个原生方法 `make_shared<Method>()` 后 `push_back` 进
+  `Class::methods`（`vm.cpp`）；
+- `UnregisterNatives()` 会把 `native != nullptr` 的方法从 `methods` 里 `erase`
+  → 最后一个 `shared_ptr` 掉了 → **方法对象被 free**；
+- 下一次同尺寸的 `Method` 分配（重新注册、或任何 auto-stub 方法）**复用了同一块内存**，
+  于是那个缓存的 id 还指向有效地址，却安静地变成了另一个 native 函数。
+
+`FakeJni::MethodProxy` 正是那种"解析一次、缓存 `jmethodID`"的调用者，
+`local_fmodGetInfo` / `local_fmodProcess` 里的 `static auto` 也是。
+第一次 `runAudio` 里 `fmodGetInfo` 还是好的（所以音频参数都对），
+第二次 `runAudio`（Unity 停了又起一次音频设备）时就已经是 `fmodProcessMicData` 了。
+
+### 修复
+
+1. **`libjnivm/src/jnivm/vm.cpp`** — `RegisterNatives()` 里把创建出来的 `Method`
+   额外压进一个进程级 keepalive 表。注册过给原生代码的方法**永不被释放**，
+   缓存的 id 就不可能失效。（`UnregisterNatives()` 仍然会从 `methods` 里摘掉它，
+   语义不变：之后重新注册会创建新对象并被 find 到。）
+2. **`projects/unityloader/javastubs/fakefmod.cpp`** — 不再用 `MethodProxy::invoke`，
+   改为每次调用都重新解析一次、并**校验解析到的条目 name/signature 确实是想要的那个**，
+   然后自己按函数指针调。多一层"这不是我要的方法"的拒绝，比直接崩掉好得多。
+   （`fmodGetInfo` / `fmodProcess` 都不读 `thiz` 参数，所以直接传类指针等价。）
+
+### 结果
+
+```
+[BD-AUDIO] local_fmodGetInfo(id=0) native=0x3800afb5e4 -> 24000
+[BD-AUDIO] local_fmodGetInfo(id=4) native=0x3800afb5e4 -> 2
+[BD-AUDIO] local_fmodGetInfo(id=1) native=0x3800afb5e4 -> 1024
+[BD-AUDIO] local_fmodGetInfo(id=2) native=0x3800afb5e4 -> 4
+[BD-AUDIO] SDL Audio device opened. Rate: 24000, Channels: 2
+```
+
+无 `SIGSEGV`，无 `[BD-EXIT]`，**跑满整个 25 s 观测窗口**（此前 3.9 s 就退出），
+而且 `eglSwapBuffers` **从"一次都没调"变成持续被调**，`frame.1/2/3.gl.ppm` 都写出来了。
+
+### 通用教训
+
+- **`jmethodID` / `jfieldID` 只要可能跨帧缓存，就必须保证对象不被释放。**
+  这类 bug 的表现是"第一次好、第二次坏"，而且坏得像个逻辑错误（走错函数），
+  完全不像野指针——野指针会崩，这个只会安静地调错东西。
+- **定位手法**：给可疑的缓存 id 加"每次调用都打印它解析出的 `Method*` 和关键字段"。
+  一旦看到**同一个指针两次打印出不同内容**，就不用再查逻辑了，直接查生命周期。
+- **`native` 字段"变成了另一个合法地址"是关键指纹**。如果是内存被写坏，
+  值通常是垃圾；这里值恰好是同一个表里相邻的条目，指向"对象被复用"，而不是"被覆盖"。
+
+
+---
+
+## 12. 案例 C（原 CASE_STUDIES 案例四·续三）：**hook 了一个"转发 thunk"** —— 看着触发了，其实恒判失败
+
+> 2026-09-22，Oddmar。这条是**"hook 起效了"与"hook 起作用了"不是一回事**的教科书案例。
+
+### 症状
+
+给 `libunity.so + 0x4c124c` 装 detour，跳过 Unity 的视频路径翻译。日志明确打出：
+
+```
+[BD-MEDIA] video translation bypass armed target=0x38004c124c orig=0x37ffff0000
+[BD-MEDIA] bypassing Unity video path translation -> /game/Oddmar/gamedata/assets/Videos/…mp4
+```
+
+路径字符串**完全正确**、文件**确实存在**（979 746 B），可是 Unity 下一行照旧：
+
+```
+Unity: AndroidVideoMedia::OpenExtractor could not translate jar:file://!/assets/Videos/…mp4 to local file.
+Unity: AndroidVideoMedia: Error opening extractor: -10004
+```
+
+日志里对该文件**零 `stat`/`open`** —— Unity 压根没走到文件层。
+
+### 三件必须先做的事
+
+1. **确认这个地址是"函数入口"还是"函数中段"**：
+   `objdump -d libunity.so | grep -nE "(bl|b|cbz|tbnz)[[:space:]]+.*4c124c"`
+   —— 有 `bl` 指向它，才是可当函数入口 hook 的。
+2. **把它周围的指令读出来**，别只看符号名（stripped 的 so 只有 `JNI_OnUnload+0x…` 这种无意义名）。
+   Oddmar 这个 `0x4c124c` 长这样：
+   ```asm
+   4c124c  mov  x10, x0
+   4c1250  ldr  x0, [x10, #0x410]   ; 换成真正实现对象
+   4c1254… 参数整体右移一格
+   4c1268  ldr  x5, [x11, #312]     ; vtbl[0x138]
+   4c1278  br   x5                  ; 尾调用
+   ```
+   → 这不是"翻译函数本体"，而是**一个虚调用转发 thunk**（`f(a0,a1,a2,a3)` 转发成
+   `impl->vtbl[0x138](impl=*(a0+0x410), a0, a1, a2, a3)`）。
+3. **回到调用点看返回值怎么被消费** —— 这一步才是决定性的：
+   ```asm
+   53f140  add  x0, sp, #0x48       ; a0 = 包装对象
+   53f144  add  x1, sp, #0x480      ; a1 = 输入路径
+   53f148  add  x2, sp, #0x10       ; a2 = 输出槽①
+   53f14c  add  x3, sp, #0x18       ; a3 = 输出槽②（相邻 8 B）
+   53f150  bl   4c124c
+   53f154  tbz  w0, #0, <失败分支>  ; ★ 返回 bool
+   53f158  ldp  x8, x3, [sp, #16]   ; 成功后把 (sp+0x10, sp+0x18) 当 {ptr, size} 读出
+   ```
+   ⇒ 真实契约：`bool f(ctx, in_path, out_ptr, out_len)`，**返回值是 bool，结果走两个输出槽**。
+   同时**没有 sret**（调用前 x8 未被设置，thunk 自己拿 x8 当暂存）。
+
+### 为什么"看着触发了"却恒失败
+
+- 我们的 hook `return (uintptr_t)path.c_str();` —— 一个**至少 8 字节对齐**的指针。
+  而调用方是 **`tbz w0, #0`**，测的是**第 0 位**。对齐指针低位恒 0 ⇒ **恒判"失败"**。
+- 就算把 bit 0 凑成 1 也没用：**两个输出槽从未被写**，调用方会读到 `{null, 陈旧值}`，
+  还要拿那个值当长度做边界检查。
+
+### 运行时的独立佐证（很有用的一招）
+
+在 hook 里把 a0–a7 全打出来：
+
+```
+args=0x40003a4860d8 0x40003a486510 0x40003a4860a0 0x40003a4860a8
+     0x400008d7d5e0 0x17f 0x2f7374657373612f 0x6d2f736f65646956
+```
+
+- `a0 - a2 = 0x38`、`a1 - a2 = 0x470`，与 `sp+0x48 / sp+0x480 / sp+0x10` 的间距**逐项吻合**
+  → 证实是哪一条调用点、证实 a2/a3 是"相邻 8 字节的两个输出槽"；
+- `a6 = "/assets/"`、`a7 = "Videos/m"` 的 ASCII ——**上一层的寄存器残值**，不是参数。
+
+> **判据**：凡是参数打印里出现"可读文本被当成指针"，基本可以断定**该参数位是空的**
+> （调用者没设），不要拿它当线索。
+
+### 通用教训
+
+- **hook 成功不等于 ABI 对上。** 装上了、打印了、触发了一次 —— 这些都只证明"跳转发生了"。
+  真正要证的是**返回值/输出参数的约定**。
+- **`tbz w0, #0` / `tbnz` 是"测某一位"，不是"测非零"。** 任何"返回指针去满足返回 bool 的接口"
+  的写法都必然为假，因为对齐指针低位是 0。看到 `tbz/tbnz w0, #0` 就要立刻想到：
+  这个函数的返回值是**布尔**。
+- **判断"结构体是不是按值返回"，看调用前 x8 有没有被设。** 没设、且被 hook 的代码自己拿 x8 当暂存，
+  就一定不是 sret。
+- **动手 hook 一个 stripped 的 so 之前，先花 10 分钟读三处汇编**：目标地址是不是函数入口、
+  它的入口序列是什么形状、**它的调用点怎么消费返回值**。这三处读完，绝大多数"打了 hook 没效果"
+  都能在编译前就避免。
+- 反过来，`GetMethodID`/`jmethodID` 那类"对象即接口"的坑（见 §11）也一样：
+  **盯住数据流的终点**，别只看"代码有没有被执行"。
+
+---
+
+## 13. 相关文档
 
 - `AGENTS.md` —— 日志/构建开关、Dropbeak 推拉文件
 - `docs/PORTING_PLAYBOOK.md` —— 端口化通用流程、§1.1 构建命令、§1.2 `JNIVM_ENABLE_RETURN_NON_ZERO`、§1.3 缓存项
-- `docs/CASE_STUDIES.md` —— 案例四"悬垂的 jmethodID"（本次核心根因之一）
-- `.workbuddy/memory/2026-09-21.md` —— 当日工作日志
+- 本文件 §10–§12 —— 案例存档：原 `docs/CASE_STUDIES.md` 的 Oddmar 三节（案例四 / 四·续 / 四·续三）
+- `.workbuddy/memory/2026-09-21.md` —— 第二场工作日志
+- `.workbuddy/memory/2026-09-22.md` —— 第三场工作日志（本文件 §0.6 的原始记录）
+
+**版本**：本文件 2026-09-22 第三场更新（新增 §0.6、改写 §⛔ 0-1 / §0 / §7.0 / §8 / §9.2-9.3）。
+上一版是 2026-09-21 第二场。
+2026-09-22 同日晚：并入原 `docs/CASE_STUDIES.md` 的 Oddmar 三节（现 §10–§12），该文件已删除，原「§10 相关文档」顺延为 §13。

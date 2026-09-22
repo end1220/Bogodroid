@@ -1,6 +1,6 @@
 # Bogodroid Agent Notes
 
-新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)。Skul 已止损。
+新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md)（含 Skul 止损判据、Maximus2 的 `JNIVM_ENABLE_RETURN_NON_ZERO` 缓存坑）。Skul 已止损。
 
 ## 日志 / 构建开关（必读）
 
@@ -30,7 +30,7 @@ toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_M
 - **OFF**（默认，上机必须）→ `null` / 0，Unity 自己 try/catch，最好情况只丢一个 NRE；
 - **ON**（实验）→ 硬造 dummy 对象，Unity 把它 cast 成 `String`/`Throwable` → jnivm `Invalid Reference, Unexpected Type` → `terminate()` / `exited 134`。
 
-它是 **CMake 缓存项**：共用 `build-aarch64/` 时会被上一次实验遗留成 `ON`，之后即使只改无关代码，编出来的 `unityloader` 也会崩，且崩点看着落在完全不相关的桩上。**每次构建显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**，细节与判读方法见 playbook §1.2；真实案例见 [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md) 的 Maximus2 一节。
+它是 **CMake 缓存项**：共用 `build-aarch64/` 时会被上一次实验遗留成 `ON`，之后即使只改无关代码，编出来的 `unityloader` 也会崩，且崩点看着落在完全不相关的桩上。**每次构建显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**，细节与判读方法见 playbook §1.2。
 
 同类缓存项还有两个，已在 `CMakeLists.txt` 里 `FORCE` 固定，别再靠命令行覆盖：`JNIVM_ENABLE_DEBUG` **恒 ON**（不是日志开关：`JNI_DEBUG` 影响 `InternalFindClass()` 的类注册与嵌套类身份，也保留 `object is null` 诊断）；`JNIVM_ENABLE_TRACE` 跟随 `BD_ENABLE_LOG`。见 playbook §1.3。
 

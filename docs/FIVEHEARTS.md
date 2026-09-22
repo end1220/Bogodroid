@@ -7,8 +7,7 @@
 > 掌机运行方式最早是会话里手敲出来的，这里固化，不要再凭记忆拼命令。
 >
 > 视频黑屏、面板偏移已修复；`textureMaxDim` 误缩 RenderTexture 导致的裁切目前用
-> `textureMaxDim = 0` **绕过**（正经修法仍待做，见 §4.6 B）。关键判据与通用结论见
-> [`CASE_STUDIES.md`](CASE_STUDIES.md)。
+> `textureMaxDim = 0` **绕过**（正经修法仍待做；关键判据见本文 §4.6 B）。
 
 ## 当前结论（先看）
 
@@ -197,8 +196,7 @@ FFmpeg (thunks/ndk/media.cpp)
 
 ### 4.1 已解决问题摘要
 
-以下问题已解决，只保留维护所需结论；详细取证见
-[`CASE_STUDIES.md`](CASE_STUDIES.md)：
+以下问题已解决，只保留维护所需结论：
 
 - **视频黑屏**：Unity GL state cache 在 draw 前覆盖 external→2D 重定向。现于实际
   draw 前重绑 backing texture，并用 shader-cache 版本戳淘汰旧程序。
@@ -379,7 +377,7 @@ Unity / 渲染相关路径不再同步支付软解时间。
 #### B. `textureMaxDim` 识别 RenderTarget（正经修法，未做）
 
 **现状**：`textureMaxDim = 0` 绕过误缩视频 RT 的裁切；开 `>0` 仍会打到
-`glTexStorage2D` 创建的 RenderTexture（见 §4.1 / CASE_STUDIES 案例三）。
+`glTexStorage2D` 创建的 RenderTexture（见 §4.1）。
 SeekProbe / FiveHearts 上机配置均保持 `textureMaxDim = 0`。
 
 **根因摘要**：cap 挂在 `bd_glTexStorage2D()`；当前只豁免 LUT/条带，以及

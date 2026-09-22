@@ -1,6 +1,6 @@
 # Unity IL2CPP → Linux ARM 掌机移植 Playbook
 
-面向 1GB 级 UMA 掌机（如 Anbernic BuildRoot）。新端口**先读本文**与 [`CASE_STUDIES.md`](CASE_STUDIES.md)；大文件推送见根目录 [`AGENTS.md`](../AGENTS.md)。
+面向 1GB 级 UMA 掌机（如 Anbernic BuildRoot）。新端口**先读本文**；大文件推送见根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 0. 何时不要开坑（止损判据）
 
@@ -12,7 +12,7 @@
 | 单个 bundle 同时塞「全角色/全音效/全 UI」 | 无法部分卸载；缩纹理只能延缓 |
 | 运行时压 ASTC/ETC2 无效 | `textureMaxDim` **拦不住**压缩上传，必须离线 retier |
 
-**负面案例：Skul（已止损）** — 摘要见 [`CASE_STUDIES.md`](CASE_STUDIES.md)。标题 RSS≈785MB 后进关无意义。
+**负面案例：Skul（已止损）** — 标题预加载后 RSS≈785MB / `sys_avail`≈72MB，进关前就顶到内存墙。完整长文在 `LinuxArmPorts/SKULL_ARM_LINUX_PORTING.md`。
 
 **正面案例：Maximus2** — 同一节里也记了它踩过的 `JNIVM_ENABLE_RETURN_NON_ZERO` 缓存坑（**先读 playbook §1.2**，能省几小时）。
 
@@ -73,7 +73,7 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern JNIVM_ENABLE_RETURN_NO
 
 （Ninja 构建下想再确认编译命令里没带宏，可在容器里 `ninja -t commands | grep -c JNI_RETURN_NON_ZERO`，应为 `0`。）
 
-判读崩溃日志时先分清：`terminate called recursively` / `exited (134)` + `Invalid Reference, Unexpected Type` = 本开关被打开的症状，**不要**顺着最后一个 `STUB-MISS` 去补桩；`[BD-SEGV]` + libunity 地址才是游戏内部异常。完整案例见 [`CASE_STUDIES.md`](CASE_STUDIES.md) 的 Maximus2 一节。
+判读崩溃日志时先分清：`terminate called recursively` / `exited (134)` + `Invalid Reference, Unexpected Type` = 本开关被打开的症状，**不要**顺着最后一个 `STUB-MISS` 去补桩；`[BD-SEGV]` + libunity 地址才是游戏内部异常。Maximus2 就是踩这个坑的现场：它是在"只加了分辨率探测"的构建上开始崩的，三次日志的最后一个 `[STUB-MISS]` 各不相同，照着补桩全部无效。
 
 ### 1.3 其它 `JNIVM_*` 缓存项：`FORCE` 与各自的正确取值
 

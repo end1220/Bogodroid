@@ -6,7 +6,7 @@
 （`gmloader-net` + `libjnivm`）。每个游戏 = `projects/<name>/` + 共享 `libjnivm/`、
 `thunks/`、`platform/`、根 `javastubs/`。
 
-仓库有两个 worktree：本目录在 `video` 分支；`D:/Locke/gitee/Bogodroid` 在 `unity6`。
+仓库有两个 worktree：本目录原在 `video`，**2026-09-22 起在 `ddmar`**（`video` 仍保留）；`D:/Locke/gitee/Bogodroid` 在 `unity6`。
 
 ## 构建 / 测试环境（硬性）
 
@@ -21,6 +21,28 @@
   - `build-regress` — RelWithDebInfo + LOG=ON + TRACE/VERBOSE OFF（回归对照用）
 - 运行脚本固定要显式传 `BOOT_LOADER=`，否则默认跑 `/workspace/Bogodroid/build-oddmar`（老二进制）。
 - 本机 Bash 需 `export PATH="/usr/bin:/bin:/c/Windows/System32:/c/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin:$PATH"`。
+
+## 容器状态陷阱（2026-09-22 定案）
+
+- **`/game/Oddmar/unity.toml` 会被留成"哨兵"态**（`android_package_code="/tmp/ZZZSENTINELPACK.apk"`
+  + `android_source_dirs=[]`）。哨兵态必死：约 **1 35x 行**、`init time`=0、`ZZZSENTINEL` 命中十几次、
+  `Invalid Reference, Unexpected Type`（Unity 弹错误对话框 → JBRIDGE 代理类型不匹配）。
+  **开工第一件事就是 `grep` 内容核对**（两个 toml 的 mtime 一样，别看 mtime）；还原用
+  `cp /game/Oddmar/unity.toml.bak-rd9 /game/Oddmar/unity.toml`。哨兵版留档 `unity.toml.sentinel-0922`。
+- **判读任何一轮测试，四个计数一起看**：`init time`>0、`ZZZSENTINEL`=0、`Unable to read header`=0、
+  `seq/timeline.txt` 里不止 192 B（192 B = 纯色 = 没画面）。少看一个就会得出反向结论。
+
+## hook 一个 stripped 的 `.so` 之前（2026-09-22 教训）
+
+先读三处汇编，再动手：① 目标地址是不是函数入口（有 `bl` 指向它）；② 入口序列的形状
+（`ldr x0,[x0,#N]` + `br` = 转发 thunk，不是本体）；③ **调用点怎么消费返回值**。
+`tbz/tbnz w0, #0` = 返回值是 **bool**（测第 0 位），**对齐指针低位恒 0 → 恒判失败**。
+调用前没设 x8 就**不是 sret**，结果只能走输出参数槽。详见 `docs/HANDOFF-ODDMAR.md` §12
+（案例 C：hook 了一个转发 thunk）。
+
+> 原 `docs/CASE_STUDIES.md` 已于 2026-09-22 删除：Oddmar 三节并入 `docs/HANDOFF-ODDMAR.md`
+> §10–§12，Skul / Maximus2 / FiveHearts 随文件丢弃（结论保留在 `docs/PORTING_PLAYBOOK.md`
+> §0 / §1.2 与 `docs/FIVEHEARTS.md` §4.6 B）。文档引用一律指向 HANDOFF。
 
 ## 日志规则（踩过的大坑）
 
