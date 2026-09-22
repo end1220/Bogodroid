@@ -728,7 +728,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
     // as a jmethodID long afterwards.
     //
     // Note this is *not* about Constructor.newInstance(): an entry log confirmed
-    // Unity never calls it (HANDOFF §4.4). Unity instead invokes the pointer
+    // Unity never calls it (ODDMAR.md §4.4). Unity instead invokes the pointer
     // directly through the NewObject* slot, which reads name/signature/
     // nativehandle straight off this object -- so a destroyed object means a
     // dangling jmethodID, not just a failed lookup. An earlier version of this
@@ -745,7 +745,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
     }
 
     // [BD] Temporary (remove once the AssetLocator path is confirmed on
-    // screen -- HANDOFF §4.2): dump what this class actually registered, so the
+    // screen -- ODDMAR.md §4.2): dump what this class actually registered, so the
     // "bound ... -> ..." line below can be read against a known table.
     {
         std::lock_guard<std::mutex> lock(clazz->mtx);
@@ -770,12 +770,12 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
     // performed through this id fell into the "Unknown Static" branch and came
     // back null. That is why com.mobge.assetlocator.AssetLocator never came into
     // existence and ListAssets was never reached
-    // (docs/HANDOFF-ODDMAR.md P0; the mid printed there *is* this object, so
+    // (docs/ODDMAR.md P0; the mid printed there *is* this object, so
     // GetMethodID's <init> rewriting was never the missing piece).
     //
     // The class does carry the body: FakeJni registers every constructor as a
     // *static* Method whose signature ends in its own class -- "(args)L<class>;"
-    // (HANDOFF §3.2). Resolve that entry and copy the execution body across.
+    // (ODDMAR.md §3.2). Resolve that entry and copy the execution body across.
     //
     // Bound here rather than at call time so the wrapper is self-contained:
     // nothing has to still be alive when Unity eventually invokes it.
@@ -849,7 +849,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
             // MobGe.ICloud.AndroidGooglePlayServiceCloudPlatform.get_androidClient()
             // / CheckAccountStatus() on Oddmar, because
             // com.mobge.unitygameintegration.SocialImpl is a class we never
-            // stubbed (docs/HANDOFF-ODDMAR.md).
+            // stubbed (docs/ODDMAR.md).
             //
             // Java's `new` never yields null, so a class we never implemented
             // should still hand back a live, inert object of that class: every

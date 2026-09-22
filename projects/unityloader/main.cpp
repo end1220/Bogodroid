@@ -37,7 +37,7 @@ extern "C" void bd_media_bench(const char* path, int frames);
 // this opt-in so other Unity ports retain the original behavior.
 //
 // ABI of libunity+0x4c124c -- a virtual-call forwarding thunk (see
-// docs/HANDOFF-ODDMAR.md §0.6-C). Its consumer starts at 0x53f020 and calls it
+// docs/ODDMAR.md §0.6-C). Its consumer starts at 0x53f020 and calls it
 // at 0x53f150. Read of the *whole* consumer path (2026-09-22, verified against
 // the 979746-byte splash mp4):
 //

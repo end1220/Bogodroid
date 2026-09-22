@@ -61,11 +61,12 @@ Oddmar 那次就是只看了 `0x53f150` 附近，把 `a1` 当"只读输入路径
 读完消费者 `0x53f020` 才发现 `a1` 是**输入/输出的 string**（调用前被清空，必须回填本地路径）、
 `a2 = NULL` 才是正解（非 0 会被当成文件偏移）、`a3` 是数据总长（也是 `offset+size` 边界检查的上界）。
 **"能走到下一行"不等于参数对上了** —— 中途两版都走到了 `open` 且 `fd=30` 成功，**依然是错的**。
-详见 `docs/HANDOFF-ODDMAR.md` §0.6-C/D/E（四次迭代失败史）。
+详见 `docs/ODDMAR.md` §0.6-C/D/E（四次迭代失败史）。
 
-> 原 `docs/CASE_STUDIES.md` 已于 2026-09-22 删除：Oddmar 三节并入 `docs/HANDOFF-ODDMAR.md`
+> 原 `docs/CASE_STUDIES.md` 已于 2026-09-22 删除：Oddmar 三节并入 `docs/ODDMAR.md`
 > §10–§12，Skul / Maximus2 / FiveHearts 随文件丢弃（结论保留在 `docs/PORTING_PLAYBOOK.md`
-> §0 / §1.2 与 `docs/FIVEHEARTS.md` §4.6 B）。文档引用一律指向 HANDOFF。
+> §0 / §1.2 与 `docs/FIVEHEARTS.md` §4.6 B）。文档引用一律指向 `docs/ODDMAR.md`
+> （原名 `docs/HANDOFF-ODDMAR.md`，2026-09-22 收尾时改名）。
 
 ## 定位 libunity 私有全局 / 虚函数来源（2026-09-22 深夜新增，通用手法）
 
@@ -109,7 +110,7 @@ Oddmar 那次就是只看了 `0x53f150` 附近，把 `a1` 当"只读输入路径
   `bool f(obj, string* path_in_out, void** out_base, size_t* out_len)`；
   **a1 装原始 URL、调用前被清空、必须回填本地路径；a2 必须 NULL；a3 = 数据总长**。
   实现 `projects/unityloader/main.cpp` 的 `bypass_video_translate`，env `BD_BYPASS_VIDEO_TRANSLATE=1` 才装。
-  详见 HANDOFF §0.6-E（实现）/ §0.6-H（实测结果）。
+  详见 ODDMAR.md §0.6-E（实现）/ §0.6-H（实测结果）。
 - **✅ 2026-09-22 深夜：L2 已定位** —— hostless URL 的 host = **`Application.dataPath`**。
   上游 = `Context.getPackageCodePath()`（port 侧 `bd_compute_source_dir()`），
   被 Unity 的 **`stat()` + `S_IFREG` 闸门**挡下（返回的 `<cwd>/UnityDataAssetPack.apk` 在磁盘上不存在）
@@ -118,10 +119,10 @@ Oddmar 那次就是只看了 `0x53f150` 附近，把 `a1` 当"只读输入路径
   dataPath 出自静态缓冲 `libunity+0xF0B740`，getter `0x39f800`→`vtbl[0x170]`=`0x30c704`，
   setter `0x39f818` ← 唯一调用者 `0x31c520`，闸门 `0x31c56c`（stat + S_IFREG）。
   探针 `BD_PROBE_APPPATHS=1` **已接线**（`[BD-PATH-PROBE]` / `[BD-L2]`）。
-  **根治不建议做**（要放占位 APK + 动跨端口共享的 `clean_jar_path`）。详见 HANDOFF §0.7。
+  **根治不建议做**（要放占位 APK + 动跨端口共享的 `clean_jar_path`）。详见 ODDMAR.md §0.7。
   ⚠️ **别在 `gamedata/` 留 `UnityDataAssetPack.apk`** —— 留了 `dataPath` 非空，Unity 转去 APK 内部找
-  数据档 ⇒ 每轮必死（HANDOFF §⛔ 0-5）。
-- 交接文档：`docs/HANDOFF-ODDMAR.md`（先读它）。
+  数据档 ⇒ 每轮必死（ODDMAR.md §⛔ 0-5）。
+- 交接文档：`docs/ODDMAR.md`（先读它）。
 - 资源 staging：`D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage\`。
 
 ## 回归测试素材

@@ -128,7 +128,7 @@ std::shared_ptr<jnivm::Class> jnivm::InternalFindClass(ENV *env, const char *nam
 	// NullReferenceException out of GetSignature, which is what aborted
 	// MobGe.ICloud.AndroidGooglePlayServiceCloudPlatform.get_androidClient()
 	// for com.mobge.unitygameintegration.SocialImpl
-	// (docs/HANDOFF-ODDMAR.md). The same trap is already documented at the
+	// (docs/ODDMAR.md). The same trap is already documented at the
 	// Object.getClass hook in javastubs/javac.cpp: reporting the wrong class
 	// there also produces a "spurious NullReferenceException" from
 	// AndroidJNIHelper.

@@ -2,7 +2,8 @@
 
 > 交接给下一个会话：**先读完本文再动手**。
 > 本文分两层读法 —— **§0 → §0.6 → §0.7 → §⛔ → §7.0** 是「现在要干什么」；其余章节是取证与已归档结论，
-> 需要时再查。**已定论/已解决的部分集中压缩在 §0.5、§4.4、§6（✅ 项）、§10–§12**，不必逐字读。
+> 需要时再查。**§0.2 = 遗留问题总表；§0.3 = 全部主要问题的「原因 → 解法」速查**；
+> 已定论的部分压缩在 §0.4–§0.5、§4.4、§6（✅ 项）、§10–§12，不必逐字读。
 >
 > **📌 2026-09-22 晚：黑屏已解决，Oddmar 标题界面已渲染出来**（详见 §0.6-H）。
 > 挡画面的 `libunity+0x4c124c`（asset 路径翻译）契约已定稿并在 `BD_BYPASS_VIDEO_TRANSLATE` 里实现。
@@ -63,9 +64,26 @@
 | **L4** ⚪ | 云服务回调不触发：`SocialImpl.authenticate` / `SaveGames.isConnected` 类未注册 | 不崩、不卡；按目标约束**只需不阻塞** | §0.5-F |
 | **L5** ⚪ | 回归未补：本批 `libjnivm` + `thunks/ndk/*` + `getPackageCodePath` 改动 | 早一批 4 组对照已过；本批未跑 | §7.0-7 |
 | **L6** ⚪ | `AssetLocator.GetReaderWrapper` 仍是探针（返回默认值，内容未真实读出） | 不阻塞当前主线（8 个 bundle 已打出真实大小） | §6 P0 |
-| **L7** ⚪ | 清理类：§4.2 诊断日志、容器 50+ `seq*`、过期注释 `android_content.cpp:934`、探针生命周期 | 逐条见右列 | §7.0-6/8、§7.1-9/10、§9.3 |
+| **L7** ⚪ | 清理类：§4.2 诊断日志、过期注释 `android_content.cpp:934`、探针生命周期 | 容器清理**已完成**（2026-09-22 收尾）；其余逐条见右列 | §7.0-6/8、§7.1-9/10、§9.3 |
 
-### 0.3 历史修复（已实测推进，保留备查）
+> **执行步骤**：L3–L7 的做法与前置条件见 **§7.0**（按优先级分组）。L1 / L2 已关闭，原因与解法见下一节。
+
+### 0.3 主要问题：症状 → 根因 → 解法（速查）
+
+> 本节是**唯一的结论汇总**。新会话读完这里 + §⛔ 接手第 0 步，就能直接开工；
+> 每条都指向完整取证（§0.5–§0.7 / §10–§12）。
+
+| 症状（日志里能看到的） | 根因 | 解法（已落地） | 详见 |
+|---|---|---|---|
+| 启动即退出；`[BD-SEGV] signal 11 si_addr=0xffffffffffffff80`，pc = `std::rethrow_exception` | Unity 的受管异常经 `JNIEnv::Throw()` 进来，jnivm 只把它置成 **pending**（`except` 为空）；下一次 JNI 调用在 `j2invoke` 尾部 rethrow **空 `exception_ptr`** → 读 `-0x80` | `jnivm::RethrowThrowable()`：`except` 为空时抛普通 `std::runtime_error`；`j2invoke` 仅在 `except` 非空时 rethrow；`Throw()` 保持 pending。**另修 SEGV 回溯**：改用 `SA_SIGINFO` 从 Unity 链式 handler 里取真 `ucontext`（**裸 backtrace 会骗人**） | §10 |
+| 音频线程崩；`[BD-DBUF] GetDirectBufferAddress handle=0x4`，同一个 `Method*` 两次打印出**不同**的 `native` | jnivm 的 `jmethodID` 就是裸 `Method*`；`UnregisterNatives()` 把它从 `methods` 里 `erase` → 最后一个 `shared_ptr` 释放 → **同尺寸分配复用同一块内存** → 缓存的 id 悄悄指向另一个 native 函数 | `RegisterNatives()` 增加**进程级 keepalive 表**（注册给原生代码的方法永不释放）；`fakefmod.cpp` 改为每次调用重新解析并**校验 name/signature** | §11 |
+| hook 装上了、也触发了，但 Unity 仍走失败分支；`could not translate` / `-10004` | `libunity+0x4c124c` 是**虚调用转发 thunk**，真实契约是 `bool f(obj, string* in_out, void** out_base, size_t* out_len)`；原来返回**指针** → 调用点 `tbz w0,#0` 判 bit0 → 对齐指针低位恒 0 → **恒判失败** | hook 改为：**回填 `a1` 路径 + `a2 = NULL` + `a3` = 长度 + 返回 `1`**（`BD_BYPASS_VIDEO_TRANSLATE=1`，实现见 `bypass_video_translate`） | §0.6-C/D/E、§12 |
+| **黑屏**：8 个 AssetBundle 加载成功、`eglSwapBuffers` 在跑，但画面恒 192 B 纯色 | 上一条的直接后果 —— 片头视频路径翻译失败 ⇒ 没有片头 ⇒ 黑屏 | 同上（v4 实现）。验收链：`extractors opened tracks=2` → `decoded frame=0/1` → 截图 **290–300 KB = Oddmar 标题界面** | §0.6-E/H、§7.0-0a |
+| `streamingAssetsPath = 'jar:file://!/assets'`（host 为空） | host = **`Application.dataPath`**；候选来自 `Context.getPackageCodePath()`（port 侧 `bd_compute_source_dir()`）= `<cwd>/UnityDataAssetPack.apk`，**磁盘上不存在** ⇒ 被 Unity 的 `stat()` + `S_IFREG` 闸门拒 ⇒ `dataPath=""` | **不修**（不挡画面）。已定位 + 探针接线（`BD_PROBE_APPPATHS=1`）。根治需占位 APK + 改跨端口共享的 `clean_jar_path`，收益低 ⇒ 保持 opt-in hook | §0.7 |
+| 启动期 `NullReferenceException`，栈落在 `_AndroidJNIHelper.GetSignature` | ① `getConstructorID` 对未绑定 `<init>` 的类返回 **null**（Java 的 `new` 从不返回 null，托管侧拿它当参数就解引用 null）；② 自造类没补 `java/lang/Object` 父类 ⇒ `getClass()/toString()` 全 miss 返回 null | ① 合成惰性活对象（逃生开关 `BD_CTOR_FALLBACK_NULL=1`）；② 在 `InternalFindClass` **函数出口**补父类（**不能**写在 fallback 分支里） | §0.4、§4.4 |
+| NDK 视频符号链不完整（`AMediaExtractor_*` / `AMediaCodec_*` 等） | 端口侧缺少完整的 NDK 媒体符号 | 已补齐，机制可复用 | §0.5-A |
+
+### 0.4 历史修复（早期推进，保留备查）
 
 1. **`getConstructorID` 对未绑定 `<init>` 的类合成惰性活对象** —
    `projects/unityloader/javastubs/unity.cpp`。Java 的 `new` 从不返回 null；返回 null 会让托管侧
@@ -980,13 +998,26 @@ Unity: AndroidVideoMedia: Error opening extractor: -10004
 
 ---
 
-## 7. 建议的下一步（按顺序）
+## 7. 后续任务（按优先级）
 
 ### 7.0 ⭐ 从这里开始
 
 > 前置：**先做 §⛔ 接手第 0 步**（核对/还原 `unity.toml`、确认 `BOOT_LOADER`、确认二进制里真有你要的字符串）。
 > **动手前先读 §0.6**：那里已经把那个 Unity hook 的调用契约钉死了，别再重复踩。
-> 判读任何一轮，都必须同时看 `init time` / `Unable to read header` / `ZZZSENTINEL` 三个计数（见 §9.2）。
+> 判读任何一轮，同时看 **`ZZZSENTINEL`（必须 0）** 与 **`Unable to read header`（必须 0）**；
+> ⚠️ **`init time` 不能用来判死活**（理由见 §9.2 的更正）。
+
+**剩余待办（速览）** —— 与 §0.2 总表的 L# 一一对应
+
+| # | 任务 | 优先级 | 前置 / 判据 | 详细步骤 |
+|---|------|--------|------|------|
+| **L5** | 本批改动的回归：`libjnivm`（`method.cpp` / `vm.cpp` / `findclass.cpp`）+ `thunks/ndk/*` + `getPackageCodePath` | **最高** —— `libjnivm` 是**全局改动**，影响所有端口 | 用 Samurai2 / Maximus2 各跑一对（包内自带 loader = 改动前基线） | §7.0-7 |
+| **L3** | 摸清 `0x4c124c` 背后的实体类型（`[a0+0x410]` → `vtbl[0x138]`），以及另 3 个调用点是否同链 | 中 —— 只有**长期保留**该 hook 时才必要 | 先决定要不要把 hook 固化 | §7.0-2 |
+| **L6** | `AssetLocator.GetReaderWrapper` 从探针改为真实读出内容 | 中 | 当前不阻塞主线（8 个 bundle 已有真实大小） | §6 P0 |
+| **L4** | 云服务回调"不阻塞化"（`SocialImpl.authenticate` / `SaveGames.isConnected`） | 低 —— 目标约束下只需不阻塞 | **不要**实现功能语义 | §0.5-E、§7.0-5 |
+| **L7** | §4.2 诊断日志清理、`android_content.cpp:934` 过期注释、探针生命周期 | 低（收尾） | 建议在回归通过后再动 | §7.0-6/8、§7.1-9/10 |
+
+> 容器侧的清理**已于 2026-09-22 收尾完成**（见 §9.3），不再占待办。
 
 **第 0 组**
 
@@ -1030,7 +1061,9 @@ Unity: AndroidVideoMedia: Error opening extractor: -10004
    `javastubs/android*.cpp`、`thunks/ndk/*`。§7.1-1 的 4 组对照是**更早一批**的结论，
    本批新增改动（尤其 `thunks/ndk/*` 的 `AMediaFormat` 结构体加了 `buffers`/`text` 字段、
    `getPackageCodePath` 改走 `bd_compute_source_dir()`）**还没回归过**，建议用 Samurai2/Maximus2 补一对。
-8. 收尾清理：容器内 50 个 `seq*` 目录 + 7 个 `log*.bak`（§9.3）；宿主机那份半成品探针要么接线要么撤掉。
+8. ✅ **容器清理已完成（2026-09-22 收尾）**：`seq*` 由 69 个降到 3 个、`/tmp` 反汇编中间件已删、
+   12 个过程日志已删（合计回收约 330 MB）；`log*.bak` 5 个作对照基线**有意保留**。清单与理由见 §9.3。
+   - 宿主机那份"半成品探针"**已接线**（`BD_PROBE_APPPATHS=1`），见 §0.3 / §0.7。
 
 ### 7.1 此前列出的（压缩：✅ 已完成 / ⬜ 未做）
 
@@ -1402,15 +1435,19 @@ libstdc++ 的 `rethrow_exception` 要读异常对象**下方 0x80 字节**的 `_
 - `docs/PORTING_PLAYBOOK.md` —— 端口化通用流程、§1.1 构建命令、§1.2 `JNIVM_ENABLE_RETURN_NON_ZERO`、§1.3 缓存项
 - 本文件 §10–§12 —— 案例存档：原 `docs/CASE_STUDIES.md` 的 Oddmar 三节（案例四 / 四·续 / 四·续三）
 - `.workbuddy/memory/2026-09-21.md` —— 第二场工作日志
-- `.workbuddy/memory/2026-09-22.md` —— 第三场工作日志（本文件 §0.6 的原始记录）
+- `.workbuddy/memory/2026-09-22.md` —— 第三～五场工作日志（本文件 §0.6 / §0.7 的原始记录）
 
-**版本**：2026-09-22 深夜 · 收尾（第五版 —— **L2 定论 + 全仓收尾**）。
-本版相对第四版：修正三处过期内容（H1 与文首的「`video` 分支」→ **`oddmar` 分支**；§0 更新块的
-`ddmar` 旧名；§9.2 判据里**已被推翻的 `init time > 0`** 改为「不能用来判死活」）；新增 §⛔ 0-4 与
-§9.3 的**清理执行记录**；§0.1 速览补 L2 行；`main.cpp` 的 L2 探针 + `%lld` 类型整理一并入库。
-第四版为 2026-09-22 深夜 —— **L2 定论：host 来源 = `Application.dataPath`**（新增 §0.7 完整证据链）；
-更早为 2026-09-22 晚（黑屏解决，§0.6-C/D/E + §0.6-H）、2026-09-22 精简版、第三场版、2026-09-21 第二场版。
-需要旧版全文：`git log --oneline -- docs/HANDOFF-ODDMAR.md`。
+> **本文件原名 `docs/HANDOFF-ODDMAR.md`**，2026-09-22 收尾时改名为 `docs/ODDMAR.md`。
+> 旧日志、代码注释里出现的 `HANDOFF-ODDMAR.md`，以及简称 "HANDOFF"，指的都是**本文件**。
+
+**版本**：2026-09-22 深夜 · 收尾（第六版 —— **改名 `ODDMAR.md` + 结论汇总 + 任务整理**）。
+本版相对第五版：文件改名并在 §13 说明；新增 **§0.3「主要问题：症状 → 根因 → 解法」速查表**
+（原 §0.3 顺延为 §0.4）；§7 由「建议的下一步」改为 **「后续任务（按优先级）」**，并增加与 §0.2 的
+L# 对应速览表；同步修掉 §7.0 与 §9.2 里残留的旧 `init time` 判据；全仓 4 处代码注释与
+`.workbuddy/memory/MEMORY.md` 的文档引用一并改到新文件名。
+第五版为 2026-09-22 深夜 · 收尾（L2 定论入库 + 全仓清理记录）；更早为 2026-09-22 晚
+（黑屏解决，§0.6-C/D/E + §0.6-H）、2026-09-22 精简版、第三场版、2026-09-21 第二场版。
+需要旧版全文：`git log --oneline --follow -- docs/ODDMAR.md`。
 
 **L2 那轮的产物**（容器 `/game/Oddmar/`）：`log-l2probe.txt`（健康轮，含探针输出）、
 `log-l2apk.txt`（占位 APK 轮，启动死的对照）、`l2.out` / `l2apk.out`、`seq-l2/`、`seq-l2apk/`。
