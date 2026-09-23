@@ -170,6 +170,9 @@ resolution. Skips videos already under the cap.
 
 - **`--include-compressed` needs an ASTC-capable GPU.** Mali-G31+/Adreno/PowerVR 8+ yes; GLES2-era Mali-400/450 no — drop the flag there.
 - **Never use `--packer lz4`.** UnityPy's lz4 preset sets the 0x80 padding flag (a 2020.3+ feature); pre-2020.3 players SIGBUS on it. The default `lz4hc` is what shipping packs use.
+- **`--alpha-mode` is `auto` for a reason — do not force `rgb`.** A GPU samples a non-alpha internal format as **alpha == 1.0** no matter what was uploaded, so picking `ASTC_RGB_*` for a texture that had transparency turns every cut-out into an **opaque block**. The trap is that **no offline check catches it**: the encoded bytes still contain the alpha plane, so UnityPy happily decodes it and looks correct. Only a live run shows it. ASTC's RGB and RGBA variants are the **same 16-byte block**, so RGBA costs nothing. (`auto` = RGBA iff the source format name carries RGBA/ARGB/BGRA/Alpha, with DXT5/BC2/BC3/BC7 added explicitly.)
+- **Bare `SerializedFile` inputs work.** Modern split builds put every object in its own `bin/Data/<md5>` blob with no UnityFS wrapper — the tool now detects that (no `signature`/`dataflags`/`files`) and skips `--compact` and `--packer` automatically, since a SerializedFile has neither an `.resS` table nor a block-compression layer. Previously it died with `AttributeError: 'SerializedFile' object has no attribute 'signature'` before doing any work.
+- **A split fragment is refused outright.** A `sharedassetsN.assets.splitM` file is **not** a standalone container: `split0` holds the full header, and `split1..M` are raw data continuations addressed by offsets stored in that header. UnityPy opens a fragment as if it stood alone, so saving rewrites split0's header *and* all of its offsets while the other fragments stay stale — every cross-fragment offset then dangles and the game cannot load the result. It fails **loudly in size terms** (measured on Oddmar: 1 MiB in → 4.68 MiB out) but passes **every** offline format check, so the tool now exits with an explanation instead of writing the file. Re-tiering a split asset requires merging the fragments first; this tool cannot.
 - **Fonts and small textures auto-kept** (TMP `* Atlas` naming + legacy Font refs + `--keep-cap`). Costs ~5% of savings, protects text/icon quality.
 - **QA on device every time**: font rendering, map/inventory UI, particle-heavy scenes, area-transition audio. Add visibly broken textures to `--skip-file` and rerun.
 
@@ -210,6 +213,7 @@ Every script also prints this via `--help`. **Bold = default.**
 | `--max-size N` | **`0`** (off) | long side > N → kept (**Mode B boundary**) |
 | `--include-raw` | **off** | also convert uncompressed RGBA32/RGB24 |
 | `--include-compressed` | **off** | also convert ETC2/DXT/BCn/PVRTC; needs ASTC-capable GPU |
+| `--alpha-mode` | **`auto`** | ASTC **RGB vs RGBA** target. `auto` picks RGBA whenever the SOURCE format carries alpha. Changing this by hand is almost always wrong — see Caveats |
 | `--compact` | **off** | rebuild `.resS` dropping dead bytes — pass on real runs |
 | `--skip NAME` / `--skip-file F` | — | leave named textures untouched (QA escape) |
 | `--limit N` | all | process at most N textures (QA) |

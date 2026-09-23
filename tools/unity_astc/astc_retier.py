@@ -110,6 +110,7 @@ Requirements
 
 import argparse
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -117,6 +118,7 @@ from pathlib import Path
 try:
     import UnityPy
     from UnityPy.enums import TextureFormat as TF
+    from UnityPy.files import BundleFile, SerializedFile
 except ImportError as e:
     sys.exit(f"missing dependency: {e}\n"
              "install with:  pip install UnityPy Pillow astc-encoder-py")
@@ -145,8 +147,30 @@ def decode_dataflags(flags):
 def print_bundle_info(env, log):
     """Dump everything that affects how we should repack: container kind,
     Unity engine version, raw flags + decoded modifier bits, and the file
-    entries inside. Drives both human inspection and the --packer recommendation."""
+    entries inside. Drives both human inspection and the --packer recommendation.
+
+    Two container kinds show up in the wild and they share almost no attributes:
+      * BundleFile     - UnityFS archive (data.unity3d, Bundles/*). Has
+                         signature/dataflags/files and is what --packer acts on.
+      * SerializedFile - a raw .assets, i.e. what sits *inside* such an archive,
+                         or a bare `bin/Data/<md5>` blob (2019+ builds split
+                         every object into its own file). Has no signature, no
+                         dataflags, no file table, and save() ignores --packer.
+    Reading bundle-only attributes off a SerializedFile used to raise
+    AttributeError before any work happened, which made the whole tool unusable
+    on `bin/Data/<md5>` inputs."""
     f = env.file
+    if isinstance(f, SerializedFile):
+        log("  container:        SerializedFile (raw .assets / bin/Data/<md5>; "
+            "not a UnityFS archive)")
+        log(f"  header version:   {getattr(f, 'version', '?')}")
+        log(f"  engine version:   {getattr(f, 'version_engine', '?')}")
+        log(f"  unity version:    {getattr(f, 'unity_version', '?')}")
+        tp = getattr(f, "target_platform", None)
+        log(f"  target platform:  {getattr(tp, 'name', tp) if tp is not None else '?'}")
+        log("  --packer has no effect here (there is no block compression to set)")
+        return
+
     log(f"  signature:        {f.signature}")
     log(f"  header version:   {f.version}")
     log(f"  engine version:   {f.version_engine}")
@@ -200,6 +224,48 @@ def astc_block_of(fmt):
         bx, by = name.rsplit("_", 1)[1].split("x")
         return int(bx), int(by)
     return None
+
+
+# Formats whose alpha channel the enum name does not spell out. Everything else
+# is decided by the tag rule below -- which alone covers ETC2_RGBA8, RGBA32,
+# RGBA4444, PVRTC_RGBA4, Alpha8, ARGB4444 and friends, and correctly leaves
+# ETC_RGB4 / ETC2_RGB / RGB24 / ASTC_RGB_* opaque.
+ALPHA_OVERRIDES = {
+    "DXT1": False, "DXT1_CRUNCHED": False,
+    "DXT5": True, "DXT5_CRUNCHED": True,
+    "BC1": False, "BC2": True, "BC3": True,
+    "BC4": False, "BC5": False, "BC6H": False, "BC7": True,
+}
+
+
+def format_has_alpha(fmt):
+    """True if this TextureFormat physically carries an alpha channel.
+
+    This drives ASTC_RGB_* vs ASTC_RGBA_* and getting it wrong is invisible
+    offline: a GPU samples a non-alpha internal format as alpha == 1.0 no matter
+    what bytes were uploaded, so picking RGB for a texture that had transparency
+    turns every cut-out into an opaque block -- while UnityPy's own decoder
+    still happily reports the alpha plane it wrote. Only a live run shows it.
+    ASTC's RGB and RGBA variants are the same 16-byte block, so choosing RGBA
+    whenever the source had alpha costs exactly nothing."""
+    name = TF(fmt).name
+    if name in ALPHA_OVERRIDES:
+        return ALPHA_OVERRIDES[name]
+    return any(tag in name for tag in ("RGBA", "ARGB", "BGRA", "Alpha"))
+
+
+def resolve_alpha_mode(fmt, mode):
+    """--alpha-mode -> per-texture bool."""
+    if mode == "rgba":
+        return True
+    if mode == "rgb":
+        return False
+    return format_has_alpha(fmt)
+
+
+def astc_target_format(block, want_alpha):
+    bx, by = block
+    return getattr(TF, f"ASTC_{'RGBA' if want_alpha else 'RGB'}_{bx}x{by}")
 
 
 def astc_bytes(w, h, block, mips):
@@ -317,9 +383,10 @@ def plan(env, args, font_keys, log):
             continue
 
         dst_bytes = astc_bytes(w, h, chosen_block, mips)
+        want_alpha = resolve_alpha_mode(t.m_TextureFormat, args.alpha_mode)
         est_before += src_bytes
         est_after += dst_bytes
-        candidates.append((obj, t, src_bytes, dst_bytes, chosen_block))
+        candidates.append((obj, t, src_bytes, dst_bytes, chosen_block, want_alpha))
     return candidates, all_texs, n_keep, est_before, est_after
 
 
@@ -344,9 +411,10 @@ def retier(candidates, dry_run, log, jobs=1):
         log(f"  [{n_done:>4}/{total}] ok={n_ok} fail={n_fail}  "
             f"rate={rate:.1f}/s  eta={eta:.0f}s", always=True)
 
-    def encode(t, img, block):
-        bx, by = block
-        target = getattr(TF, f"ASTC_RGB_{bx}x{by}")
+    def encode(t, img, block, want_alpha):
+        # target_format decides what the GPU thinks the alpha channel is; see
+        # format_has_alpha(). RGB and RGBA ASTC blocks are both 16 bytes.
+        target = astc_target_format(block, want_alpha)
         t.set_image(img, target_format=target, mipmap_count=t.m_MipCount or 1)
         return t
 
@@ -364,16 +432,17 @@ def retier(candidates, dry_run, log, jobs=1):
             progress()
 
     if dry_run:
-        for obj, t, src, dst, block in candidates:
+        for obj, t, src, dst, block, want_alpha in candidates:
             bx, by = block
             log(f"  would re-tier {t.m_Name!r} {t.m_Width}x{t.m_Height} "
-                f"{TF(t.m_TextureFormat).name} -> {bx}x{by} "
+                f"{TF(t.m_TextureFormat).name} -> "
+                f"{'ASTC_RGBA' if want_alpha else 'ASTC_RGB'}_{bx}x{by} "
                 f"({src / 1048576:.2f} -> {dst / 1048576:.2f} MB)")
         return 0, 0
 
     with cf.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         in_flight = []
-        for obj, t, src, dst, block in candidates:
+        for obj, t, src, dst, block, want_alpha in candidates:
             try:
                 img = t.image
             except Exception as e:
@@ -386,7 +455,7 @@ def retier(candidates, dry_run, log, jobs=1):
                 n_fail += 1
                 n_done += 1
                 continue
-            in_flight.append((pool.submit(encode, t, img, block), t))
+            in_flight.append((pool.submit(encode, t, img, block, want_alpha), t))
             # bound decoded-image memory: drain oldest once the window fills
             while len(in_flight) >= max(2, jobs * 2):
                 fut, ft = in_flight.pop(0)
@@ -573,6 +642,18 @@ def main():
                     help="also convert non-ASTC compressed sources (ETC2/DXT/"
                          "BCn/PVRTC) to the target ASTC block; requires the "
                          "device GPU to support ASTC (not GLES2-era Mali-400)")
+    ap.add_argument("--alpha-mode", default="auto",
+                    choices=("auto", "rgba", "rgb"),
+                    help="ASTC RGB vs RGBA target. 'auto' (default) picks RGBA "
+                         "whenever the SOURCE format physically carries alpha. "
+                         "That default matters: a GPU samples a non-alpha "
+                         "internal format as alpha == 1.0, so choosing RGB for a "
+                         "texture with transparency turns every cut-out into an "
+                         "opaque block -- and no offline check catches it, "
+                         "because the encoded bytes still contain the alpha "
+                         "plane. RGB and RGBA ASTC blocks are both 16 bytes, so "
+                         "RGBA costs nothing. Use 'rgba'/'rgb' only to force a "
+                         "choice for an experiment.")
     ap.add_argument("--compact", action="store_true",
                     help="rebuild internal .resS sections dropping the dead "
                          "bytes left by re-tiered textures (output shrinks "
@@ -600,6 +681,25 @@ def main():
     bundle_in = Path(args.bundle).resolve()
     if not bundle_in.is_file():
         sys.exit(f"input not found: {bundle_in}")
+
+    # A Unity split-serialized fragment (`sharedassetsN.assets.splitM`) is NOT a
+    # standalone file. split0 carries the full header, and split1..M are raw
+    # data continuations addressed by offsets stored IN THAT HEADER. UnityPy
+    # opens one fragment as if it stood alone, so saving rewrites split0's
+    # header and every offset while split1..M stay untouched -- all
+    # cross-fragment offsets dangle and the game cannot load the result. This
+    # fails LOUDLY in size terms (measured: 1 MiB in -> 4.68 MiB out) but it is
+    # not detectable by any offline format check, so refuse outright. Re-tiering
+    # a split file requires merging the fragments first, which this tool has no
+    # support for.
+    if re.search(r"\.split\d+$", bundle_in.name):
+        sys.exit(
+            f"refusing to re-tier a split fragment: {bundle_in.name}\n"
+            "  split0 holds the header; split1..N are offset-addressed data\n"
+            "  continuations. Re-saving one fragment alone corrupts every\n"
+            "  cross-fragment offset. Merge the fragments first, or leave this\n"
+            "  file alone.")
+
     bundle_out = (Path(args.out).resolve() if args.out
                   else Path.cwd() / "output" / bundle_in.name)
     if bundle_out == bundle_in:
@@ -618,7 +718,7 @@ def main():
     env = UnityPy.load(str(bundle_in))
     log(f"  loaded in {time.time() - t0:.1f}s")
 
-    log("\nBundle header:")
+    log("\nContainer header:")
     print_bundle_info(env, log)
 
     log("\nPass 1: collecting font textures")
@@ -638,6 +738,10 @@ def main():
     log(f"  {len(candidates)} to re-tier, {n_keep} kept  "
         f"(est. texture data {est_before / 1048576:.0f} -> "
         f"{est_after / 1048576:.0f} MB)")
+    if candidates:
+        n_rgba = sum(1 for c in candidates if c[5])
+        log(f"  alpha-mode={args.alpha_mode}: "
+            f"ASTC_RGBA_* for {n_rgba}, ASTC_RGB_* for {len(candidates) - n_rgba}")
     if not candidates:
         log("\nNothing to do.")
         return
@@ -653,14 +757,23 @@ def main():
         return
 
     if args.compact:
-        log("\nPass 4: compacting internal .resS stream files", always=True)
-        compact_stream_files(env, all_texs, log)
+        if isinstance(env.file, SerializedFile):
+            log("\nPass 4: --compact skipped - a SerializedFile holds its objects "
+                "inline and has no internal .resS entries to compact", always=True)
+        else:
+            log("\nPass 4: compacting internal .resS stream files", always=True)
+            compact_stream_files(env, all_texs, log)
 
-    log("\nSaving bundle ...")
+    log("\nSaving container ...")
     t0 = time.time()
     bundle_out.parent.mkdir(parents=True, exist_ok=True)
+    packer = (67, 3) if args.packer == "lz4hc" else args.packer
     with open(bundle_out, "wb") as f:
-        f.write(env.file.save(packer=(67, 3) if args.packer == "lz4hc" else args.packer))
+        if isinstance(env.file, SerializedFile):
+            # no block compression layer to configure here
+            f.write(env.file.save())
+        else:
+            f.write(env.file.save(packer=packer))
     log(f"  written in {time.time() - t0:.1f}s")
 
     in_mb = bundle_in.stat().st_size / 1024 / 1024
