@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
 //
-// Minimal OpenSL ES shim that bridges FMOD's audio output to SDL.
+// Minimal OpenSL ES shim that bridges the buffer-queue audio pipeline to SDL.
 //
-// STATUS: DEFAULT-DISABLED via BD_ENABLE_OPENSLES_SHIM (see CMakeLists.txt).
-// With this shim present, libunity's internal FMOD picks OpenSL ES as its
-// output, briefly probes us, decides no progress is being made, and gives
-// up *without* falling back. The functional audio path is AudioTrack via
-// org.fmod.FMODAudioDevice → projects/unityloader/javastubs/fakefmod.cpp →
-// SDL_QueueAudio. Letting dlsym(slCreateEngine) return nil (which happens
-// automatically when this file is compiled with the macro unset) is what
-// makes libunity skip OpenSL and reach the working AudioTrack path. Source
-// is retained under thunks/opensles/ for any future attempt at fixing the
-// OpenSL output.
+// STATUS: compiled in by default (BD_ENABLE_OPENSLES_SHIM, see CMakeLists.txt)
+// and handed to exactly one caller. dlsym_impl() in thunks/libc/misc.cpp gates
+// slCreateEngine / SL_IID_* on the caller's module:
+//
+//   * libAkSoundEngine (Wwise) gets them. Its Android sink is what feeds the
+//     hardware watchdog; without OpenSL, AK::SoundEngine::Init still reports
+//     success and every counter stays clean, but the watchdog fires seconds
+//     later and the engine drops to "Hardware audio subsystem stopped
+//     responding. Silent mode is enabled." -- a silent game that looks healthy.
+//   * everyone else -- notably libunity's built-in FMOD, which probes OpenSL the
+//     same way -- gets nil and keeps the path that already works: AudioTrack via
+//     org.fmod.FMODAudioDevice -> javastubs/fakefmod.cpp -> the shared mixer.
+//     Giving FMOD the shim makes it select OpenSL, find no progress, and give up
+//     *without* falling back, so that gate is what keeps the AudioTrack path
+//     alive.
+//
+// Static UND references need no gating: libAkSoundEngine.so carries
+// slCreateEngine + SL_IID_ENGINE/PLAY/BUFFERQUEUE/ANDROIDCONFIGURATION as UND
+// symbols, and relocations resolve with the requesting module's own identity, so
+// only that module can reach them.
 //
 // Pipeline (when active):
 //   slCreateEngine -> Realize -> GetInterface(IID_ENGINE)
@@ -21,9 +31,10 @@
 //   GetInterface(IID_PLAY) + GetInterface(IID_ANDROIDSIMPLEBUFFERQUEUE)
 //   RegisterCallback(playerBufQ, refillCb, ctx)
 //   SetPlayState(PLAYING)
-//   Enqueue(buf, size) — first buffer
-//   Pump thread watches SDL queue level, fires refillCb so FMOD enqueues
-//   more. Mimics OpenSL "buffer-done" via SDL queue depth.
+//   Enqueue(buf, size) — first buffer; every buffer lands in Wwise's ring of the
+//   shared mixer (platform/common/audio_bus.cpp) rather than SDL's FIFO
+//   Pump thread watches Wwise's own backlog, fires refillCb so Wwise enqueues
+//   more, and pumps the mixer. Mimics OpenSL "buffer-done" via backlog depth.
 
 #include "so_util.h"
 #include "thunk_gen.h"
@@ -45,7 +56,9 @@ DynLibFunction symtable_opensles[] = { { NULL, 0 } };
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
+#include "audio_bus.h"
 #include "platform.h"
 #include "logging.h"
 
@@ -252,10 +265,16 @@ struct PlayerState {
     const void* cfgVTbl;    // = &gCfgVTbl
 
     SDL_AudioDeviceID dev;
+    bool owns_device;     // true when we opened it ourselves; false when it is
+                          // FMOD's device, which must never be paused from here
+                          // (the mixer feeds FMOD through the same device)
     int sample_rate;
     int channels;
     int bits_per_sample;
+    int dev_freq;         // device's actual rate; differs from sample_rate when we
+    int dev_channels;     // had to reuse FMOD's device (see audio_bus.h)
     uint64_t samples_queued;  // monotonic; backs Play_GetPosition
+    std::vector<int16_t> resample_buf;
 
     slAndroidSimpleBufferQueueCallback cb;
     void* cb_ctx;
@@ -372,6 +391,25 @@ static SLresult Object_SetPriority(SLObjectItf, SLint32, SLboolean)     { return
 static SLresult Object_GetPriority(SLObjectItf, SLint32*, SLboolean*)   { return SL_RESULT_SUCCESS; }
 static SLresult Object_SetLossOfControlInterfaces(SLObjectItf, SLint16, SLInterfaceID*, SLboolean) { return SL_RESULT_SUCCESS; }
 
+// Diagnostics only: dispatch is by pointer identity, so an IID we do not handle
+// would otherwise be an unreadable raw address in the log.
+static const char* bd_iid_name(const SLInterfaceID iid)
+{
+#define BD_IID_PAIR(name) { "SL_IID_" #name, &kIID_##name },
+    static const struct { const char* n; const SLInterfaceID_* p; } kPairs[] = {
+        BD_OPENSLES_IIDS(BD_IID_PAIR)
+        { "SL_IID_3DDOPPLER",  &kIID_3DDOPPLER  },
+        { "SL_IID_3DLOCATION", &kIID_3DLOCATION },
+        { "SL_IID_3DSOURCE",   &kIID_3DSOURCE   },
+        { "SL_IID_3DGROUPING", &kIID_3DGROUPING },
+    };
+#undef BD_IID_PAIR
+    for (const auto& e : kPairs) {
+        if (e.p == iid) return e.n;
+    }
+    return "(unregistered IID)";
+}
+
 static SLresult Object_GetInterface(SLObjectItf self, const SLInterfaceID iid, void *pInterface)
 {
     if (!self || !pInterface || !iid) return SL_RESULT_PARAMETER_INVALID;
@@ -386,12 +424,22 @@ static SLresult Object_GetInterface(SLObjectItf self, const SLInterfaceID iid, v
         PlayerState* p = (PlayerState*)obj->impl;
         if (iid == SL_IID_PLAY)                       { *(const void**)pInterface = &p->playVTbl; return SL_RESULT_SUCCESS; }
         if (iid == SL_IID_ANDROIDSIMPLEBUFFERQUEUE)   { *(const void**)pInterface = &p->bufQVTbl; return SL_RESULT_SUCCESS; }
+        // Wwise asks for the queue interface as SL_IID_BUFFERQUEUE -- that is the
+        // name it links against (one of only four SL_IID_* UND symbols in
+        // libAkSoundEngine.so). On Android the two IIDs denote the same queue, so
+        // they must resolve to the same vtable. Missing this one is what made
+        // Wwise retry sink creation ~156 times in 60 s.
+        if (iid == SL_IID_BUFFERQUEUE)                { *(const void**)pInterface = &p->bufQVTbl; return SL_RESULT_SUCCESS; }
         if (iid == SL_IID_VOLUME)                     { *(const void**)pInterface = &p->volVTbl;  return SL_RESULT_SUCCESS; }
         if (iid == SL_IID_ANDROIDCONFIGURATION)       { *(const void**)pInterface = &p->cfgVTbl;  return SL_RESULT_SUCCESS; }
+    } else if (obj->type == 1) { // output mix
+        PlayerState* p = (PlayerState*)obj->impl;
+        if (p && iid == SL_IID_VOLUME)                { *(const void**)pInterface = &p->volVTbl;  return SL_RESULT_SUCCESS; }
     }
     // Null the output so callers that don't check the return value get a
     // clean NULL deref instead of dereferencing stack garbage.
     *(void**)pInterface = nullptr;
+    BD_LOG("OPENSLES", "Object_GetInterface(type=%u) %s (%p) unsupported -> NULL", obj->type, bd_iid_name(iid), (const void*)iid);
     return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
@@ -404,7 +452,11 @@ static void Object_Destroy(SLObjectItf self)
         p->stopping.store(true);
         p->playing.store(false);
         if (p->pump_started) pthread_join(p->pump_thread, nullptr);
-        if (p->dev) {
+        // Tear down only what we opened. A borrowed device belongs to FMOD and
+        // is still carrying the mixer; closing it here would silence the whole
+        // port the moment Wwise recycles a player.
+        bd_audio_bus_clear(BD_AUDIO_OWNER_WWISE);
+        if (p->dev && p->owns_device) {
             SDL_PauseAudioDevice(p->dev, 1);
             SDL_CloseAudioDevice(p->dev);
         }
@@ -424,6 +476,7 @@ static SLresult Play_SetPlayState(SLPlayItf self, SLuint32 state)
     if (!self) return SL_RESULT_PARAMETER_INVALID;
     PlayerState* p = (PlayerState*)((char*)self - offsetof(PlayerState, playVTbl));
     if (state == SL_PLAYSTATE_PLAYING) {
+        BD_LOG("OPENSLES", "SetPlayState(PLAYING) -> resuming SDL dev %u, pump=%d", (unsigned)p->dev, (int)p->pump_started);
         if (p->dev) SDL_PauseAudioDevice(p->dev, 0);
         if (!p->pump_started) {
             p->playing.store(true);
@@ -431,8 +484,12 @@ static SLresult Play_SetPlayState(SLPlayItf self, SLuint32 state)
                 p->pump_started = true;
         }
     } else {
+        // Only a device we opened ourselves may be paused. A borrowed one is
+        // FMOD's, and the mixer is running the movie soundtrack through it at
+        // the same time -- pausing it on Wwise's behalf would take the whole
+        // output down and make the score disappear along with it.
         p->playing.store(false);
-        if (p->dev) SDL_PauseAudioDevice(p->dev, 1);
+        if (p->dev && p->owns_device) SDL_PauseAudioDevice(p->dev, 1);
     }
     return SL_RESULT_SUCCESS;
 }
@@ -444,10 +501,13 @@ static SLresult Play_GetPosition(SLPlayItf self, SLuint32 *pMsec)
     if (!self || !pMsec) return SL_RESULT_PARAMETER_INVALID;
     PlayerState* p = (PlayerState*)((char*)self - offsetof(PlayerState, playVTbl));
     uint64_t total = p->samples_queued;
-    if (p->dev) {
-        uint32_t pending_bytes = SDL_GetQueuedAudioSize(p->dev);
-        uint64_t pending_samples = pending_bytes / (p->channels * (p->bits_per_sample / 8));
-        if (pending_samples < total) total -= pending_samples;
+    {
+        // Backlog still held in Wwise's own ring. SDL's queue level is no longer
+        // usable here: the mixer fills it from both engines.
+        uint64_t pending = bd_audio_bus_available(BD_AUDIO_OWNER_WWISE);
+        if (p->dev_freq > 0 && p->sample_rate > 0 && p->dev_freq != p->sample_rate)
+            pending = pending * (uint64_t)p->sample_rate / (uint64_t)p->dev_freq;
+        if (pending < total) total -= pending;
         else total = 0;
     }
     *pMsec = (SLuint32)(total * 1000ULL / (p->sample_rate ? p->sample_rate : 48000));
@@ -462,12 +522,78 @@ static SLresult Play_NoOp(void*, void*, void*, void*, void*, void*, void*, void*
 
 // ───────── BufferQueue methods ─────────
 
+// Linear-interpolation resampler for 16-bit interleaved PCM.
+//
+// Wwise asks for its own output rate, while the device we ended up reusing was
+// created by FMOD with whatever rate libunity reported (24000 Hz on Oddmar).
+// SDL plays whatever it is handed at the *device* rate, so pushing Wwise's
+// stream through unchanged would come out pitched and time-stretched. Linear
+// interpolation is enough to keep it intelligible.
+static void bd_resample_s16(const int16_t* in, size_t in_frames, int channels,
+                            int in_rate, int out_rate, std::vector<int16_t>& out)
+{
+    out.clear();
+    if (in_rate <= 0 || out_rate <= 0 || channels <= 0 || in_frames == 0) return;
+    size_t out_frames = (size_t)((double)in_frames * (double)out_rate / (double)in_rate);
+    if (out_frames == 0) return;
+    out.resize(out_frames * (size_t)channels);
+    const double step = (double)in_rate / (double)out_rate;
+    for (size_t i = 0; i < out_frames; i++) {
+        double pos = (double)i * step;
+        size_t i0 = (size_t)pos;
+        if (i0 >= in_frames) i0 = in_frames - 1;
+        size_t i1 = (i0 + 1 < in_frames) ? (i0 + 1) : i0;
+        double frac = pos - (double)i0;
+        for (int c = 0; c < channels; c++) {
+            double a = in[i0 * (size_t)channels + (size_t)c];
+            double b = in[i1 * (size_t)channels + (size_t)c];
+            out[i * (size_t)channels + (size_t)c] = (int16_t)(a + (b - a) * frac);
+        }
+    }
+}
+
 static SLresult BufQ_Enqueue(SLAndroidSimpleBufferQueueItf self, const void *pBuffer, SLuint32 size)
 {
     if (!self || !pBuffer || size == 0) return SL_RESULT_PARAMETER_INVALID;
     PlayerState* p = (PlayerState*)((char*)self - offsetof(PlayerState, bufQVTbl));
-    if (p->dev) SDL_QueueAudio(p->dev, pBuffer, size);
+
+    if (p->dev) {
+        const bool need_resample = (p->bits_per_sample == 16) &&
+                                   (p->dev_freq > 0) &&
+                                   (p->dev_freq != p->sample_rate) &&
+                                   (p->dev_channels == p->channels);
+        if (need_resample) {
+            size_t in_frames = (size_t)size / (size_t)(p->channels * 2);
+            bd_resample_s16((const int16_t*)pBuffer, in_frames, p->channels,
+                            p->sample_rate, p->dev_freq, p->resample_buf);
+            if (!p->resample_buf.empty())
+                bd_audio_bus_push(BD_AUDIO_OWNER_WWISE, p->resample_buf.data(),
+                                  p->resample_buf.size());
+        } else if (p->bits_per_sample == 16) {
+            // Hand it to the mixer instead of SDL's FIFO: Unity's FMOD is on the
+            // same device, and SDL_QueueAudio is a plain FIFO, so pushing both
+            // streams there directly interleaves them into noise.
+            bd_audio_bus_push(BD_AUDIO_OWNER_WWISE, (const int16_t*)pBuffer,
+                              (size_t)size / sizeof(int16_t));
+        } else {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true))
+                BD_LOG("OPENSLES", "unsupported PCM depth %d bit -> dropping buffers",
+                       p->bits_per_sample);
+        }
+    }
     p->samples_queued += (uint64_t)(size / (p->channels * (p->bits_per_sample / 8)));
+
+    // Rate-limited heartbeat: proves the refill callback is actually firing and
+    // audio is flowing, without drowning the log (one Enqueue per ~100 ms).
+    static std::atomic<uint64_t> enqueues{0};
+    uint64_t n = ++enqueues;
+    if (n <= 3 || (n % 250) == 0) {
+        size_t backlog = bd_audio_bus_available(BD_AUDIO_OWNER_WWISE);
+        BD_LOG("OPENSLES", "Enqueue #%lu: %u B (wwise backlog %zu smp%s)",
+               (unsigned long)n, (unsigned)size, backlog,
+               p->dev ? "" : ", NO SDL DEVICE");
+    }
     return SL_RESULT_SUCCESS;
 }
 
@@ -475,7 +601,8 @@ static SLresult BufQ_Clear(SLAndroidSimpleBufferQueueItf self)
 {
     if (!self) return SL_RESULT_PARAMETER_INVALID;
     PlayerState* p = (PlayerState*)((char*)self - offsetof(PlayerState, bufQVTbl));
-    if (p->dev) SDL_ClearQueuedAudio(p->dev);
+    bd_audio_bus_clear(BD_AUDIO_OWNER_WWISE);
+    (void)p;
     return SL_RESULT_SUCCESS;
 }
 
@@ -553,6 +680,9 @@ static SLresult Engine_CreateAudioPlayer(SLEngineItf, SLObjectItf *pPlayer,
     p->playing.store(false); p->stopping.store(false);
     p->pump_started = false;
     p->dev = 0;
+    p->owns_device = false;
+    p->dev_freq = 0;
+    p->dev_channels = 0;
 
     if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO))
         SDL_InitSubSystem(SDL_INIT_AUDIO);
@@ -565,8 +695,43 @@ static SLresult Engine_CreateAudioPlayer(SLEngineItf, SLObjectItf *pPlayer,
     want.callback = nullptr;
 
     p->dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (p->dev != 0) {
+        p->owns_device = true;
+        p->dev_freq = have.freq;
+        p->dev_channels = have.channels;
+    } else {
+        // SDL hands out exactly one output device per process, and asking by name
+        // does not help -- both fail with "Audio device already open" (verified
+        // against SDL 2.0.10). On a Wwise title the FMOD path in
+        // javastubs/fakefmod.cpp wires up the device first, so reuse its device
+        // and share it through the mixer in platform/common/audio_bus.h. Without
+        // this the refill callback below never fires, Wwise's watchdog expires,
+        // and the engine reports silent mode with every counter looking healthy.
+        int bus_freq = 0, bus_ch = 0, bus_bits = 0;
+        SDL_AudioDeviceID shared = bd_audio_bus_device(&bus_freq, &bus_ch, &bus_bits);
+        if (shared != 0) {
+            p->dev = shared;
+            p->dev_freq = bus_freq;
+            p->dev_channels = bus_ch;
+            bd_audio_bus_set_owner(BD_AUDIO_OWNER_WWISE);
+            BD_LOG("OPENSLES", "reusing shared SDL dev %u (%d Hz x %d ch x %d bit); Wwise wants %d Hz x %d ch x %d bit -> %s",
+                   (unsigned)shared, bus_freq, bus_ch, bus_bits,
+                   p->sample_rate, p->channels, p->bits_per_sample,
+                   (p->bits_per_sample == 16 && bus_freq > 0 && bus_freq != p->sample_rate) ? "resampling" : "direct");
+        }
+    }
+
+    if (p->dev != 0)
+        bd_audio_bus_set_capacity(BD_AUDIO_OWNER_WWISE,
+                                  (size_t)p->sample_rate *
+                                  (size_t)(p->channels > 0 ? p->channels : 2)); // ~1 s
+
     if (p->dev == 0)
-        BD_LOG("OPENSLES", "SDL_OpenAudioDevice failed: %s", SDL_GetError());
+        BD_LOG("OPENSLES", "no SDL device (own open failed: %s; bus empty) -> no hardware interrupts will reach Wwise", SDL_GetError());
+    else
+        BD_LOG("OPENSLES", "CreateAudioPlayer: %d Hz x %d ch x %d bit -> SDL dev %u (queued-depth target %u B)",
+               p->sample_rate, p->channels, p->bits_per_sample, (unsigned)p->dev,
+               (unsigned)(p->sample_rate * p->channels * (p->bits_per_sample / 8) / 10));
 
     OpenSLObj* obj = (OpenSLObj*)calloc(1, sizeof(OpenSLObj));
     obj->vtable = &gObjectVTbl;
@@ -585,12 +750,26 @@ static SLresult Engine_NoOp(void*, void*, void*, void*, void*, void*, void*, voi
 static void* player_pump_thread(void* arg)
 {
     PlayerState* p = (PlayerState*)arg;
-    const uint32_t target = (uint32_t)(p->sample_rate * p->channels * (p->bits_per_sample / 8) / 10); // ~100ms
+    // Wwise's refill callback hands over small blocks (256 B on Oddmar), so aim
+    // at its own backlog rather than at SDL's queue level: the SDL queue is now
+    // fed by the mixer in audio_bus.cpp, which drains it on the device's clock
+    // and therefore says nothing about where Wwise is in its stream.
+    const int rate = (p->dev_freq > 0) ? p->dev_freq : p->sample_rate;
+    const size_t low_water =
+        (size_t)rate * (size_t)(p->channels > 0 ? p->channels : 2) / 10; // ~100 ms
     while (!p->stopping.load()) {
         if (p->playing.load() && p->dev && p->cb) {
-            if (SDL_GetQueuedAudioSize(p->dev) < target) {
+            // Refill until the backlog is whole again. One callback can be as
+            // small as a couple of milliseconds of audio, so a single call per
+            // tick would let the mixer starve and crackle.
+            for (int i = 0; i < 64; i++) {
+                if (bd_audio_bus_available(BD_AUDIO_OWNER_WWISE) >= low_water)
+                    break;
                 p->cb((SLAndroidSimpleBufferQueueItf)&p->bufQVTbl, p->cb_ctx);
             }
+            // Also drive the mixer here, so a title whose FMOD device is never
+            // pumped (or is pumped by a stalled thread) still gets output.
+            bd_audio_bus_pump(p->dev);
         }
         SDL_Delay(5);
     }
@@ -604,6 +783,14 @@ extern "C" ABI_ATTR SLresult slCreateEngine_impl(
     SLuint32 /*numInterfaces*/, const SLInterfaceID* /*pInterfaceIds*/,
     const SLboolean* /*pInterfaceRequired*/)
 {
+    // A/B escape hatch: refuse to hand Wwise an engine, which puts it back on the
+    // pre-shim path (silent audio, but otherwise identical). Lets one binary
+    // answer "did enabling the shim change this?" without a rebuild.
+    if (getenv("BD_OPENSLES_OFF") != NULL) {
+        BD_LOG("OPENSLES", "slCreateEngine refused (BD_OPENSLES_OFF set) -> Wwise sees no OpenSL ES");
+        return SL_RESULT_FEATURE_UNSUPPORTED;
+    }
+
     if (!pEngine) return SL_RESULT_PARAMETER_INVALID;
     OpenSLObj* obj = (OpenSLObj*)calloc(1, sizeof(OpenSLObj));
     EngineState* e = (EngineState*)calloc(1, sizeof(EngineState));
@@ -612,6 +799,7 @@ extern "C" ABI_ATTR SLresult slCreateEngine_impl(
     obj->type = 0;
     obj->impl = e;
     *pEngine = (SLObjectItf)&obj->vtable;
+    BD_LOG("OPENSLES", "slCreateEngine -> engine %p", (void*)obj);
     return SL_RESULT_SUCCESS;
 }
 

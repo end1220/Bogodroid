@@ -137,6 +137,14 @@ void so_symbol_fix_ldmia(so_module *mod, const char *symbol);
 uint32_t so_hash(const uint8_t *name);
 so_module* so_get_head();
 
+// [BD] Which already-loaded module does this address belong to? Matches against
+// every mapped segment (text / data / patch / cave) of each module; returns NULL
+// when the address is outside all of them.
+//
+// Used to tell *who* is calling a thunk: dlsym_impl() needs the caller module to
+// decide whether a symbol may be handed out (see the OpenSL ES carve-out there).
+so_module* so_module_containing(uintptr_t addr);
+
 // Defined on a per-port basis on their specific main.c files
 extern DynLibFunction *so_static_patches[];    // Functions to be replaced in the binary
 extern DynLibFunction *so_dynamic_libraries[]; // Functions to be resolved

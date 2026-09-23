@@ -78,6 +78,38 @@ extern "C" ABI_ATTR void* dlopen_impl(const char* filename, int flags)
 
     const char* base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
+
+    // ── Libraries this host deliberately does not provide ──
+    //
+    // Everything unknown falls through to the 0xDEAD sentinel below, meaning
+    // "not a real module, but not a hard failure either" so that a later dlsym
+    // still reaches the global thunk tables. That is right for shims we do
+    // provide (OpenSL ES) and wrong for APIs we do not, because some callers
+    // only test whether the handle is non-NULL.
+    //
+    //   Wwise's Android sink factory (libAkSoundEngine.so+0x2278f8) decides
+    //   between AAudio and OpenSL ES by evaluating `obj[0x228+8] != NULL` --
+    //   the cached dlopen handle. Handed 0xDEAD it concludes AAudio is usable,
+    //   commits to that sink, and then every one of the ~27 AAudioStream*
+    //   lookups misses. The engine does *not* retry OpenSL: it drops to
+    //   "Hardware audio subsystem stopped responding. Silent mode is enabled."
+    //   Returning NULL is both truthful and the thing that triggers the
+    //   fallback to OpenSL ES, which thunks/opensles bridges onto SDL.
+    if (strcmp(base, "libaaudio.so") == 0) {
+        // A/B escape hatch: BD_AAUDIO_SENTINEL=1 restores the old 0xDEAD
+        // behaviour so the two can be compared without a rebuild.
+        if (getenv("BD_AAUDIO_SENTINEL") != NULL) {
+            BD_LOG("DLOPEN", "libaaudio.so -> sentinel (BD_AAUDIO_SENTINEL set; old behaviour)");
+        } else {
+            BD_LOG("DLOPEN", "libaaudio.so -> NULL (host has no AAudio; caller must fall back to OpenSL ES)");
+            return NULL;
+        }
+    }
+
+    // OpenSL ES, by contrast, is a shim we do serve -- hand back the sentinel and
+    // let dlsym_impl decide who is allowed to see the symbols.
+    if (strstr(base, "OpenSL") != NULL)
+        BD_LOG("DLOPEN", "%s -> sentinel (OpenSL ES is a host shim; dlsym decides who gets it)", base);
 #ifdef FAKE_EGL
     // Distinct from EGL display/context sentinels. Unity dlopens libEGL.so after
     // we already created the SDL GLES context; handing back 0xDEAD collided with
@@ -154,8 +186,73 @@ extern "C" ABI_ATTR int dladdr_impl(const void* addr, Dl_info* info)
     return 0;
 }
 
+// ───────── OpenSL ES: hand it to Wwise, and only to Wwise ─────────
+//
+// thunks/opensles/opensles.cpp bridges the OpenSL ES buffer-queue pipeline onto
+// SDL. Two very different consumers probe for it, and both do it the same way:
+// dlopen("libOpenSLES.so") followed by dlsym(slCreateEngine).
+//
+//   * libAkSoundEngine.so (Wwise) genuinely needs it. Its Android sink
+//     (AkSink_OpenSL) is what feeds the hardware watchdog; without OpenSL,
+//     AK::SoundEngine::Init still returns success and every counter looks
+//     healthy, but the watchdog fires a few seconds in and the engine drops to
+//     "Hardware audio subsystem stopped responding. Silent mode is enabled."
+//     Result: a silent game that appears to have working audio.
+//
+//   * libunity.so also probes OpenSL for its built-in FMOD, but this is a trap.
+//     When FMOD gets slCreateEngine it selects OpenSL as its output, fails to
+//     make progress against the shim, and gives up *without* falling back. That
+//     costs us the path that already works: the Unity audio device via
+//     org.fmod.FMODAudioDevice -> javastubs/fakefmod.cpp -> the shared mixer
+//     (platform/common/audio_bus.cpp).
+//     So a globally-visible shim would break working audio to fix silent audio.
+//
+// so_resolve_link() is a flat global lookup with no notion of the caller, so the
+// split has to be made here, on the caller's identity. Note the static UND
+// OpenSL references inside libAkSoundEngine.so need no handling: relocations are
+// resolved with the requesting module's own identity, so only the module that
+// carries them can reach them.
+static bool bd_is_opensl_symbol(const char* name)
+{
+    if (name == NULL) return false;
+    if (strcmp(name, "slCreateEngine") == 0) return true;
+    return strncmp(name, "SL_IID_", 7) == 0;
+}
+
+static bool bd_caller_is_ak_sound_engine(void* return_address)
+{
+    so_module* m = so_module_containing((uintptr_t)return_address);
+    if (m == NULL || m->path == NULL) return false;
+    const char* base = strrchr(m->path, '/');
+    base = base ? base + 1 : m->path;
+    return strncmp(base, "libAkSoundEngine", 16) == 0;
+}
+
 extern "C" ABI_ATTR void* dlsym_impl(void* handle, const char* name)
 {
+    // AAudio is probed the same silent way -- one dlopen plus a dlsym per entry
+    // point -- and nothing on this host implements it. Log a bounded sample so
+    // the attempt leaves *some* trace in a LOG-only build; otherwise the whole
+    // path is invisible (dlopen logs at BD_DEBUG, which is compiled out here)
+    // and AAudio looks indistinguishable from "never tried".
+    if (name != NULL && strncmp(name, "AAudio", 6) == 0) {
+        static std::atomic<uint32_t> aaudio_lookups{0};
+        uint32_t n = ++aaudio_lookups;
+        if (n <= 8 || (n % 100) == 0)
+            BD_LOG("DLSYM", "AAudio %s -> no host implementation (lookup #%u)", name, (unsigned)n);
+    }
+
+    if (bd_is_opensl_symbol(name)) {
+        // Read the caller's return address *here*, while we are still the callee.
+        void* ra = __builtin_return_address(0);
+        if (!bd_caller_is_ak_sound_engine(ra)) {
+            BD_LOG("DLSYM", "OpenSL %s withheld from %p (caller is not libAkSoundEngine; FMOD stays on AudioTrack->SDL)",
+                   name, ra);
+            return NULL;
+        }
+        BD_LOG("DLSYM", "OpenSL %s granted to libAkSoundEngine (caller %p)", name, ra);
+    }
+
     void* result = (void*)so_resolve_link((so_module*)handle, name);
     if (name && strncmp(name, "AMedia", 6) == 0)
         BD_LOG("DLSYM", "%s -> %p", name, result);

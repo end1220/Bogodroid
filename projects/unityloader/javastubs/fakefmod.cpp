@@ -1,6 +1,7 @@
 #include "fakefmod.h"
 #include "../globals.h" 
 #include "android.h"
+#include "audio_bus.h"
 #include "logging.h"
 #include "sys_volume.h"
 #include <SDL2/SDL.h>
@@ -124,28 +125,43 @@ void FMODAudioDevice::runAudio() {
     BD_LOG("AUDIO", "SDL Audio device opened. Rate: %d, Channels: %d, sysvol=%d%% (%s)",
            have.freq, have.channels, bd_sys_volume_percent(), bd_sys_volume_backend_name());
 
+    // Publish for anyone else who needs an output device -- SDL only ever hands
+    // out one, and Wwise's OpenSL sink (thunks/opensles/opensles.cpp) has to
+    // reuse this one. Both engines now feed the mixer in audio_bus.cpp rather
+    // than SDL's FIFO, so neither has to be muted for the other to be heard.
+    bd_audio_bus_publish(mAudioDevice, have.freq, have.channels, 16);
+    bd_audio_bus_set_owner(BD_AUDIO_OWNER_FMOD);
+    bd_audio_bus_set_capacity(BD_AUDIO_OWNER_FMOD,
+                              (size_t)have.freq * (size_t)have.channels); // ~1 s
+
     SDL_PauseAudioDevice(mAudioDevice, 0);
 
-    int poll_n = 0;
+    const size_t buffer_samples = mAudioBuffer.size() / sizeof(int16_t);
+    const size_t low_water = std::max<size_t>(buffer_samples / 2, 1);
+
     while (mRunning.load()) {
-        while (SDL_GetQueuedAudioSize(mAudioDevice) < 4096) {
+        // Unity's mixer only advances while fmodProcess() is called, and on
+        // Oddmar that mixer carries the movie soundtrack (the VideoPlayer runs
+        // with audioOutputMode = AudioSource, so the AAC track never reaches
+        // AudioTrack -- there is no AudioTrack implementation here at all).
+        // It therefore has to run for the whole session, not just while FMOD
+        // happens to own the device: skipping it is exactly what made the
+        // opening movie silent.
+        if (bd_audio_bus_available(BD_AUDIO_OWNER_FMOD) < low_water) {
             local_fmodProcess();
-            if ((++poll_n % 16) == 0)
-                bd_sys_volume_poll();
-            int pct = bd_sys_volume_percent();
-            if (pct < 100 && !mAudioBuffer.empty()) {
-                auto* s = reinterpret_cast<int16_t*>(mAudioBuffer.data());
-                size_t n = mAudioBuffer.size() / sizeof(int16_t);
-                for (size_t i = 0; i < n; i++)
-                    s[i] = static_cast<int16_t>(static_cast<int>(s[i]) * pct / 100);
-            }
-            SDL_QueueAudio(mAudioDevice, mAudioBuffer.data(), mAudioBuffer.size());
+            if (buffer_samples)
+                bd_audio_bus_push(BD_AUDIO_OWNER_FMOD,
+                                  reinterpret_cast<const int16_t*>(mAudioBuffer.data()),
+                                  buffer_samples);
         }
+        // Volume and mixing live in the bus so both engines are scaled once.
+        bd_audio_bus_pump(mAudioDevice);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     verbose("FMODAudioDevice", "Exiting audio loop.");
     
+    bd_audio_bus_unpublish(mAudioDevice);
     SDL_CloseAudioDevice(mAudioDevice);
     mAudioDevice = 0;
 }

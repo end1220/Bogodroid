@@ -51,6 +51,27 @@
 static so_module* head = NULL;
 so_module* so_get_head() { return head; }
 
+// [BD] Address -> owning module. Walks every mapped segment of every module
+// instead of just the text range: callers we care about (e.g. the switch that
+// invokes a PLT stub) can live in any of them, and the segment bases are the
+// only reliable bounds we keep after mmap.
+so_module* so_module_containing(uintptr_t addr)
+{
+    for (so_module* m = head; m; m = m->next) {
+        if (m->text_size && addr >= m->text_base && addr < m->text_base + m->text_size)
+            return m;
+        if (m->patch_size && addr >= m->patch_base && addr < m->patch_base + m->patch_size)
+            return m;
+        if (m->cave_size && addr >= m->cave_base && addr < m->cave_base + m->cave_size)
+            return m;
+        for (int i = 0; i < m->n_data; i++) {
+            if (m->data_size[i] && addr >= m->data_base[i] && addr < m->data_base[i] + m->data_size[i])
+                return m;
+        }
+    }
+    return NULL;
+}
+
 // rela_functor functions should return 1 to stop, or 0 to continue executing,
 // and will receive the module and relocation data from the relocation iterator
 using rela_functor = std::function<int(so_module* mod, const Elf_Rela* rel)>;

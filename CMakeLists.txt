@@ -126,6 +126,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     platform/common/input_backend.cpp
     platform/common/shader_cache.cpp
     platform/common/sys_volume.cpp
+    platform/common/audio_bus.cpp
 
     loader/so_util.cpp
     loader/so_util_arm64.cpp
@@ -269,12 +270,22 @@ if(BD_ENABLE_TRACE)
     endforeach()
 endif()
 
-# Default OFF: with the shim active FMOD probes OpenSL, sees no progress,
-# and gives up *without* falling back to AudioTrack — silent audio. Absent,
-# dlsym returns nil and FMOD routes to AudioTrack/fakefmod which works.
-option(BD_ENABLE_OPENSLES_SHIM "Compile OpenSL ES → SDL bridge (currently silent — see source)" OFF)
+# OpenSL ES → SDL bridge (thunks/opensles/opensles.cpp).
+#
+# ON by default, and it is safe to leave on: visibility is gated per-caller in
+# dlsym_impl (thunks/libc/misc.cpp). Only libAkSoundEngine/Wwise may see
+# slCreateEngine + SL_IID_*; every other caller -- notably libunity's built-in
+# FMOD, which probes OpenSL the same way -- gets nil and stays on the working
+# AudioTrack path (org.fmod.FMODAudioDevice -> fakefmod.cpp -> SDL_QueueAudio).
+#
+# That split is the whole point. Handing OpenSL to FMOD makes it select OpenSL,
+# find no progress, and give up *without* falling back => silent audio. Withhold
+# it from Wwise instead and Wwise still reports "Sound engine initialized
+# successfully" while its hardware watchdog drops it to "Silent mode is enabled"
+# seconds later. Both consumers must be served separately.
+option(BD_ENABLE_OPENSLES_SHIM "Compile OpenSL ES → SDL bridge (per-caller dispatch; Wwise only)" ON)
 if(BD_ENABLE_OPENSLES_SHIM)
-    message(STATUS "BD_ENABLE_OPENSLES_SHIM on -> linking OpenSL ES thunk")
+    message(STATUS "BD_ENABLE_OPENSLES_SHIM on -> linking OpenSL ES thunk (Wwise only)")
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_OPENSLES_SHIM)
 endif()
 

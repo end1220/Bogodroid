@@ -261,11 +261,21 @@ NO_THUNK("ANativeWindow_getWidth", (uintptr_t)&ANativeWindow_getWidth),
 NO_THUNK("ANativeWindow_getHeight", (uintptr_t)&ANativeWindow_getHeight),
 NO_THUNK("__assert2", (uintptr_t)&__assert2),
 NO_THUNK("AAssetManager_open",(uintptr_t)&AAssetManager_open),
+NO_THUNK("AAssetManager_openDir",(uintptr_t)&AAssetManager_openDir),
 NO_THUNK("AAssetManager_fromJava", (uintptr_t)&AAssetManager_fromJava),
 NO_THUNK("AAsset_getBuffer",(uintptr_t)&AAsset_getBuffer),
 NO_THUNK("AAsset_getLength",(uintptr_t)&AAsset_getLength),
 NO_THUNK("AAsset_close",(uintptr_t)&AAsset_close),
 NO_THUNK("AAsset_read", (uintptr_t)&AAsset_read),
+// Wwise (libAkSoundEngine.so) keeps AAssetDir_close / AAsset_seek / AAssetManager_openDir
+// in its undefined set and calls them while enumerating the shipped SoundBanks.
+// They were implemented in thunks/ndk/asset_manager.c all along but never listed
+// here, so the loader resolved them to plt0_stub and the first call aborted the
+// process: "Unknown symbol \"AAssetManager_openDir\"" -> SIGABRT.
+NO_THUNK("AAsset_seek", (uintptr_t)&AAsset_seek),
+NO_THUNK("AAssetDir_close", (uintptr_t)&AAssetDir_close),
+NO_THUNK("AAssetDir_getNextFileName", (uintptr_t)&AAssetDir_getNextFileName),
+NO_THUNK("AAssetDir_rewind", (uintptr_t)&AAssetDir_rewind),
 NO_THUNK("AMEDIAFORMAT_KEY_AAC_PROFILE", (uintptr_t)&AMEDIAFORMAT_KEY_AAC_PROFILE),
 NO_THUNK("AMEDIAFORMAT_KEY_BIT_RATE", (uintptr_t)&AMEDIAFORMAT_KEY_BIT_RATE),
 NO_THUNK("AMEDIAFORMAT_KEY_CHANNEL_COUNT", (uintptr_t)&AMEDIAFORMAT_KEY_CHANNEL_COUNT),

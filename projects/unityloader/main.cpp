@@ -93,8 +93,74 @@ extern "C" void bd_media_bench(const char* path, int frames);
 //                                      "offset=70369750858784" -> invalid data
 //   v4  a1 = path, a2 = NULL, a3 = length  (this one)
 static uintptr_t g_video_translate_orig = 0;
-static std::string g_bypass_video_path;
-static long long g_bypass_video_size = -1;
+
+// --- video URL -> local file mapping (BD_BYPASS_VIDEO_TRANSLATE) -----------
+// Where the original URL actually lives
+// -------------------------------------
+// It is in NO argument we receive. The consumer at libunity+0x53f020 takes it
+// as its 3rd argument and parks it in x23 (`53f044 mov x23, x2`), where it
+// survives untouched all the way to `53f150 bl 4c124c` -- verified by
+// disassembling 0x53f020..0x53f160, there is not a single write to x23 in
+// between:
+//
+//   53f020  str  x28, [sp, #-96]!
+//   53f044  mov  x23, x2           ; x23 = const char* url   <-- the URL
+//   53f07c  bl   strlen@plt
+//   53f08c  bl   <string::assign>  ; copies url into the sp+0x480 local ...
+//   53f13c  bl   <string::assign>  ; ... then CLEARS that local: (null, 0)
+//   53f150  bl   4c124c            ; <-- our detour
+//   ...downstream: open(<translated path>) or [vtbl+136](fd, offset, length)
+//
+// x23 is callee-saved, so at our entry it still holds the caller's value --
+// which is why reading it here is the only way to see the URL at all. The
+// earlier "read *(char**)a1" probe always printed '' because a1 is the output
+// slot and had just been cleared.
+static std::string g_video_root;        // <...>/gamedata
+static std::string g_video_fallback;    // splash, used only if mapping fails
+static std::map<std::string, std::string> g_video_url_cache;   // url -> path
+static std::map<std::string, long long> g_video_size_cache;    // path -> bytes
+
+static std::string bd_gamedata_root()
+{
+    char cwd[PATH_MAX] = {};
+    if (!getcwd(cwd, sizeof(cwd))) return std::string();
+    std::string root(cwd);
+    if (root.size() < 8 || root.compare(root.size() - 8, 8, "gamedata") != 0)
+        root += "/gamedata";
+    return root;
+}
+
+static long long bd_file_size(const std::string& p)
+{
+    std::ifstream in(p.c_str(), std::ios::binary | std::ios::ate);
+    if (!in) return -1;
+    std::streamoff n = in.tellg();
+    return n > 0 ? (long long)n : -1;
+}
+
+// jar:file://!/assets/Videos/W1L1start.m4v
+// jar:file:///data/app/<pkg>-x/base.apk!/assets/Videos/W1L1start.m4v
+// file:///sdcard/Android/data/<pkg>/files/assets/Videos/W1L1start.m4v
+//                     -> "Videos/W1L1start.m4v" in every case.
+// The scan is bounded because url_ptr comes out of a register rather than a
+// validated parameter.
+static bool bd_video_relpath_from_url(const char* url, std::string& out)
+{
+    if (!url) return false;
+    size_t n = 0;
+    while (n < 1024 && url[n]) ++n;
+    if (n == 0 || n >= 1024) return false;
+    std::string s(url, n);
+    size_t cut = s.find_first_of("?#");
+    if (cut != std::string::npos) s.resize(cut);
+    static const char kKey[] = "assets/";
+    size_t p = s.find(kKey);
+    if (p == std::string::npos) return false;
+    std::string rel = s.substr(p + sizeof(kKey) - 1);
+    if (rel.empty() || rel.find('/') == std::string::npos) return false;
+    out = rel;
+    return true;
+}
 
 // --- L2 diagnostics -------------------------------------------------------
 // libunity's load address; needed to resolve the absolute addresses of its
@@ -108,53 +174,82 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
                                         uintptr_t a3, uintptr_t a4, uintptr_t a5,
                                         uintptr_t a6, uintptr_t a7)
 {
-    // L2 probe anchor. This hook fires exactly once and always *after* Unity has
-    // already built the StreamingAssets URL, so it is a safe late point to ask
-    // the managed runtime for Application.*Path and to resolve the private
-    // function that produced the URL host.
+    // FIRST statement on purpose: the caller's x23 still holds the original
+    // URL. x23 is callee-saved, so it survived our prologue untouched -- but
+    // anything below (a call, a string op) may reuse it, so read it now.
+    uintptr_t url_ptr = 0;
+    __asm__ volatile("mov %0, x23" : "=r"(url_ptr));
+    const char* url = reinterpret_cast<const char*>(url_ptr);
+
+    if (g_video_root.empty()) {
+        g_video_root = bd_gamedata_root();
+        g_video_fallback = g_video_root +
+            "/assets/Videos/mobge_and_senri_splash_video.mp4";
+    }
+
+    // L2 probe anchor. This hook fires on every video request and always after
+    // Unity has built the StreamingAssets URL, so it stays a safe late point to
+    // ask the managed runtime for Application.*Path.
     if (std::getenv("BD_PROBE_APPPATHS")) {
-        if (a1) {
-            const char* in = *reinterpret_cast<const char**>(a1);
-            BD_LOG("L2", "video translate in-URL = '%s'",
-                   in ? in : "(<null / inline buffer>)");
-        }
+        BD_LOG("L2", "video translate in-URL = '%s'",
+               url ? url : "(<null / inline buffer>)");
         il2cpp_patch::probe_app_paths_pub("video");
         il2cpp_patch::probe_fs_source_pub("video", g_lunity_base);
     }
-    if (g_bypass_video_path.empty()) {
-        char cwd[PATH_MAX] = {};
-        if (getcwd(cwd, sizeof(cwd))) {
-            std::string root(cwd);
-            if (root.size() < 8 || root.compare(root.size() - 8, 8, "gamedata") != 0)
-                root += "/gamedata";
-            g_bypass_video_path = root +
-                "/assets/Videos/mobge_and_senri_splash_video.mp4";
+
+    // Resolve THIS url to ITS OWN file. Every request used to be pointed at the
+    // splash mp4, which is why the 18 level cutscenes were never really played
+    // -- and why re-encoding them could not have had any effect.
+    //
+    // The path we hand out must outlive this call (Unity reads it after we
+    // return), so it is stored in the map node / static fallback rather than in
+    // a local std::string. std::map nodes are stable across inserts, so the
+    // string's buffer is a safe target for the pointer.
+    std::string key = url ? std::string(url) : std::string();
+    if (key.size() > 512) key.resize(512);
+    auto ins = g_video_url_cache.emplace(key, std::string());
+    std::string& path = ins.first->second;
+    if (ins.second) {
+        std::string rel;
+        if (bd_video_relpath_from_url(url, rel)) {
+            std::string cand = g_video_root + "/assets/" + rel;
+            if (bd_file_size(cand) > 0) {
+                path = cand;
+            } else {
+                BD_LOG("MEDIA", "xlat: url='%s' -> NOT FOUND (%s)",
+                       url, cand.c_str());
+            }
+        } else {
+            BD_LOG("MEDIA", "xlat: url='%s' has no assets/ component -> splash",
+                   url ? url : "(null)");
         }
     }
-
-    // Only the size is needed: the media stays in the file. -1 == not probed
-    // yet, 0 == unreadable, >0 == byte length.
-    if (g_bypass_video_size < 0 && !g_bypass_video_path.empty()) {
-        std::ifstream in(g_bypass_video_path.c_str(),
-                         std::ios::binary | std::ios::ate);
-        g_bypass_video_size = 0;
-        if (in) {
-            std::streamoff n = in.tellg();
-            if (n > 0) g_bypass_video_size = (long long)n;
-        }
-        BD_LOG("MEDIA", "bypass: %s -> %lld bytes",
-               g_bypass_video_path.c_str(), (long long)g_bypass_video_size);
+    bool fell_back = false;
+    if (path.empty()) {
+        path = g_video_fallback;   // never regress into "cannot open"
+        fell_back = true;
     }
 
-    // a1 is the caller's string object; it was cleared just before this call and
-    // the translated local path has to go back into it. Its first 8 bytes are
-    // the data pointer (0 == "use the inline buffer at obj+8"). Pointing that at
-    // our static path is enough for every downstream reader.
+    // Only the size is needed: the media stays in the file. 0 == unreadable.
+    long long size = 0;
+    auto it = g_video_size_cache.find(path);
+    if (it == g_video_size_cache.end()) {
+        long long n = bd_file_size(path);
+        it = g_video_size_cache.emplace(path, n > 0 ? n : 0).first;
+    }
+    size = it->second;
+
+    BD_LOG("MEDIA", "xlat: %s '%s' -> %s (%lld bytes)",
+           fell_back ? "FALLBACK" : "ok", url ? url : "(null)",
+           path.c_str(), size);
+
+    // a1 is the caller's string object; it was cleared just before this call
+    // and the translated local path has to go back into it. Its first 8 bytes
+    // are the data pointer (0 == "use the inline buffer at obj+8"). Pointing
+    // that at our static path is enough for every downstream reader.
     if (a1) {
         const char** slot = reinterpret_cast<const char**>(a1);
-        BD_LOG("MEDIA", "bypass: a1 obj before = [%p %p %p %p]",
-               (void*)slot[0], (void*)slot[1], (void*)slot[2], (void*)slot[3]);
-        *slot = g_bypass_video_path.c_str();
+        *slot = path.c_str();
     }
 
     // a2: NULL -- the media lives in a file, so the extractor gets a plain file
@@ -162,10 +257,8 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
     // as a bogus file position.
     if (a2) *reinterpret_cast<void**>(a2) = nullptr;
     // a3: total length; also the bound the caller checks offset+size against.
-    if (a3) *reinterpret_cast<size_t*>(a3) = (size_t)g_bypass_video_size;
+    if (a3) *reinterpret_cast<size_t*>(a3) = (size_t)size;
 
-    BD_LOG("MEDIA", "bypass: out path='%s' base=(nil) len=%lld -> return 1",
-           g_bypass_video_path.c_str(), (long long)g_bypass_video_size);
     return 1;   // bool true - NOT a pointer
 }
 
@@ -1325,6 +1418,25 @@ int main(int argc, char* argv[])
         BOOT_LOG("No libAkSoundEngine found\n");
     } else {
         loaded_modules[module_count++] = &lak;
+
+        // Wwise caches the JavaVM in exactly one place, and JNI_OnLoad is it: the
+        // whole function is `adrp x2,<bss>; mov w1,#0x10006; str x0,[x2,#1088]; ret`
+        // -- store the vm, return JNI_VERSION_1_6. The Android linker would have run
+        // this at dlopen time; so_load() only runs .init_array, so the cached vm stays
+        // NULL, AK::SoundEngine::Init returns AK_Fail, and the engine never comes up
+        // ("AkInitializer.cs Awake() was not executed yet" every frame, PostEvent a
+        // no-op). libmain/libil2cpp/libunity are all called explicitly below; Wwise
+        // was the one module left out.
+        auto akJNI_OnLoad = (jint (*)(JavaVM* vm, void* reserved))(so_symbol(&lak, "JNI_OnLoad"));
+        if (akJNI_OnLoad) {
+            BD_TIME("before libAkSoundEngine JNI_OnLoad");
+            jint ak_ver = akJNI_OnLoad(&vm, nullptr);
+            BD_LOG("AUDIO", "libAkSoundEngine JNI_OnLoad(%p) -> 0x%x (JavaVM cached)",
+                   (void*)akJNI_OnLoad, (unsigned)ak_ver);
+            BD_TIME("after libAkSoundEngine JNI_OnLoad");
+        } else {
+            BD_LOG("AUDIO", "libAkSoundEngine: JNI_OnLoad symbol not found");
+        }
     }
     BD_TIME("after loading libAkSoundEngine.so");
 

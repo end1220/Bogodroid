@@ -8,6 +8,7 @@
 #include "jnibridge.h"
 #include "logging.h"
 #include "unity.h"
+#include <jnivm/field.h>
 
 static std::shared_ptr<jnivm::android::view::WindowManager>
 hook_getWindowManager(jnivm::ENV*, jnivm::Object*)
@@ -43,6 +44,43 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayerActivity>();
     vm->registerClass<jnivm::com::unity3d::player::UnityPlayer>();
+
+    // Wwise's Android bootstrap reads the static field `UnityPlayer.currentActivity`
+    // using the *declared Java* signature "Landroid/app/Activity;". jnivm's GetFieldID
+    // matches on name AND signature (libjnivm/src/jnivm/internal/field.cpp:23), but the
+    // descriptor registers the field under "Lcom/unity3d/player/UnityPlayerActivity;"
+    // because that is the C++ member's static type. The exact match misses, jnivm
+    // mints an empty auto-stub field, the getter answers null
+    //   [JNIVM]: Invoked Unknown Field Getter Class=`com/unity3d/player/UnityPlayer`
+    //            Field=`currentActivity` Signature=`Landroid/app/Activity;`
+    // and Wwise then dereferences that null Activity as its JavaVM:
+    //   AKDEBUG: Java VM not initialized or not provided in AkInitSettings.
+    //   CRASH: signal 11 (SIGSEGV), fault addr 0x0000000000000230
+    // UnityPlayerActivity derives from jnivm::android::app::Activity, so an alias
+    // field sharing the same backing handle satisfies both spellings at once.
+    if (auto up = vm->findClass("com/unity3d/player/UnityPlayer")) {
+        std::shared_ptr<jnivm::Field> decl;
+        for (auto& f : up->fields) {
+            if (f && f->name == "currentActivity") { decl = f; break; }
+        }
+        if (decl) {
+            BD_LOG("JBRIDGE", "UnityPlayer.currentActivity declared signature: %s",
+                   decl->type.c_str());
+            if (decl->type != "Landroid/app/Activity;") {
+                auto alias = std::make_shared<jnivm::Field>();
+                alias->name = decl->name;
+                alias->type = "Landroid/app/Activity;";
+                alias->_static = decl->_static;
+                alias->getnativehandle = decl->getnativehandle;
+                alias->setnativehandle = decl->setnativehandle;
+                up->fields.emplace_back(std::move(alias));
+                BD_LOG("JBRIDGE", "UnityPlayer.currentActivity: aliased as 'Landroid/app/Activity;'");
+            }
+        } else {
+            BD_LOG("JBRIDGE", "UnityPlayer.currentActivity: field not declared (alias skipped)");
+        }
+    }
+
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper>();
     vm->registerClass<jnivm::com::unity3d::player::ReflectionHelper::InvocationError>();
     vm->registerClass<jnivm::bitter::jnibridge::JNIBridge>();
