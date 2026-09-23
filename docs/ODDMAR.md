@@ -9,6 +9,19 @@
 > 挡画面的 `libunity+0x4c124c`（asset 路径翻译）契约已定稿并在 `BD_BYPASS_VIDEO_TRANSLATE` 里实现。
 > **📌 2026-09-22 深夜：L2 定论 —— hostless URL 的 host = `Application.dataPath`**（详见 §0.7）。
 > 剩余项见 §0.2 总表，**均不再挡画面**；本轮已收尾提交（版本行见 §13）。
+> **📦 资源瘦身（视频 / 贴图）：方案 + 执行记录见 〔[`ODDMAR-ASSET-SLIMMING.md`](ODDMAR-ASSET-SLIMMING.md)〕**
+> **2026-09-22 已执行**：视频 **232.5 → 132.8 MB**（854×480 / capped-CRF23 / `-refs 2 -bf 2`，解码像素 **−5.3×**）；
+> 贴图转 **ASTC RGBA 8×8**。`astc_retier.py` 两个缺陷已修（裸 `SerializedFile` 崩溃、硬编码 `ASTC_RGB_*` 丢 alpha）。
+> 同时修掉 hook 的「**所有视频都指向 splash**」：原始 URL 在 `libunity+0x53f020` 的 **x23** 里
+> （**不在** hook 的任何参数中 —— 旧注释说"在 a1"是错的，a1 调用前已被清空），现在按 URL 逐文件映射，见该文 §2.4。
+> ⚠️ 18 个关卡过场**只在进关卡时才会被请求**，标题界面验不到。
+> **🔊 2026-09-22 深夜（第二轮）：Wwise 初始化已修复** —— 三处独立根因：① `libAkSoundEngine.so` 的
+> `JNI_OnLoad` 从未被调用（JavaVM 因此没缓存）；② `UnityPlayer.currentActivity` 用
+> `Landroid/app/Activity;` 查不到（描述符注册的是更具体的派生类签名）；③ `AAssetManager_openDir` /
+> `AAssetDir_close` / `AAsset_seek` 实现了却没进 thunk 符号表。修完 `Sound engine initialized successfully.`，
+> 1493 条逐帧 `RenderAudio` warning 归零。**详见 §0.8**。
+> 仍剩：**没有声音** —— Wwise 的音频输出后端要 OpenSL ES，而 port 的 `opensles.cpp` 默认关闭（为了让
+> libunity 的 FMOD 绕开 OpenSL 走 SDL）。`LoadBank` / `.bnk` 引用均为 0 ⇒ 147 MB `SoundBanks/` 是否死重量**仍未验证**。
 
 > ## ⚠️ 目标约束（2026-09-21 用户确认，优先级最高）
 >
@@ -28,10 +41,10 @@
 
 ## 0. 当前状态与遗留问题
 
-> **最后一次更新：2026-09-22 深夜 · 收尾**（分支 `oddmar`；`ddmar` 是 09-22 目录/分支重排前的旧名）
-> —— **黑屏已解决（§0.6-H）**，**L2 的 hostless URL host 来源也已定位（§0.7）**：
-> host = `Application.dataPath`，被 Unity 的 `stat()` + `S_IFREG` 闸门挡在门外。
-> 文档与代码本轮已一并收尾提交（见 §13 版本行）。
+> **最后一次更新：2026-09-22 深夜 · 第三轮（Wwise 出声）**（分支 `oddmar`）
+> —— **黑屏已解决（§0.6-H）**、**L2 已定位（§0.7）**、**Wwise 初始化已修复（§0.8）**、
+> **Wwise 出声链路已打通（§0.9）**：标题界面既出画面也出 PCM。
+> ⚠️ **跑测必带 `BD_BYPASS_VIDEO_TRANSLATE=1`，否则必然黑屏——见 §1.4-0，这是 opt-in 行为不是故障。**
 
 ### 0.1 状态速览
 
@@ -44,7 +57,11 @@
 | `frame.*.gl.ppm` | 921 615 B（640×480 RGB）—— **不再是 192 B 纯色** |
 | X 根窗口截图 | 19 帧 192 B → 渐增 → **稳定 290–300 KB**（判据 ≥180 KB） |
 | **画面内容** | ✅ **Oddmar 标题界面**：logo + 森林/维京人/篝火场景 + "Press any button to continue" |
+| **音频（Wwise → OpenSL → SDL）** | ✅ **出声链路已打通**（§0.9）：`Sound engine initialized successfully.`、`Silent mode` **0 次**、`Enqueue` **218** 次且 `queued` 在 12.5–15.6 KB 间波动（设备在消费 = 真实 PCM 在流） |
+| **音频混音器（视频音轨 + 音量键）** | ✅ **2026-09-23 第四轮**（§0.12）：旧实现"两个引擎抢一个 SDL 设备、谁抢到谁独占"导致 **① 视频音轨无声音 ② 音量键对 Wwise 音乐零作用**。已改为 `audio_bus` 内**软件混音**（`push` + `pump`，统一施加系统增益）。容器两轮验收：两路 `pushed` 实时增长、`peak(1s)` 精确复现"视频=FMOD / 界面=Wwise"、`gain=50%` 随 sysfs 生效。**上机听感待验** |
 | `eglSwapBuffers` | 帧循环在跑（`Choreographer$FrameCallback.doFrame` ≈21 Hz） |
+| **内存（标题界面）** | ✅ 容器稳定态 **666 MB → 583 MB**（−12.5%，纯 env，§0.10）；**真机实测 341 MB**（运行 2.5 min 后 465 MB，§0.11-E）。**进关卡后的峰值仍未测** |
+| **真机（掌机）** | ✅ **2026-09-23 已部署并跑通**（§0.11）：`/mnt/mmc/Roms/ports/Oddmar/` @ `172.16.6.77`（H700 类 / Mali-G31 / 996 MB 无 swap）。判活九项全 0、`redirect external bind`=3、`Silent mode`=0、`Enqueue`=154、GLES 3.2 真驱动；画面 = **开场过场动画** |
 | 游戏是否 quit | 未走 Unity 正常 Quit（末尾 `Caught signal, fast-exiting via _exit` 是 `timeout -s INT` 到点） |
 | hostless URL（L2） | ✅ **已定位**：host = `Application.dataPath`（空串）。上游 `Context.getPackageCodePath()`（port 侧 `bd_compute_source_dir()`）返回的 `<cwd>/UnityDataAssetPack.apk` 不存在 ⇒ 被 Unity 的 `stat()` + `S_IFREG` 闸门挡下 ⇒ `dataPath=""`。**不挡画面**（§0.7） |
 
@@ -82,6 +99,7 @@
 | `streamingAssetsPath = 'jar:file://!/assets'`（host 为空） | host = **`Application.dataPath`**；候选来自 `Context.getPackageCodePath()`（port 侧 `bd_compute_source_dir()`）= `<cwd>/UnityDataAssetPack.apk`，**磁盘上不存在** ⇒ 被 Unity 的 `stat()` + `S_IFREG` 闸门拒 ⇒ `dataPath=""` | **不修**（不挡画面）。已定位 + 探针接线（`BD_PROBE_APPPATHS=1`）。根治需占位 APK + 改跨端口共享的 `clean_jar_path`，收益低 ⇒ 保持 opt-in hook | §0.7 |
 | 启动期 `NullReferenceException`，栈落在 `_AndroidJNIHelper.GetSignature` | ① `getConstructorID` 对未绑定 `<init>` 的类返回 **null**（Java 的 `new` 从不返回 null，托管侧拿它当参数就解引用 null）；② 自造类没补 `java/lang/Object` 父类 ⇒ `getClass()/toString()` 全 miss 返回 null | ① 合成惰性活对象（逃生开关 `BD_CTOR_FALLBACK_NULL=1`）；② 在 `InternalFindClass` **函数出口**补父类（**不能**写在 fallback 分支里） | §0.4、§4.4 |
 | NDK 视频符号链不完整（`AMediaExtractor_*` / `AMediaCodec_*` 等） | 端口侧缺少完整的 NDK 媒体符号 | 已补齐，机制可复用 | §0.5-A |
+| ✅ 已解决（2026-09-22 深夜）**无声**：`Hardware audio subsystem stopped responding. Silent mode is enabled.` | **sink 选路三连**：① port 的 `dlopen_impl` 对未注册库返回**非 NULL 哨兵** `0xDEAD` ⇒ Wwise 的 `return (dlopen("libaaudio.so") != NULL)` 误判 AAudio 可用 ⇒ 27 个 `AAudioStream_*` dlsym 全 miss；② 回退 OpenSL 后 shim 缺 `SL_IID_BUFFERQUEUE` ⇒ `Object_GetInterface` 重试 156 次；③ SDL 2.0.10 **单输出设备**已被 FMOD 占住 ⇒ `SDL_OpenAudioDevice` 必失败 | ① `libaaudio.so` 返回 `NULL`（逃逸 `BD_AAUDIO_SENTINEL=1`）；② shim 补 `SL_IID_BUFFERQUEUE`；③ 新增 `platform/common/audio_bus.*` **共享设备 + FMOD 让路 + 48k→24k 重采样**；④ `dlsym_impl` **按调用者模块分派**（只放行 `libAkSoundEngine`，逃逸 `BD_OPENSLES_OFF=1`） | §0.9 |
 
 ### 0.4 历史修复（早期推进，保留备查）
 
@@ -599,6 +617,23 @@ docker exec GlES_Dev bash -lc 'ls -la /game/Oddmar/gamedata/UnityDataAssetPack.a
 末尾是 `RunOnUiThread` + `AlertDialog$Builder` + `Invalid Reference, Unexpected Type`，
 且日志里能看到 `stat(<cwd>/gamedata/UnityDataAssetPack.apk/assets/bin/Data/globalgamemanagers)`。
 
+**0-6. 🔴 掌机「只有某一个游戏按键不对」先怀疑游戏，不要先怀疑 loader**（2026-09-23，§0.13）
+
+用**掌机真机探针**实测过：本机 `ANBERNIC-keys` 的物理键 → SDL 索引 → 注入 keycode **逐键正确**
+（A→304→b0→96、X→307→b3→99、Y→306→b2→100、D-pad 走 hat、音量键不抢键），
+且各游戏的 `[input]`/`[input.remap]`/内置映射表/`gamecontrollerdb.txt`/系统 SDL 库**全部相同**。
+⇒ 若某个游戏仍不对，**差异一定在该游戏自己的输入层**：查
+`gamedata/assets/bin/Data/globalgamemanagers`（`strings` 直读 InputManager 轴表）；
+**若一条 `joystick button` 都没有，就是该游戏不通过 InputManager 读手柄**，
+它自己的日志会打出 `Unity: controllerType: …`（Oddmar 打的是通用 `GameController`，没认出 Xbox）。
+
+**0-6b. 但同一句"问题依旧"还有第二种死法：游戏没活到能用按键**（2026-09-23，§0.13b）
+
+真的按键错、和**游戏已经被 loader 自己请出去**，在用户嘴里是同一句话。区分只看日志**末尾三行**：
+`[BD-EXIT]` + `[BD-PREFS] saved` + `unityloader exited (0)` 连排 ⇒ **不是崩溃，是 loader 的热键退出**。
+Oddmar 连续两轮真机都是被 `Start+Select` 热键在按下 Select 的同一帧杀掉（用户根本没测完）。
+⇒ **日志要倒着读完**，别只盯着中段的 `kc=` 行；中段再正确，末尾一出事用户看到的也是"还坏着"。
+
 ---
 
 ## 0.5 第二场（2026-09-21 晚）—— 已归档结论（压缩）
@@ -657,12 +692,777 @@ docker exec GlES_Dev bash -lc 'ls -la /game/Oddmar/gamedata/UnityDataAssetPack.a
 | 现象 | 事实核对 | 处理建议 |
 |------|---------|---------|
 | 云服务回调不触发 | `SocialImpl.authenticate` / `SaveGames.isConnected` 是 `[STUB-MISS]`、`entries=0`（类未注册）→ 回调查不到。**不是轮询卡死**（各仅 1 次 / 12 次调用） | 断网约束下只需"不阻塞"。若证实它卡住 `MGLOProgressData.construct` 链再修 |
-| Wwise 起不来 | `WwiseUnity: Failed to initialize the sound engine. Reason: AK_Fail`，且 `AkInitializer.cs Awake() was not executed yet` 每帧刷 | 不崩，优先级最低 |
+| Wwise 起不来 | **✅ 已结案（2026-09-22 深夜第二轮）**：`Sound engine initialized successfully.`；`AK_Fail` / `Awake() not executed` / `RenderAudio` 逐帧 warning 全部归零。三处根因（`JNI_OnLoad` / `currentActivity` 签名 / `AAsset*` 符号）见 **§0.8** | 已修（音效无声仍需 OpenSL，见 §0.8 末） |
 | `[JNIVM] Invalid Reference, Unexpected Type` | **✅ 已结案**：只在**哨兵配置**下出现，与 `JNIVM_ENABLE_RETURN_NON_ZERO` 无关（§0.6-F 第 2 条） |
 
 ---
 
+## 0.8 Wwise 初始化修复（2026-09-22 深夜第二轮）
+
+**修复前基线**（`/game/Oddmar/log-seq.pre-wwise.txt`，90 s 跑测）：
+
+| 计数 | 值 | 含义 |
+|---|---|---|
+| `AKDEBUG: … RenderAudio(): AkInitializer.cs Awake() was not executed yet.` | **1512** | 引擎在跑（否则这行打不出来），但初始化没完成 —— 而且是**逐帧**刷 |
+| `AKDEBUG: … PostEvent(…)` 同文 | 17 | 游戏持续 PostEvent，全部空转 |
+| `WwiseUnity: Failed to initialize the sound engine. Reason: AK_Fail` | 1 | 最终失败 |
+| `Wwise: Android initialization failure.` | 1 | Android 平台特化阶段就失败 |
+
+### 根因 ①：`libAkSoundEngine.so` 的 `JNI_OnLoad` 从未被调用
+
+`so_load()` 只跑 `.init_array`（`loader/so_util.cpp:691` 的 `so_initialize`）。而 Wwise 缓存 JavaVM 的
+**唯一**位置就是 `JNI_OnLoad` —— 整个函数只有 5 条指令：
+
+```asm
+000000000005c208 <JNI_OnLoad@@Base>:
+   5c208:  adrp  x2, 430000
+   5c20c:  mov   w1, #0x6
+   5c210:  movk  w1, #0x1, lsl #16   ; w1 = 0x10006 = JNI_VERSION_1_6
+   5c214:  str   x0, [x2, #1088]     ; ★ 把 JavaVM* 存到全局 0x430440 (.bss)
+   5c218:  mov   w0, w1
+   5c21c:  ret
+```
+
+真机上这一步由 Android linker 在 `dlopen` 时完成；port 用 `so_load` 手动 mmap，**不会**。
+⚠️ `libmain` / `libil2cpp` / `libunity` / `libBootstrap` 在 `main.cpp` 里**都已显式补调** `JNI_OnLoad`
+（`1471` / `1490` / `1498` / `1316` 行），**唯独 libAkSoundEngine 漏了**。
+
+**修法**（`projects/unityloader/main.cpp`，`load_so_from_file(&lak, …)` 成功后）：
+
+```cpp
+auto akJNI_OnLoad = (jint (*)(JavaVM* vm, void* reserved))(so_symbol(&lak, "JNI_OnLoad"));
+if (akJNI_OnLoad) akJNI_OnLoad(&vm, nullptr);
+```
+
+证据：`[BD-AUDIO] libAkSoundEngine JNI_OnLoad(0x3a0005c208) -> 0x10006 (JavaVM cached)`
+
+### 根因 ②：`UnityPlayer.currentActivity` 用 `Landroid/app/Activity;` 查不到
+
+修完 ① 后 Wwise 前进到「取 Activity」这步，立刻失败：
+
+```
+[BD-FINDCLASS]: FindClass(com/unity3d/player/UnityPlayer)
+[JNIVM]: Invoked Unknown Field Getter Class=`com/unity3d/player/UnityPlayer`
+         Field=`currentActivity` Signature=`Landroid/app/Activity;`
+[BD-ANDROID] AKDEBUG: Java VM not initialized or not provided in AkInitSettings.
+[BD-ANDROID] CRASH: signal 11 (SIGSEGV), fault addr 0x0000000000000230
+```
+
+- jnivm 的字段查找**要求 name 与签名同时相等** —— `libjnivm/src/jnivm/internal/field.cpp:23`
+- 而描述符按 C++ 静态成员类型注册成 `Lcom/unity3d/player/UnityPlayerActivity;`
+  （`projects/unityloader/javastubs/unity.cpp:1162`）
+- ⇒ 精确匹配 miss ⇒ jnivm 另造一个**空的 auto-stub 字段** ⇒ getter 返回 NULL
+  （`field.cpp:128-134` 的 `else` 分支就是这条 `Unknown Field Getter`）
+- ⇒ Wwise 把 NULL 当 JavaVM 解引用 ⇒ SEGV
+
+**修法**（`projects/unityloader/javastubs/binding.cpp`，`registerClass<UnityPlayer>()` 之后）：
+给 `currentActivity` 补一条**共享同一 `getnativehandle`/`setnativehandle`** 的别名条目，签名
+`Landroid/app/Activity;`。`UnityPlayerActivity` 本就派生自 `jnivm::android::app::Activity`
+（`unity.h:88`），所以两个签名指向同一块存储天然成立。
+
+> ⚠️ 不要把 `currentActivity` 的类型直接改成基类 —— 那会反过来让按
+> `Lcom/unity3d/player/UnityPlayerActivity;` 查询的调用者失配。**两个签名都要在。**
+
+### 根因 ③：`AAsset*` 三个符号有实现、没注册
+
+修完 ② 后 Wwise 开始枚举 SoundBank 目录，撞上未解析符号：
+
+```
+[BD-SYM] Unknown symbol encountered
+[0x3a00058994]                                  ← libAkSoundEngine 内部调用点
+../loader/so_util.cpp:370: Unknown symbol "AAssetManager_openDir" (0x3a00427430).
+[BD-ANDROID] CRASH: signal 6 (SIGABRT)
+```
+
+`thunks/ndk/asset_manager.c` 里 `AAssetManager_openDir` / `AAssetDir_close` / `AAsset_seek` **都有实现**，
+但 `thunks/ndk/ndk.cpp` 的 `symtable_ndk` 只注册了 6 个 AAsset 条目 ⇒ 未解析符号被填成 `plt0_stub`
+⇒ **首次调用直接 abort**（`so_util.cpp:354-372` 的 `reloc_err` 是硬失败，不是延迟降级）。
+已补齐（连 `AAssetDir_getNextFileName` / `AAssetDir_rewind` 一起）。
+
+> 🔎 **通用手法**：`libAkSoundEngine.so` 的 UND 符号 − port 的 `NO_THUNK` 注册集合，一次算全差集。
+> 本次 96 条差集里，只有这 3 个是「Android 特有且 host 没有」的（其余是 host libc / zlib 表）。
+
+### 验收（`build-oddmar` = Release + LOG=ON + TRACE/VERBOSE OFF，60 s 跑测，`seq-wwise4`）
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `Sound engine initialized successfully.` | 0 | **1** ✅ |
+| `AkInitializer.cs Awake()…` warning | 1512 | **0** |
+| `Failed to initialize` / `Android initialization failure` | 1 / 1 | **0 / 0** |
+| `RenderAudio` / `PostEvent` warning | 1493 / 17 | **0 / 0** |
+| `CRASH` / `Unknown symbol` | 有 | **0 / 0** |
+| 四件套（ZZZSENTINEL / Unable / couldnot / InvalidRef） | 0 | **0** |
+| 有画面帧 / 最大帧 | — | **29 / 36**，231 027 B |
+| RSS hwm | 807.8 MB | **663.4 MB** |
+
+⚠️ **一轮"卡在 EGL 窗口创建、日志仅 646 行"的启动竞态仍需注意** —— 同一二进制复跑即恢复，
+与 §0.6 记过的同类偶发一致，与本轮改动无关。
+
+### 仍未闭环
+
+1. ~~**没有声音**~~ ✅ **已于同日第三轮解决，见 §0.9**（当时列出的方向——"在 `dlsym_impl` 里按调用者模块分派"
+   和"开 shim 会同时改变 FMOD 选路"——**判断正确，就是按这个做的**）。
+2. **147 MB `SoundBanks/` 是否死重量仍未验证**：本轮 `LoadBank` 调用 0 次、`.bnk` 引用 0 次，
+   RSS 也没上升 ⇒ 标题界面阶段**不加载任何 SoundBank**（倾向"按需加载"）。要下结论需**进关卡**。
+
+---
+
+## 0.9 Wwise 出声修复（2026-09-22 深夜第三轮）
+
+> 上一轮（§0.8）修好了**初始化**，但逐帧仍打 `Hardware audio subsystem stopped responding.
+> Silent mode is enabled.`。本轮把输出链路打通 —— **标题界面已能出声**。
+> 验收轮：`SEQ_DIR=/game/Oddmar/seq-audio-verify`、`SECS=75`、**必须带 `BD_BYPASS_VIDEO_TRANSLATE=1`**（§1.4-0）。
+
+### A. 三处根因（全在 port 侧；反汇编 + 有界日志逐层剥开）
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| ④ | `Silent mode` 每轮必现 | `libAkSoundEngine.so` 的 sink 工厂（`0x1f39e8` → `0x2278f8`）按 `SDK_INT > 26` **优先选 AAudio**，探测函数 `0x226d4c` 的实体就是 `return (dlopen("libaaudio.so") != NULL)`；而 port 的 `dlopen_impl` 对**未注册库返回 `0xDEAD`（非 NULL）** ⇒ Wwise 误判 AAudio 可用 ⇒ 27 个 `AAudioStream_*` dlsym 全 miss ⇒ 静音 | `thunks/libc/misc.cpp`：`libaaudio.so` 返回 **`NULL`**（逼它回退 OpenSL）。逃逸开关 `BD_AAUDIO_SENTINEL=1` 恢复旧行为 |
+| ⑤ | 回退到 OpenSL 后仍静音；`Object_GetInterface` 重试 **156** 次 | shim 缺 **`SL_IID_BUFFERQUEUE`** —— Wwise 的 UND 符号之一，与 `SL_IID_ANDROIDSIMPLEBUFFERQUEUE` 指向同一 bufQ VTbl | `thunks/opensles/opensles.cpp`：补该分支（并加 `bd_iid_name()` 诊断）。实测 `unsupported` 156 → **0**，`slCreateEngine` 重试 156 → **8**→ 最终 **1** |
+| ⑥ | `SDL_OpenAudioDevice` 失败 `"Audio device already open"` | **SDL 2.0.10 单输出设备模型**：同一进程第二次开必失败，default / by-name 都一样（已写最小 C 程序实测，故放弃"按设备名重试"）。FMOD 已先占住设备 | 新增 **`platform/common/audio_bus.{h,cpp}`** 音频总线仲裁：`publish / unpublish / device / set_owner / owner`（`BdAudioOwner {NONE, FMOD, WWISE}`）。Wwise **复用 FMOD 的设备** 并 `set_owner(WWISE)`；FMOD 侧 `runAudio()` 发现 owner≠FMOD 就 `sleep_for(5ms); continue;` 让路。另加 **48k→24k 线性重采样**（`bd_resample_s16()`），因为复用到的设备是 24 kHz |
+
+### B. 两处配套改动
+
+1. `CMakeLists.txt`：`BD_ENABLE_OPENSLES_SHIM` 默认 **OFF → ON**（注释重写为 "per-caller dispatch; Wwise only"）。
+2. `thunks/libc/misc.cpp::dlsym_impl` 改为**按调用者模块分派** OpenSL 符号：
+   `bd_is_opensl_symbol()`（匹配 `slCreateEngine` 与 `SL_IID_*`）+ `bd_caller_is_ak_sound_engine(ra)`，
+   后者用新增的 `so_module_containing(__builtin_return_address(0))`（`loader/so_util.{h,cpp}`，遍历所有模块
+   的 text/patch/cave/data 段匹配地址）。**只放行 `libAkSoundEngine`** ⇒ libunity 自己的 FMOD 拿不到 OpenSL
+   符号 ⇒ 不会改选 OpenSL 而卡住。逃逸开关 `BD_OPENSLES_OFF=1`（拒绝 `slCreateEngine`，等价改动前）。
+
+### C. 验收（`build-oddmar` = Release + LOG=ON + TRACE/VERBOSE OFF，75 s，`seq-audio-verify`）
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `Sound engine initialized successfully.` | 0 | **1** ✅ |
+| `Silent mode is enabled.` | 6 / 60 s | **0** ✅ |
+| `slCreateEngine` 重试 | 156 | **1** ✅ |
+| `Object_GetInterface` unsupported | 156 | **0** ✅ |
+| `Enqueue #N` 入队 | 0 | **218** 次，`queued` 在 12 544–15 616 B 间波动 ⇒ **设备在消费 = 真实 PCM 在流动** ✅ |
+| 判活四件套（ZZZSENTINEL / Unable / couldnot / CRASH） | 0 | **0 / 0 / 0 / 0**（另有 SEGV / terminate / Unknown symbol / GL error / NRE 全 0） ✅ |
+| 画面最大帧 | — | **274 665 B = Oddmar 标题界面** ✅ |
+
+关键日志：
+
+```
+[BD-OPENSLES] slCreateEngine -> engine 0x4003440022a0
+[BD-OPENSLES] reusing shared SDL dev 2 (24000 Hz x 2 ch x 16 bit); Wwise wants 48000 Hz x 2 ch x 16 bit -> resampling
+[BD-OPENSLES] CreateAudioPlayer: 48000 Hz x 2 ch x 16 bit -> SDL dev 2 (queued-depth target 19200 B)
+[BD-OPENSLES] SetPlayState(PLAYING) -> resuming SDL dev 2, pump=0
+[BD-OPENSLES] Enqueue #1250: 256 B (queued 12544 B)
+```
+
+> ⚠️ `SDL_AUDIODRIVER=dummy` 下 `queued` 深度照样波动（SDL 的 dummy 后端也在"消费"），
+> 所以它只能证明**数据流成立**，不能证明掌机上真有声音。**上机听声是独立一步。**
+
+### D. 本轮排除的一个假故障 —— 值得记住
+
+15:32–15:43 连续 **11 轮全黑**，且**改动前遗留的旧二进制也全黑** ⇒ 一度判定"环境漂移、
+与改动无关"。**结论：不是环境，是我的跑测少了 `BD_BYPASS_VIDEO_TRANSLATE=1`。** 排除链：
+
+- 容器 GL/X 栈**健康** —— 最小 SDL2+GLES2 清屏探针在同一 Xvfb 上正常出帧
+  （`GL_RENDERER = llvmpipe (LLVM 12.0.0, 128 bits)`，根窗口截图 209 B / RGB=255,38,13）。
+- X 窗口**存在** —— `xwininfo -root -tree` 有 `0x20000e "Teapot"`（WM_CLASS `unityloader`）640×480+0+0，
+  但**根窗口与子窗口截图都是 192 B** ⇒ 不是合成问题，是没东西可合成。
+- `gamedata/` 自 **12:53** 起未变，而 13:03–14:39 多轮有画面 ⇒ 资源排除。
+- 真正的变量是一个**没 export 的环境变量**。日志判据一句话：
+  **有画面轮 `[BD-VIDEO] redirect external bind` = 3，黑屏轮 = 0。**
+- ⚠️ 这个假故障**无法用 A/B 区分**：换 env 逃逸开关、换显示号、起全新 Xvfb、换旧二进制 —— 全都黑，
+  因为变量不在被测对象里。**"换了没变化"不等于"改动无关"。**
+
+---
+
+## 0.10 内存占用分解与优化（2026-09-23）
+
+> 起因：「还没进游戏 RSS 就很大」。**结论：标题界面稳定态 666 MB → 调优后 583 MB（−12.5%）**，
+> 且**画面与音频判据无回归**。调优全部是启动脚本里的 4 个环境变量，零代码改动、零性能退化。
+
+### A. 数字（容器内，`build-oddmar`，75 s / 标题界面）
+
+| 时刻 | RSS | 说明 |
+|---|---|---|
+| so 加载完成（4 个 `.so` mmap） | 57 MB | il2cpp 36 + unity 15 + AkSound 4 + main 0 |
+| 第一次 `eglSwapBuffers` 采样 | ~450 MB | 引擎 + 元数据 + 首屏资源已进 |
+| 稳定态（标题界面，未进关卡） | **665–666 MB** | 重复两次只差 1 MB |
+| 全轮 `hwm` | 689 MB | |
+
+> ⚠️ 别拿单次 689 MB 当基线 —— 它在多轮里只出现一次，稳定值是 666 MB（重复性 ±1 MB）。
+
+### B. 按 RSS 分解（`smaps` 聚合，稳定态 689 MB 那次）
+
+| 归属 | RSS | 备注 |
+|---|---|---|
+| **匿名合计** | **590 MB** | 占 85.6% |
+| ├ `rwxp` 匿名段 | **128 MB** | **宿主地址 → qemu 的翻译缓存（见 §C）** |
+| ├ 其余匿名（heap / arena / 大块分配） | ~430 MB | 调优的主要作用对象 |
+| └ `libil2cpp` / `libunity` 映射区 | 12 / 15 MB | |
+| `libLLVM-12.so` | 36.5 MB | llvmpipe 的 JIT（见 §C） |
+| `swrast_dri.so` | 10.9 MB | llvmpipe 光栅化器（见 §C） |
+| `global-metadata.dat` | 7.0 MB | il2cpp 元数据，很瘦 |
+| `unityloader` 自身 | 5.7 MB | |
+| libavcodec / avformat | 4.5 / 2.2 MB | |
+| `qemu-aarch64` | 3.0 MB | |
+| librsvg / libicuuc / … | 1.9 MB / 0.5 MB | **别被"文件尺寸"骗，见 §F** |
+
+### C. ⚠️ 容器 ≠ 掌机：先扣掉模拟开销
+
+`uname -m` 报 `aarch64`，但 `/proc/cpuinfo` 是 **AMD Ryzen 9 7950X**，宿主 `docker info` 是 **x86_64**；
+`ps` 里每条命令都长成 `/usr/bin/qemu-aarch64 <binary>`。**容器是在 x86_64 上做 aarch64 用户态模拟**，
+`nproc=32`。于是有两块**掌机上根本不存在**的开销：
+
+| 项 | 大小 | 为什么掌机没有 |
+|---|---|---|
+| qemu 翻译缓存（`rwxp`，宿主地址 `0x7xx…`） | **128 MB** | 原生 aarch64 不需要翻译 |
+| llvmpipe（`libLLVM` 36.5 + `swrast` 10.9） | **~47 MB** | 掌机用 Mali 等真 GPU 驱动 |
+
+⇒ **掌机等效 ≈ 583 − 128 − 47 ≈ 408 MB**（粗估，真机还需实测；掌机侧另有 Mali 驱动占用）。
+
+`nproc=32` 还有两个副作用，都会让容器数字**虚高**：
+① llvmpipe 默认按核数起 worker 线程（实测进程共 **106** 线程）；
+② glibc 的 arena 上限是 `8 × 核数`，32 核 ⇒ 起步 256 个，实测看到 **101 个 64 MB 对齐的匿名段**。
+
+### D. 实测 A/B（同一二进制，仅 env 不同，容器内 32 s 稳定态）
+
+| 组 | RSS | Private_Dirty | 线程 |
+|---|---|---|---|
+| 基线（两次） | 665 / 666 | 588 / 589 | 106 |
+| `MALLOC_ARENA_MAX=2` | 663 | — | 106 |
+| `MALLOC_ARENA_MAX=1`（三次） | 616 / 622 / 616 | 538 / 544 | 106 |
+| `LP_NUM_THREADS=2` | 635 | 558 | **50** |
+| `MALLOC_ARENA_MAX=1` + `LP_NUM_THREADS=2` | 600 | 522 | 50 |
+| `MALLOC_ARENA_MAX=2` + trim 阈值 | 609 | 532 | 106 |
+| `MALLOC_ARENA_MAX=1` + trim 阈值 | 605 | 521 | 106 |
+| **`ARENA_MAX=2` + trim 阈值 + `LP_NUM_THREADS=2`（采用）** | **583** | **506** | **50** |
+
+解读（**注意别走错路**）：
+
+- **"arena 段数多" ≠ "RSS 高"**。基线有 101 个 64 MB 对齐的匿名段，但把 `ARENA_MAX` 压到 2 之后
+  段数掉到 1，RSS 只降 **3 MB** —— 那些段绝大多数是**空的虚拟预留**。看段数会被带偏，只看 RSS/Private_Dirty。
+- 真正干活的是 **`MALLOC_TRIM_THRESHOLD_` / `MALLOC_MMAP_THRESHOLD_`**（让 glibc 把释放的堆及时
+  还回内核）。单独配 `ARENA_MAX=2` 就能降 57 MB。
+- `LP_NUM_THREADS=2` 降 31 MB 并砍掉 56 个线程，但**只在软渲染下有意义**；真 GPU 上不加载 llvmpipe。
+- **性能无退化**：各组 32 s 日志吞吐持平（基线 78 237/78 267 行 vs 优化组 78 775/78 390 行）。
+
+### E. 落地
+
+启动脚本 `LinuxArmPorts/oddmar_port_stage/Oddmar.sh`（**新建**，此前的 port 一直缺）里 export：
+
+```bash
+export BD_BYPASS_VIDEO_TRANSLATE=1          # 画面，必须（见 §1.4-0）
+export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=65536
+export MALLOC_MMAP_THRESHOLD_=131072
+export LP_NUM_THREADS=2
+```
+
+⚠️ **这些变量只能由 shell 设**。glibc 在 `main()` 之前就把 `MALLOC_*` 读走了，
+loader 内部再 `setenv()` 已经太晚 ⇒ 不要指望在 `main.cpp` 里设。
+
+### F. 更正一条容易被"文件尺寸"带偏的判断
+
+`libavcodec.so` 会链 `librsvg` → `libicuuc`/`libicudata`、以及 `libcodec2`，**文件尺寸**分别是
+9 MB / 27 MB / 14 MB，看起来像"裁掉能省 50 MB"。但**按 RSS 看只加载了几 MB**
+（`librsvg` 1.9 MB、`libicuuc` 0.5 MB、`libicudata` 甚至没进 top25；这些是共享库，页在多进程间共享）。
+⇒ **判断可裁剪性要看 RSS，不能看 `du`/映射虚拟大小。** 这一项收益远小于 §D 的调优。
+
+### G. 未闭环
+
+1. **掌机上复测** —— §C 的 408 MB 是容器推算值，真机（Mali + 原生 aarch64 + 实际 RAM）必须实测。
+2. **进关卡后的峰值** —— 本节的 583 MB 只是**标题界面**。SoundBanks（147 MB）与关卡资源尚未加载，
+   进关卡才是内存峰值所在（同时这也是 §0.9 遗留的 SoundBank 死重验证）。
+3. `BD-ANY-MISS` 每轮 **60 168** 次 → 大量 JNI 方法在反复走 fallback。**不直接吃内存**，
+   但属于性能侧的独立议题，值得另立任务。
+
+## 0.11 掌机部署与真机首跑验收（2026-09-23）
+
+> **结论：Oddmar 已在真机跑通 —— 画面 + 音频 + 判活九项全过，RSS 341 MB（容器 666 MB）。**
+> 部署根：`/mnt/mmc/Roms/ports/Oddmar/`，掌机 `172.16.6.77`（agent `dropbeak 0.6.4`）。
+
+### A. 真机环境（实测，不是推断）
+
+| 项 | 值 |
+|---|---|
+| SoC / GPU | Allwinner H700 类：**4×Cortex-A53 + Mali-G31**（`Mali-G31 1 cores r0p0 0x7093`） |
+| 内存 | **996 MB 总 / 无 swap**（`/proc/swaps` 为空）—— 内存是这台的硬约束 |
+| framebuffer | `/dev/fb0`：`virtual_size=640,960` `bpp=32` `stride=2560` ⇒ **640×960×4 = 2 457 600 B**（两帧 640×480 堆叠） |
+| SDL | **2.0.12**（`libSDL2-2.0.so.0.12.0`）。与容器 2.0.10 同为**单输出设备**模型 ⇒ §0.9 的 `audio_bus` 仲裁在真机同样生效 |
+| 挂载 | `/mnt/mmc` = **vfat**（`/dev/mmcblk0p8`，fmask/dmask=0000）。**没有 noexec**，`unityloader` 可直接执行 |
+| 前端 | `/mnt/vendor/bin/dmenu.bin` 持有 framebuffer（`/mnt/vendor/ctrl/dmenu_ln` 拉起） |
+| 依赖 | `ldd unityloader` **0 个 not found**（SDL2 / FFmpeg 全家桶 / libasound 全在 `/usr/lib`） |
+
+### B. 部署（Dropbeak）
+
+推的是**瘦身版**（§ODDMAR-ASSET-SLIMMING §9 那套，即容器 `/game/Oddmar` 的当前状态），
+不是 staging 目录里的原始版 —— ⚠️ `oddmar_port_stage/Oddmar/gamedata` **至今仍是瘦身前的原始版**
+（Videos 232 MB），别直接拿它推。
+
+| 目标 | 方式 |
+|---|---|
+| `unityloader`、`unity.toml`、`Oddmar.sh`、`relaunch.sh`、`fbcap.sh` | `dropbeak-cli push … --force --chunk --chunk-size 16m --verify` |
+| `gamedata/`、`conf/`（大目录） | **`tar -cf - <dir> \| curl -X POST .../api/v1/files/extract?path=…`** —— agent 是**流式** `tar.NewReader(r.Body)`，**不支持 gzip**，必须裸 tar；`ReadTimeout` 15 min |
+
+- 容器**能直达掌机**（HTTP 200，RTT 80 ms）⇒ 省掉"容器 → 本机 → 掌机"中转。
+- 实测速率 **≈3.8 MB/s**：`gamedata` 495 769 600 B / 131 s，`conf` 161 228 800 B / 19 s。
+- **核对用 `tar -cf - <dir> | wc -c` 复算**（掌机侧）—— 与 curl 的 `size_upload` 逐字节相等，
+  比逐个 `du`/sha 快且不受 vfat 簇开销干扰（vfat 下 `du` 会虚高十几 MB）。
+- 抽样 sha256（`libunity` / `libil2cpp` / `libAkSoundEngine` / `globalgamemanagers` / `bundle1`）
+  与容器**逐位一致**。文件数 `gamedata` 1167 / `conf` 183。
+
+### C. 启动方式（真机 framebuffer 约束）
+
+`dmenu.bin` 持有 framebuffer，**不能用 `dropbeak exec` 直接当前台跑**（抢显示必输）。
+前端给的交接契约是：把命令行写进 `/tmp/.next`，再 `killall -s SIGUSR1 dmenu.bin`，
+前端会拆掉自己的 UI 并 `exec` 那一行。⇒ 新增 `Oddmar/relaunch.sh`（照 FiveHearts 的做）：
+
+```sh
+sh /mnt/mmc/Roms/ports/Oddmar/relaunch.sh          # 远程拉起
+BD_ENV="…" sh /mnt/mmc/Roms/ports/Oddmar/relaunch.sh   # 透传 loader env
+```
+
+正常玩还是**从掌机 Ports 菜单点 `Oddmar`**；`relaunch.sh` 是给远程验收用的。
+
+### D. 首跑验收（`SECS` ≈ 75 s，开场过场阶段）
+
+| 判据 | 容器 | **真机** |
+|---|---|---|
+| `ZZZSENTINEL` / `Unable to read header` / `could not translate` | 0 | **0** |
+| `CRASH` / `SEGV` / `terminate` / `Unknown symbol` / `GL error` / `Invalid Reference` / `NRE` | 0 | **0** |
+| `[BD-VIDEO] redirect external bind`（画面判据） | 3 | **3** ✅ |
+| `Silent mode` | 0 | **0** ✅ |
+| `Enqueue` | 217 | **154** ✅ |
+| `reusing shared SDL dev` | 1 | **1** ✅ |
+| `Sound engine initialized successfully.` | 1 | **1** ✅ |
+| GL | llvmpipe（软渲染） | **OpenGL ES 3.2（Mali 真驱动）** |
+| warning / retry / missing / not found / failed | 0 | **全部 0** |
+| 画面 | 标题界面 | **开场过场动画**（`W1L1start`，维京人抓鸡） |
+| 日志 | 187 921 行 | 80 646 行（`LOG=ON` 构建） |
+
+画面取自 `/dev/fb0` 直读（`Oddmar/fbcap.sh`，`dd bs=2457600 count=1`），
+本机用 PIL 按 `640×960 BGRA` 解，取结构更丰富的那半帧。
+
+音频链路在真机上与设计**逐字一致**：
+
+```
+[BD-OPENSLES] slCreateEngine -> engine 0x…
+[BD-OPENSLES] reusing shared SDL dev 2 (24000 Hz x 2 ch x 16 bit); Wwise wants 48000 Hz … -> resampling
+[BD-OPENSLES] CreateAudioPlayer: 48000 Hz x 2 ch x 16 bit -> SDL dev 2 (queued-depth target 19200 B)
+[BD-OPENSLES] Enqueue #250: 256 B (queued 15616 B)
+```
+
+### E. 🔴 真机内存 —— 修正 §C 的推算
+
+| 时刻 | RSS |
+|---|---|
+| 启动后 ~50 s（过场动画中） | **341 MB**（`hwm` 343 MB） |
+| 运行 2.5 min（过场推进中） | **465 MB**（`top RES` 476 MB，`%MEM` 47.8%） |
+| 系统 `MemAvailable` | 533 → 412 MB（全程无 swap 抖动） |
+
+- §C 推算的「掌机等效 ≈ 408 MB」**方向对、偏保守**：真机开启阶段只要 **341 MB**，
+  比容器 666 MB 少 **325 MB**。差额 = qemu 翻译缓存 128 MB + llvmpipe 47 MB（真机都不存在）
+  ＋ glibc / SDL / Mali 驱动差异。
+- **§0.10 那 4 个 env 在真机照常生效**；`LP_NUM_THREADS=2` 因无 llvmpipe 而无副作用，
+  留着不影响真机。
+- 顺带解决 §0.10-G1（真机复测）。**但 §0.10-G2 更尖锐了：这台只有 996 MB 且无 swap。**
+
+### F. 真机才暴露的发现
+
+1. `[BD-VIDEO] source 854x480 is larger than drawable 640x480 — convert+upload pay full cost;
+   shrink the MP4 offline before the APK build`
+   ⇒ 瘦身时选的 **854×480 对 640×480 面板仍是超采样**。`_slim/video_640x360/`（100 MB）
+   是更贴合的档位：再省 32 MB，且解码/上传量落回面板内。**待做（未做）**。
+2. CPU 侧有余量：`unityloader` 占 ~1.2 个核（4 核机），系统 `idle 67%`。
+
+### G. 未闭环
+
+1. **进关卡后的内存峰值** + SoundBank（147 MB）死重验证（§0.10-G2 的真机版）。
+2. 视频降档到 `640×360`（§F1）。
+3. **手柄映射未在真机实测**：`gamecontrollerdb.txt` 已放（从 FiveHearts 复制），
+   toml 里 `[input] controller_name="Microsoft X-Box 360 pad"` —— 需实机按键验证。
+4. `staging/Oddmar/gamedata` 与掌机不一致（原始版 vs 瘦身版），要么同步要么明确标注。
+
+## 0.12 音频混音器：视频音轨无声 + 音量键无效（2026-09-23 第四轮）
+
+真机反馈两条：**① 开场视频没声音；② 视频结束后界面音乐极大，掌机音量降到 0 也不变。**
+结论：两条是同一个架构缺陷的两个侧面 —— **两个音频引擎在抢一个 SDL 设备，旧实现让"抢到的人独占、没抢到的完全静音"**。
+
+### A. 真机取证（只读，未启动游戏）
+
+```
+/sys/class/power_supply/axp2202-battery/openbor_volume   = 0        ← 音量键写的就是它
+amixer -c 0 sget 'digital volume'                        = 63/63    ← 100%
+amixer -c 0 sget 'lineout volume'                        = 31/31    ← 100%
+```
+
+`grep -rl openbor_volume /mnt/vendor/bin` ⇒ `dmenu.bin` / `portsCtrl.dge` / 各模拟器 `.dge` 全部引用。
+⇒ **这台固件的音量模型是"硬件保持满量程，由应用自己读 `openbor_volume` 缩放 PCM"。**
+硬件 DA 一点没动，所以任何"不读这个值"的程序都是满音量、且按键无效。
+
+### B. 日志取证（`log-seqs`，容器两轮）
+
+时间线对得上用户描述的两个阶段（`peak(1s)` = 每秒窗口峰值，本轮新增的指标）：
+
+| 日志行 | 阶段 | FMOD (Unity) | Wwise |
+|---|---|---|---|
+| 36282 起 | **视频播放中**（`game-start.m4v`） | peak 0 → **20103** | peak **0** |
+| 175591 起 | **视频结束、界面** | peak **0** | peak 0 → **17107** |
+
+⇒ **视频音轨走 Unity 音频（FMOD 路径），界面音乐走 Wwise**，两者分别独立。
+
+### C. 根因（两条，都在 port 侧）
+
+**① 旧 `fakefmod.cpp` 在 Wwise 抢占 writer slot 后 `continue`，永不调用 `fmodProcess()`：**
+
+```cpp
+if (bd_audio_bus_owner() != BD_AUDIO_OWNER_FMOD) { sleep(5ms); continue; }   // ← 旧代码
+```
+
+`fmodProcess()` 是 **Unity 整个音频系统唯一的 pull 接口**，停掉它 = Unity 混音器完全静止。
+而 `VideoPlayer.audioOutputMode` 默认是 `AudioSource`，视频 AAC 走的就是这条 → **视频没声音**。
+
+排除法佐证（不是猜测）：
+- 日志中 `android/media/AudioTrack` 出现 **0 次**（Direct 模式需要它）；
+- `libunity.so` 的 dynsym 里无任何 `AudioTrack` / `libmedia` / `AAudio` UND 符号。
+  ⇒ 视频音频只能是 `AudioSource` 路径，即 FMOD。
+
+**② `opensles.cpp::BufQ_Enqueue` 把 Wwise 的 PCM 直推 `SDL_QueueAudio`，零增益处理。**
+`bd_sys_volume_percent()` 只在 `fakefmod` 里被读（而那条路已被①静默）⇒
+**Wwise 音乐永远满量程，音量键对它零作用** ⇒ "降到 0 也不变"。
+
+### D. 修法：把两个引擎混到一条出口
+
+`SDL_QueueAudio` 是纯 FIFO，两路直接推会交错成噪声 —— 这正是旧实现选择"独占"的原因。
+正确做法是**在 FIFO 之前做软件混音**，于是 `platform/common/audio_bus.{h,cpp}` 从"设备登记处"
+升级成真正的 mixer：
+
+```
+bd_audio_bus_push(FMOD|WWISE, pcm, samples)   producer：各自写自己的 ring
+bd_audio_bus_pump(dev)                        consumer：逐样本相加 + 饱和 + 统一增益 + 补 SDL 队列
+```
+
+- **队列水位 75 ms**（`BD_AUDIO_QUEUE_MS` 可调）。之前 FMOD 用 4096 B（42 ms）、Wwise 用 100 ms。
+- **增益在 pump 里统一施加**（混合之后），所以两个引擎一起受控；`bd_sys_volume_poll()` 每 ~80 ms
+  读一次后端（sysfs 文件），不必每次回调都读盘。
+- **ring 有上限**（各 1 s），生产者落后时丢最老的，不会把播放越推越晚。
+- **pump 由两个生产者线程各自调用**（FMOD 5 ms 循环 / Wwise refill 线程 5 ms），锁保护，谁先到谁干活。
+- Wwise 的 refill 判据从"SDL 队列深度"改为"自己 ring 的深度"（SDL 队列已归 mixer 管），
+  且**单次 tick 内循环 refill**（一次回调只有 2.7 ms 音频，否则喂不饱）。
+
+### E. 顺带修掉的两处设备生命周期 bug（本轮没触发，属防御）
+
+借来的设备是 **FMOD 的**，混音器正在用它播视频音轨：
+
+- `Play_SetPlayState` 的非 PLAYING 分支原本无条件 `SDL_PauseAudioDevice(p->dev, 1)`；
+- `Object_Destroy` 原本无条件 `SDL_PauseAudioDevice + SDL_CloseAudioDevice`。
+
+Wwise 一旦回收 player，就会**把整个出口关掉**（连视频音轨一起）。现以 `PlayerState::owns_device`
+区分"自己开的"与"借来的"，只有自己开的才允许暂停/关闭。
+
+### F. 验收（容器，`build-oddmar-verbose`，两轮）
+
+判活：`redirect external bind`=**3**、`Silent mode`=**0**、`Sound engine initialized`=**1**、
+`GL error`=0、无 CRASH/SEGV、截图有内容（mean 16801–37869，非 192 B 黑帧）。
+
+```
+[BD-AUDIO] bus published dev=2 24000 Hz x 2 ch x 16 bit, queue target 7200 B
+[BD-AUDIO] mix 6772800 B | fmod pushed=3377152 smp peak(1s)=0     (q=2048 drop=0) |
+                          wwise pushed=3246336 smp peak(1s)=11759 (q=4848 drop=0) |
+                          queued=7200/7200 B | gain=50%
+```
+
+- 两路 `pushed` 都以实时速率增长，且 `g_mixed_bytes` 持续增长 ⇒ **设备确实在消费**（队列没卡住）。
+- `peak(1s)` 精确复现用户描述的两阶段（§B 表）。
+- 第二轮用 `BD_SYS_VOLUME_BACKEND=sysfs BD_SYS_VOLUME_PATH=/tmp/fakevol`（值 5/10）验证音量链路：
+  `volume backend=sysfs ... percent=50 keys=1` → **`gain=50%`** ⇒ 缩放确实落到输出上。✓
+
+⏳ **上机待验**：容器无声卡，只能证明"数据流 + 增益"成立；**真实听感必须上机**（§0.9 同款限制）。
+
+### G. 上机（已完成部分）
+
+新版 `build-oddmar`（Release + LOG=ON + strip，6 656 000 B，sha256 `f9d3f484…498f7c`）已推到
+`/mnt/mmc/Roms/ports/Oddmar/unityloader`，旧版备份为 `unityloader.bak-preaudio`。
+**未在掌机上启动游戏**（按用户要求）。
+
+### H. 未闭环 / 风险
+
+1. **两路同时有强信号时会削波**：mixer 只在相加后做饱和（不做 headroom 缩放）。
+   实测两路各自 peak 约 20 k / 17 k，若同一时刻都在响就会触到 32767。上机听感确认。
+2. **音量键在游戏运行时能否被 SDL 收到**：`input_backend.cpp` 拦的是
+   `SDL_SCANCODE_VOLUMEUP/DOWN`。掌机音量键若不经过 Linux input 层（PMIC 直连），
+   port 与 dmenu 都收不到 ⇒ 需要另找路径。**上机必须实测。**
+   ⚠️ **上机前先把 `openbor_volume` 设成非 0**：修复后 mixer 会认真对待这个值，
+   原先留着的 `0` 会让游戏**完全静音**（已从 0 改为 **7**，/10）。
+   若音量键确实收不到，会卡在"改不了音量"的死角 —— 这是本轮最大的上机风险。
+3. 视频音画同步的实测延迟 = FMOD ring(≤21 ms) + SDL 队列(75 ms) ≈ **~96 ms**，
+   可用 `BD_AUDIO_QUEUE_MS` 收窄。上机看是否可察觉。
+
+## 0.13 按键：ABXY 变"返回" / 关卡弹"是否退出游戏？" —— 为什么只有 Oddmar（2026-09-23 第五、六轮）
+
+> **2026-09-23 晚间更正**：本节 §0.13～§0.13c 保留排查史，但最终判定以 **§0.13d** 为准。
+> 最新真机证据显示：`guide/select/back = NONE` 与 `Start+Select` 长按都不是 ABXY 弹退出框的根因；
+> 用户要求已撤销这两项改动。ABXY 弹框由 Oddmar/InControl 的 Android 手柄按钮路径触发，
+> 当前有效方向是将 Oddmar 的面键映射到该游戏 legacy InputManager 的键盘语义（A/Y=SPACE，B/X=K）。
+
+**用户现象**：同一台掌机上 Samurai2 / Maximus2 按键完全正确；Oddmar 里按 guide / select / back 会弹
+"是否退出游戏？"，严重时感觉"所有键都变成返回"。
+
+### 结论先行：**Oddmar 的 InControl 把 `KeyCode.Escape`、`KeyCode.ButtonMode`、`KeyCode.ButtonSelect` 都当 `Back` 用**
+
+**这不是映射错位。** loader 送出的 keycode 逐键正确；问题在于 Oddmar 用的是 **InControl** 输入框架，
+其 Android/Xbox profile 把 `InputControlType.Back` 绑在 `KeyCode.Escape` 上，并且一旦进入关卡加载/关卡地图，
+`KeyCode.ButtonMode`(110) 和 `KeyCode.ButtonSelect`(109) 也会被它当成返回语义 ⇒ 弹「是否退出游戏？」。
+标题界面和未进关卡时这些键不一定触发，所以用户最初把问题描述成"ABXY 也变成返回"。
+展开见下方「为什么只有 Oddmar」。
+
+用**掌机真机探针**（`/mnt/mmc/padtest/sdlpad`，同源系统 SDL，同时读 `/dev/input/event1` 原始 `EV_KEY`
+与 SDL `CONTROLLERBUTTONDOWN`）拿到"内核码 ↔ SDL 索引"配对，用户实按三键全部精确对上：
+
+| 用户按的键 | 内核 keycode | SDL 游戏手柄索引 | 内置表项 | 注入的 Android keycode |
+|---|---|---|---|---|
+| **A** | 304 | **0** | `a:b0` | **96** `KEYCODE_BUTTON_A` ✓ |
+| **Y** | 306 | **2** | `y:b2` | **100** `KEYCODE_BUTTON_Y` ✓ |
+| **X** | 307 | **3** | `x:b3` | **99** `KEYCODE_BUTTON_X` ✓ |
+| B（按排除法） | 305 | 1 | `b:b1` | 97 `KEYCODE_BUTTON_B` ✓ |
+| D-pad | `ABS_HAT0X/Y` | 11–14 | `dp*:h0.x` | 19–22 ✓ |
+| 音量键 | 114/115 | — | 未映射 | **不产生任何手柄事件**（不抢键）✓ |
+
+⇒ SDL 2.0.12 的**两段式编号**（先 `BTN_JOYSTICK(288)..KEY_MAX`，再 `0..287`）得到实测确认
+（304→0、306→2、307→3 严格递增）；**内置映射表就是为这台设备写的，逐键正确**。
+`[BD-INPUT-REMAP] a -> BUTTON_A (keycode 96)` … 也逐条正确。
+
+### 排掉的四个"看似变量"
+
+| 对照项 | 证据 | 判据 |
+|---|---|---|
+| `[input]` + `[input.remap]` | 各游戏 `unity.toml` 逐字比 | **逐字相同**（含 `guide = "ESCAPE"`） |
+| loader 内置手柄映射表 | 7 个 loader 的 `ANBERNIC-keys,…` 串 | **逐字节相同** |
+| SDL 库 | `ldd` | 都链**系统** `libSDL2-2.0.so.0` ⇒ 同一份 SDL、同一套编号 |
+| 映射库文件 | `md5sum gamecontrollerdb.txt` | Oddmar 与 FiveHearts **相同** |
+| loader 源码版本 | `git log -S` | `load_input_remap`(2026-05-15 `70f683b`)、A↔B swap(`1515885`/093c569, 2025-09) **都早于包内 loader** ⇒ 输入代码同源 |
+
+⚠️ `strings` 在包内 loader 里查不到 `INPUT-REMAP` **不代表功能缺失** —— 包内是 `LOG=OFF`，
+`BD_LOG` 的格式串会被编掉；只有非日志串（如 `dpad_synthesize_hat`）才靠得住。
+
+### 为什么只有 Oddmar：它跑的是 **InControl**
+
+**证据 1 —— 真机日志里 ESCAPE 只来自 guide**（同一轮 20.4 万行日志，`[BD-PAD]` 共 83 行）：
+
+| 物理键 | SDL 逻辑按钮 | 注入的 Android keycode |
+|---|---|---|
+| A / B / X / Y | 0 / 1 / 2 / 3 | **96 / 97 / 99 / 100**（`BUTTON_A/B/X/Y`）✓ |
+| Start / Select | 6 / 4 | **108 / 109**（`BUTTON_START/SELECT`）✓ |
+| D-pad | 11–14 | **19–22**（`DPAD_*`）✓ |
+| **guide** | **5** | **111 `ESCAPE`** ← 全日志唯一来源（两次按下，各 2 行） |
+
+**证据 2 —— 时间对齐**：`188437 [BD-PAD] DOWN btn=5 (guide) kc=111` 之后 20 行就是
+`188457 [BD-ANDROID] Unity: Fade Out`；同一次运行里游戏侧 `Fade Out` **只出现这一次**，
+而 A/B/X/Y/Start/Select 那些按键前后**没有任何游戏侧反应** ⇒ 弹窗只由 guide 唤起。
+⇒ 用户"ABXY/Start/Select 都会弹"的印象，来自"弹窗起来之后，任意键都在和弹窗交互"
+（他随后按 B 关掉弹窗并跳跃，正是这个模式）。
+
+**证据 3 —— 游戏侧是什么在吃 ESC**：`strings global-metadata.dat` 里有整片
+`InControl.UnityDeviceProfiles.*`（含 **`Xbox360AndroidUnityProfile`**），游戏日志第 1159 行自报
+`InControl (version 1.8.6 build 9370)`。InControl 的 Android/Xbox profile 把
+**`InputControlType.Back` → `KeyCode.Escape`**（Android 上系统 Back 键就是 ESC）。
+ESC 进 Unity 就是 `KeyCode.Escape` = 框架级 Back ⇒ 弹「是否退出游戏？」。
+
+**这也解释了"同一台掌机、同配置，别的游戏不犯病"**：Samurai2 / Maximus2 直接用 Unity 原生 Input，
+Escape 对它们只是普通键、没绑行为；**只有 Oddmar 套了 InControl 这层抽象，把 Escape 当 Back**。
+
+顺带核对了 Unity 的 Android→JoystickButton 映射：A(96)→JB0、B(97)→JB1、X(99)→JB2、Y(100)→JB3、
+L1(102)→JB4、R1(103)→JB5、START(108)→JB10、SELECT(109)→JB11 —— 与 InControl Android profile 的
+（Action1..4 = Button0..3、LeftBumper=4、RightBumper=5、Start=Button10、Select=Button11）**逐项吻合**，
+所以"Start 反应是对的"这一观察也自洽。
+
+### 修法（第六轮落）
+
+| 改动 | 位置 |
+|---|---|
+| `guide = "ESCAPE"` → **`guide = "NONE"`**；新增 `select = "NONE"`、`back = "NONE"` | 掌机 `unity.toml` + staging `Oddmar/unity.toml` + `_sync/container-unity.toml` |
+| `parse_keycode_name()` 补全 `BUTTON_C` / `BUTTON_Z` / `BUTTON_MODE` / `BUTTON_L3` / `BUTTON_R3`；<br>构造 `KeyEvent` 前对 `KEYCODE_UNKNOWN` 显式跳过，让 `NONE`/`DISABLE` 真能不注入事件 | `platform/common/input_backend.cpp` |
+| `Start+Select` 退出热键改成长按 **1200 ms** | `platform/common/input_backend.cpp` + `unity.toml` |
+
+⚠️ 掌机 Select 键在 SDL 游戏手柄表里的名字是 `back`（`ANBERNIC-keys,…,back:b6,…`），所以只改 `select` 不够，
+必须同时改 `back`，否则 `back` 会回落到 `toAndroidKeycode()` 的 default → `KEYCODE_BUTTON_SELECT(109)`，照样弹窗。
+⚠️ 即使把 `guide` 从 `ESCAPE` 改成 `BUTTON_MODE`(110)，在关卡加载/关卡地图仍会被 InControl 吃掉并弹同一个框；
+**只有 `NONE` 才能彻底屏蔽**。
+⚠️ **`guide = "ESCAPE"` 是全部 port 的模板默认值**（5 个 stage + 4 个 configs 都有）。本轮只改 Oddmar：
+别的游戏实测无害；但**任何套了输入抽象层（InControl / Rewired）或自己把 Escape / ButtonMode / ButtonSelect 当返回的游戏都必须改**。
+
+**验收判据**：日志出现 `[BD-INPUT-REMAP] guide -> NONE (keycode 0)`、`select -> NONE (keycode 0)`、`back -> NONE (keycode 0)`；
+按 guide/select/back 时**没有**对应的 `[BD-PAD] DOWN`；标题界面与关卡地图不再弹"是否退出游戏？"。
+
+**容器回归（2026-09-23，按键回放，75 s / 80 s）**：活满、`BD-EXIT`=0、`redirect external bind`=3、
+`Silent mode`=0、`GL error`=0、无 CRASH/SEGV。**4 个 `guide=NONE` 轮次全程无退出对话框**；
+按 A 进入关卡加载后也不再弹（早前"仍弹"的记录已推翻，理由与截图字节数判据见 §0.13c）。
+掌机侧已推：`unityloader` sha256 `4d30e5b6…`（6 651 904 B，备份 `unityloader.bak-preholdfix`）、
+`unity.toml`（备份 `unity.toml.bak-preholdfix`）。
+
+### 附带事实（原假设已修正，别再走回头路）
+
+- **不是** `controller_name` 拼写问题，**不是** SDL 编号错位，**不是** loader 版本差异（见上表对照）。
+- Oddmar 的 InputManager（`gamedata/assets/bin/Data/globalgamemanagers`）**确实只有键盘绑定**
+  ——`Jump = space`、`Submit = return/enter`、`Cancel = escape`、`Action1 = q`、`Action2 = e`、
+  `Fire1 = k`、`Fire2 = l`、`Horizontal = a/d+left/right`、`Vertical = s/w+down/up`、`Horizontal2 = q/e`
+  —— **一条 `joystick button N` 都没有**。但**这不代表手柄会被送进键盘路径**：InControl 自己通过
+  `Input.GetJoystickNames()` 建设备与 profile，与 legacy InputManager 的轴表无关。
+  ⇒ 原文档据此推出的"把手柄映射成 SPACE/ESCAPE/Q/E 的键盘化方案"是**错方向，已废弃**。
+- 游戏自报 `controllerType: GameController`（而非 `Xbox`）只影响按键图标/提示，与本次故障无关。
+- 掌机这个 Menu/Guide 键的内核码是 **`BTN_TL2`(312)**，同一次按下还会多报一个 **`KEY_GOTO`(354)**
+  （固件的"菜单/返回前端"语义）；后者落在 SDL 里**无绑定**的 raw joy button 11 上，
+  不产生任何手柄事件，无副作用（探针实测：`CBUTTON button=5 name=guide` + `JBUTTON index=8/11`）。
+
+### 可复用手法：按键"变味"必须分三跳查
+
+| 跳 | 取证手段 |
+|---|---|
+| ① 内核 evdev 码 | 掌机探针 `./sdlpad <秒> <输出>`：同时读 `/dev/input/event1` 原始 `EV_KEY` 与 SDL 事件 |
+| ② SDL 逻辑按钮 | loader 启动日志 `[BD-PAD-MAP]`（`GetBindForButton` dump + remap 表 + raw 按钮数） |
+| ③ 注入的 Android keycode | 每次按键一行 `[BD-PAD] DOWN btn=… (名字) kc=… remapped=yes/no` |
+
+⚠️ **只查第 ③ 跳的配置往往不够** —— 必须再问一句"**这个游戏用什么输入框架**"：
+`strings global-metadata.dat \| grep -E "^InControl\.|^Rewired"`，框架会在游戏日志里自报版本。
+⚠️ 对齐"按键 → 游戏反应"最省力的锚点，是游戏侧 `[BD-ANDROID] Unity:` 日志的**行号**（本轮靠 `Fade Out` 一击命中）。
+
+### 本轮新增的可复用资产
+
+- 掌机按键探针：`.workbuddy/tmp/sdlpad.c` → 容器交叉编译 → `/mnt/mmc/padtest/sdlpad`
+  （用法 `./sdlpad <秒> <输出文件>`；`--fg` 前台直出，便于短测）。`EVIOCGRAB rc=0` ⇒ 前端没独占输入设备。
+- Dropbeak 四个坑：覆盖**正在执行**的二进制必失败（先 `killall` 再 `push`）；`exec` 客户端 **20–30 s 断连**
+  （长任务要 `setsid … <out>` 落文件、事后另开短命令读）；**可写根不含 `/tmp`**（用 `/mnt/mmc/**`）；
+  嵌套引号会破坏远端命令 ⇒ **写成 `.sh` 推上去执行**。
+- 老基线日志存档：掌机 `log-round-1049-audio-input.txt` + 本地 `.workbuddy/tmp/padlog/`（34 MB）。
+
+### 0.13b 补充（第六轮）：两次真机测试都是**被 loader 的 Start+Select 热键杀掉的**
+
+用户反馈"问题依旧"。**先看日志末尾 —— 两份真机日志的最后三行完全一样**：
+
+```
+[BD-EXIT] Start+Select exit hotkey (controller)
+[BD-PREFS] saved 'com.mobge.Oddmar.v2.playerprefs' (8 records)
+[...] unityloader exited (0)
+```
+
+| 轮次 | 日志 | 行数 | 终局 | 死前最后两条按键 |
+|---|---|---|---|---|
+| 10:49 那轮 | `log-round-1049-audio-input.txt` | 236 948 | `[BD-EXIT] Start+Select` | — |
+| 12:45 那轮 | `log.txt` | 135 691 | `[BD-EXIT] Start+Select` | `DOWN btn=6 (start) kc=108` → **125 行后** `DOWN btn=4 (back) kc=109` |
+
+**⇒ 用户两次"测试"都没有跑完：第二次在按下 Start 后的**几十毫秒内**又按了 Select，
+`bd_exit_hotkey_update()` 立刻判定"两键同按"→ `bd_flush_prefs_impl(); _exit(0);`，
+游戏被**当场杀死**，日志里连 `UP` 都来不及记录。用户看到的是"游戏又出问题了"。**
+
+⚠️ **掌机上 Start 与 Select 相邻**，而"先按 Start 开菜单、再按 Select 退出/返回"是玩家的自然动作
+⇒ **这个热键在掌机上的误触率极高**。旧行为（任一键 DOWN 时若另一键仍处于 down 即退出）等于**没有防抖**。
+
+**修法**：`bd_exit_hotkey_update()` 拆成"记账 + tick 超时"两段 —— 加上 `_update()` 只记按下时刻并打日志，
+新增 `bd_exit_hotkey_tick()` 挂在事件循环（`SDL_Delay(4)` 之后，因为按住不动时 `SDL_PollEvent` 一个事件都不返回，
+纯事件驱动等不到超时），**两键同按满 `start_select_exit_hold_ms`（默认 1200 ms）才退出，松开任一键即取消**。
+
+| 改动 | 位置 |
+|---|---|
+| `bd_exit_hotkey_fire/update/tick` 三段式 + `input_exit_hold_ms`（`start_select_exit_hold_ms`，默认 1200，`0`=旧行为，`start_select_exit=false`=整个热键关闭） | `platform/common/input_backend.cpp` |
+| `start_select_exit = true` + `start_select_exit_hold_ms = 1200` | staging `Oddmar/unity.toml` + `_sync/container-unity.toml` |
+
+**验收判据**：启动日志出现 `[BD-INPUT-REMAP] start_select_exit = on, hold 1200 ms (0 = instant)`；
+按下 Start+Select 出现 `[BD-EXIT] Start+Select down (controller) — hold 1200 ms to exit, release to cancel`，
+**松开则 `… released before 1200 ms — exit cancelled`**；只有真按住 1.2 s 才出现 `Start+Select exit hotkey (controller, held 1200 ms)`。
+
+⚠️ **通用教训**：`[BD-EXIT]` / `[BD-PREFS] saved` / `unityloader exited (0)` 这三行连着出现
+= **进程不是崩的，是被 loader 自己请出去的**。排查任何"游戏突然没了"，先看这三行；
+别把它当成游戏崩溃去查 SEGV。**任何时候看到用户报"问题依旧"，第一件事是把日志末尾读完。**
+
+### 0.13c 另一路触发源：`back`/`select` 与 loader 的 Start+Select 热键（第六轮）
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 真机两次运行都在几十秒后**进程消失** | loader **自己的** `Start+Select` 退出热键被误触（掌机上两键相邻，"先 Start 开菜单再 Select 返回"是自然动作），`_exit(0)` 直接杀进程 | 改成长按 **1200 ms** 才生效（`start_select_exit_hold_ms`），松开任一即取消 |
+| 关卡加载 / 关卡地图仍弹「是否退出游戏？」 | `back`（SDL 层名字，对应掌机 Select）默认 → `KEYCODE_BUTTON_SELECT`(109)，同样被 InControl 当 Back 用；`guide` → `BUTTON_MODE`(110) 也一样 | `[input.remap]` 里 `guide` / `select` / `back` **三个键全部设 `NONE`**（`parse_keycode_name()` 把 `NONE`/`DISABLE`/`OFF` 解析成 `KEYCODE_UNKNOWN`，该键不再向游戏注入任何 KeyEvent） |
+
+⚠️ **`select` 和 `back` 是同一个物理键的两个 SDL 名字**，只写 `select = "NONE"` 无效——必须两个都写。
+（`toAndroidKeycode()` 里 `SDL_CONTROLLER_BUTTON_BACK → KEYCODE_BUTTON_SELECT`，所以只禁 `select` 会以为已经关掉了。）
+⚠️ A/B/X/Y 保持正常映射。注意 `toAndroidKeycode()` 里 **A↔B、X↔Y 是故意对调的**（掌机确认/取消习惯），
+`[input.remap]` 的显式绑定会覆盖它。
+
+**容器按键回放证据（`BD_PAD_REPLAY`，`build-oddmar`）**：4 个 `guide="NONE"` 且回放覆盖
+A/B/X/Y/Start/back/guide 的轮次（`seq-nn` / `seq-la` / `seq-bn` / `seq-cn`）**全程没有出现退出对话框**；
+唯一出现对话框的 `seq-full` 用的是 `guide="BUTTON_MODE"`。**用截图字节数就能判别画面阶段**：
+对话框轮次会掉到 **26–27 KB 的暗屏**，正常关卡地图约 **229 KB**，进入关卡后约 **100 KB**，
+中段恒定的 **33–34.5 KB** 是过场黑屏。
+⚠️ **早前凭肉眼看图得出的"A 进入关卡也触发弹窗"结论已推翻**——`seq-la`（只按 A）与全键轮的帧尺寸序列一致，
+说明那 100 KB 是正常关卡画面而不是弹窗。**别再用"肉眼读 PNG"当判据，用字节数序列。**
+
+**容器回归（75 s / 80 s，`build-oddmar`）**：活满、`BD-EXIT`=0、`redirect external bind`=3、`Silent mode`=0、
+`GL error`=0、无 CRASH/SEGV。长按版另测：`10000:start,10080:back`（重叠 80 ms）**不退出**；
+`BD_PAD_REPLAY_HOLD=2500` 时 `unityloader exit=0 after 12047ms` 且日志 `held 1200 ms` ⇒ 长按语义成立。
+
+掌机已推：`unityloader` sha256 `4d30e5b6…`（含长按修复 + 回放探针，env 未设时不生效）、`unity.toml`（`guide`/`select`/`back` = `NONE`；
+备份 `unityloader.bak-preholdfix` / `unity.toml.bak-preholdfix`）。**真机复测待做。**
+
+### 0.13d 晚间更正：ABXY 弹框不是 guide/select/back；是 Oddmar 的 Android 手柄按钮路径
+
+**最新结论（以此为准）**：
+
+- 用户要求撤销两项旧修法：`Start+Select` 长按 1200 ms、`guide/select/back = NONE`。
+  当前掌机恢复为即时 Start+Select 热键，`guide = "ESCAPE"`、`select/back = "BUTTON_SELECT"`。
+- “Press any button” 界面按 A/B/X/Y 弹「是否退出游戏？」不是 SDL 编号错位，也不是 ESC/Back 键混入；
+  日志里 ABXY 均正确注入为 Android 手柄按钮码（A=96、B=97、X=99、Y=100），无 ESC/Back。
+- 关键 A/B 真机对照：
+  - `a = "BUTTON_A"`：第一次 A 弹退出确认框；第二次 A 对默认 Yes 执行 `UnityPlayerActivity.finish()`；
+  - `a = "SPACE"`：Press-any-key 不弹框；再按 A 可进关；关卡内 A 只跳跃。
+  因此问题在 Oddmar/InControl 对 **Android 手柄按钮路径** 的处理，不在 loader 的普通 keycode 映射。
+- B/X/Y 同理：改成键盘语义后，Press-any-key 界面分别按 A/B/X/Y 都不再弹退出框。
+
+**当前掌机配置（实验态）**：
+
+```toml
+[input.remap]
+start  = "BUTTON_START"
+select = "BUTTON_SELECT"
+back   = "BUTTON_SELECT"
+a      = "SPACE"   # Jump / UI confirm
+b      = "K"       # Attack / UI confirm
+x      = "K"       # Attack duplicate
+y      = "SPACE"   # Jump duplicate
+guide  = "ESCAPE"
+```
+
+真机表现：
+
+| 场景 | A | B | X | Y |
+|---|---|---|---|---|
+| Press any button | 不弹退出框 | 不弹退出框 | 不弹退出框 | 不弹退出框 |
+| 主界面 / Start 菜单 | 确认 | 确认 | 预期确认（K） | 预期确认（SPACE） |
+| 关卡中 | 跳跃 | 攻击 | 攻击副本 | 跳跃副本 |
+
+**未闭环问题（当前最大残留）**：
+
+- 键盘化后首次动作正确，但用户实测“同一键第二次不触发”；A/B 交替也不能恢复；
+  只有先按一次 D-pad，再按 A/B 才会再次动作。
+- 日志确认新版已把 A 发成 keyboard device/source（`device=1 source=0x101 keycode=62`），且 DOWN/UP 都进入 Unity；
+  所以这不是“UP 没发出”或“仍挂在手柄设备”。
+- 当前已部署一个实验版：键盘化面键 `ACTION_UP` 后补发一帧中立手柄 `MotionEvent`
+  （模拟手动按 D-pad 触发的输入刷新），loader sha256：
+  `d0aaa1de1d989a2524cec1102850574acf25233886c77b8b8167dafb477b02bd`。
+  **该实验尚待用户真机反馈**，不能写成已修复。
+
+**本轮保留的 loader 侧工具/诊断**：
+
+- `[BD-PAD] DOWN/UP btn=... kc=...`：逐键确认 SDL button → Android keycode；
+- `[BD-PAD-MAP]`：启动时 dump SDL 映射、raw button 数、remap 表；
+- `BD_PAD_REPLAY`：容器内自动回放按键；
+- `nativeInjectEvent keycode/action/device/result`：确认 Unity native 注入成功；
+- 默认屏蔽高频 `[BD-FINDCLASS]` 与 `[BD-ANY-MISS]`，需要完整 JNI 噪声时用 `BD_JNI_TRACE=1`。
+
+**下一步建议**：
+
+1. 先让用户验证 sha `d0aaa1de…` 的“中立 MotionEvent 刷新”是否解决连续 A/B。
+2. 若仍无效，继续沿“Unity legacy keyboard state 没刷新”查，而不要回到 guide/select/back：
+   - 尝试让键盘化面键走真实 `SDL_KEYDOWN/UP` 分支等价路径；
+   - 或在 remap 层为键盘化按钮合成 `MotionEvent + KeyEvent` 的不同顺序/延迟；
+   - 必要时反查 Unity 2018 Android legacy keyboard 状态是否只在特定 input update 阶段刷新。
+
 ## 1. 环境与复现
+
 
 ### 1.1 容器与路径
 
@@ -683,8 +1483,11 @@ docker exec GlES_Dev bash -c 'cd /workspace/Bogodroid && \
   echo "BUILD_EXIT=${PIPESTATUS[0]}"'
 ```
 
-- `build-oddmar-verbose/` = 本次迭代用的构建目录（`CMAKE_BUILD_TYPE=RelWithDebInfo`，`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`）
-- `build-oddmar/` = **旧产物，7:55 的二进制，体积只有 6MB**（`build-oddmar-verbose` 是 150MB）
+- `build-oddmar-verbose/` = 诊断构建目录（`CMAKE_BUILD_TYPE=RelWithDebInfo`，带 `-g`，LOG/TRACE/VERBOSE 全开，≈150 MB）
+- `build-oddmar/` = **上机中间态**（`Release` + `BD_ENABLE_LOG=ON` + TRACE/VERBOSE OFF + strip，≈6.6 MB）
+  —— `/run-oddmar-seq.sh` 的默认 `BOOT_LOADER`。**每次改动后跑测前确认它的 mtime**（`ls -la`），
+  否则你在跑旧二进制。
+- ⚠️ **`docker cp` 保留 mtime ⇒ ninja 会说 "no work to do"**：cp 完源码必须 `touch` 一下再构建。
 - ⚠️ **`JNIVM_ENABLE_RETURN_NON_ZERO` 是 CMake 缓存项**，共用构建目录时务必确认 `grep JNIVM_ENABLE_RETURN_NON_ZERO build-oddmar-verbose/CMakeCache.txt` 为 `OFF`
 
 ### 1.3 运行（逐帧截图 + loader 侧 glReadPixels）
@@ -693,20 +1496,36 @@ docker exec GlES_Dev bash -c 'cd /workspace/Bogodroid && \
 docker exec GlES_Dev bash -c 'rm -rf /game/Oddmar/seqN /game/Oddmar/log-seq.txt; \
   mkdir -p /game/Oddmar/seqN; cd /game/Oddmar && \
   BOOT_LOADER=/workspace/Bogodroid/build-oddmar-verbose/unityloader \
+  BD_BYPASS_VIDEO_TRANSLATE=1 \
   SEQ_DIR=/game/Oddmar/seqN SECS=32 BD_ENABLE_LOG=1 bash /run-oddmar-seq.sh \
   > /game/Oddmar/seqN/run.out 2>&1; echo "EXIT=$?"'
 ```
+
+> 🔴 **`BD_BYPASS_VIDEO_TRANSLATE=1` 不能漏** —— 见 §1.4-0。漏了就是"全黑 + 看起来像代码坏了"。
 
 产出：
 - `/game/Oddmar/log-seq.txt` —— loader 的 stderr（**主日志**）
 - `SEQ_DIR/0000.png…` —— X root window 截图（`import -window root`）
 - `SEQ_DIR/frame.{1,2,3}.gl.ppm` —— loader 自己 `glReadPixels` 的 drawable（由 `BD_DUMP_FRAME`/`BD_DUMP_FRAME_AT` 触发）
 
-### 1.4 ⚠️ 三个必踩的坑
+### 1.4 ⚠️ 五个必踩的坑
 
-1. **`BOOT_LOADER` 默认指向老二进制**
-   `/run-oddmar-seq.sh` 第 17 行：`BOOT_LOADER="${BOOT_LOADER:-/workspace/Bogodroid/build-oddmar/unityloader}"`。
-   **每次都要显式传 `BOOT_LOADER=.../build-oddmar-verbose/unityloader`**，否则你在跑 7:55 的旧产物，所有改动都不生效。
+0. 🔴 **跑测不设 `BD_BYPASS_VIDEO_TRANSLATE=1` ⇒ 必然黑屏。这不是故障，是 opt-in 行为。**
+   挡画面的 hook 是 **env 门控、默认不装**（`projects/unityloader/main.cpp::bypass_video_translate`；
+   §0.6-H / §0.8 都写明它 opt-in）。漏了它的后果**完整复刻修复前的黑屏**：
+   截图恒 192 B（含子窗口单独截图）、`[BD-VIDEO] redirect external bind` = **0**。
+
+   **判据**：跑测日志里 **`redirect external bind` 必须 = 3**；`[BD-VIDEO]` 行数 ~50–70（Release 版）/ 60+。
+
+   ⚠️ 2026-09-22 深夜为此白跑了一整轮排查 —— 现象与"代码改坏了"**完全一样**，
+   而且 **A/B 逃逸开关、换显示号、起全新 Xvfb、换旧二进制全都无法区分**，
+   因为真正的变量是一个**没 export 的环境变量**。
+   **记住这条："换了没变化"不等于"改动无关"。**
+
+1. **`BOOT_LOADER` 默认值是 `build-oddmar`（上机中间态），不是你以为的那个**
+   `/run-oddmar-seq.sh` 里 `BOOT_LOADER="${BOOT_LOADER:-/workspace/Bogodroid/build-oddmar/unityloader}"`。
+   想跑诊断版要显式传 `BOOT_LOADER=.../build-oddmar-verbose/unityloader`；跑上机态就用默认。
+   **改了代码没重新构建时也别指望它生效 —— 见下一条的 mtime 警告。**
 2. **bash 环境缺 PATH**
    每条命令前加：
    `export PATH="/usr/bin:/bin:/c/Windows/System32:/c/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin:$PATH"`
@@ -715,6 +1534,11 @@ docker exec GlES_Dev bash -c 'rm -rf /game/Oddmar/seqN /game/Oddmar/log-seq.txt;
    - 仓库根 `javastubs/`（`android*.cpp`、`javac.cpp`、`bd_assetlocator.cpp` …）
    - `projects/unityloader/javastubs/`（`unity.cpp`、`fakefmod.cpp`、`binding.cpp` …）
    两边都在 `-I` 里，**别 cp 错目录**。
+4. **内存调优的 4 个 env 只能由 shell 设，不能在 loader 里 `setenv()`**（§0.10）
+   `MALLOC_ARENA_MAX` / `MALLOC_TRIM_THRESHOLD_` / `MALLOC_MMAP_THRESHOLD_` / `LP_NUM_THREADS` ——
+   glibc 在 **`main()` 之前**就把 `MALLOC_*` 读走了，loader 内部再设太晚。
+   实测这组省 **~83 MB**（标题界面 666 → 583 MB，−12.5%），无性能退化。
+   ⚠️ 判可裁剪性**只看 RSS**，别被 `du`/映射虚拟大小带偏：`libicudata` 文件 27 MB 但 RSS 几乎为 0（§0.10-F）。
 
 ---
 
