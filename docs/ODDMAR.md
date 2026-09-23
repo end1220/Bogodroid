@@ -1421,8 +1421,8 @@ select = "BUTTON_SELECT"
 back   = "BUTTON_SELECT"
 a      = "SPACE"   # Jump / UI confirm
 b      = "K"       # Attack / UI confirm
-x      = "K"       # Attack duplicate
-y      = "SPACE"   # Jump duplicate
+x      = "NONE"    # no verified Oddmar action; do not duplicate A/B
+y      = "NONE"    # no verified Oddmar action; do not duplicate A/B
 guide  = "ESCAPE"
 ```
 
@@ -1430,9 +1430,11 @@ guide  = "ESCAPE"
 
 | 场景 | A | B | X | Y |
 |---|---|---|---|---|
-| Press any button | 不弹退出框 | 不弹退出框 | 不弹退出框 | 不弹退出框 |
-| 主界面 / Start 菜单 | 确认 | 确认 | 预期确认（K） | 预期确认（SPACE） |
-| 关卡中 | 跳跃 | 攻击 | 攻击副本 | 跳跃副本 |
+| Press any button | 不弹退出框 | 不弹退出框 | 已禁用 | 已禁用 |
+| 主界面 / Start 菜单 | 确认 | 确认 | 已禁用 | 已禁用 |
+| 关卡中 | 跳跃 | 攻击 | 已禁用 | 已禁用 |
+
+X/Y 不再复制 A/B：Oddmar 中没有验证过它们的操作语义，配置为 `NONE`，避免错误注入或改变玩家的按键习惯。
 
 **未闭环问题（当前最大残留）**：
 

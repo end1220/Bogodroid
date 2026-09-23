@@ -22,8 +22,8 @@
 ```toml
 a = "SPACE"   # 跳 / UI confirm
 b = "K"       # 攻击 / UI confirm
-x = "K"       # 攻击副本
-y = "SPACE"   # 跳副本
+x = "NONE"    # 无已验证语义
+y = "NONE"    # 无已验证语义
 ```
 
 - 真机确认：Press-any-key 界面按 A/B/X/Y 均不弹退出框；A 进关与跳跃正常；B 攻击正常；UI/菜单中 A/B 可确认，D-pad 切换按钮。

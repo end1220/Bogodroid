@@ -51,8 +51,8 @@ select  = "BUTTON_SELECT"
 back    = "BUTTON_SELECT"
 a       = "SPACE"
 b       = "K"
-x       = "K"
-y       = "SPACE"
+x       = "NONE"
+y       = "NONE"
 guide   = "ESCAPE"
 
 
