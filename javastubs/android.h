@@ -265,6 +265,8 @@ namespace android {
             static inline int KEYCODE_VOLUME_DOWN = 25;
             static inline int KEYCODE_POWER = 26;
             static inline int KEYCODE_CAMERA = 27;
+            static inline int KEYCODE_ZOOM_IN = 168;
+            static inline int KEYCODE_ZOOM_OUT = 169;
             static inline int KEYCODE_CLEAR = 28;
             static inline int KEYCODE_A = 29;
             static inline int KEYCODE_B = 30;

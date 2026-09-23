@@ -15,6 +15,14 @@ inline bool jnivm_log_enabled(const char* tag, const char* format)
     }();
     if (trace)
         return true;
+    // These two paths are hit on nearly every frame by Unity's reflection
+    // bridge. Keep the focused trace opt-in, but do not let routine class
+    // lookups and unresolved bridge callbacks fill a handheld's log.txt.
+    if (tag && std::strcmp(tag, "BD-FINDCLASS") == 0)
+        return false;
+    if (tag && std::strcmp(tag, "BD-JNIVM") == 0 && format &&
+        std::strstr(format, "[BD-ANY-MISS]") != nullptr)
+        return false;
     if (tag && std::strncmp(tag, "BD-", 3) == 0)
         return true;
     if (!format)

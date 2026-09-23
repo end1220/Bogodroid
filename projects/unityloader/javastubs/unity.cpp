@@ -151,6 +151,11 @@ bool jnivm::com::unity3d::player::UnityPlayerActivity::injectEvent(std::shared_p
         result = inject_method.invoke(frame.getJniEnv(), unityPlayerClass, event, (FakeJni::JInt)0).z;
     else
         result = inject_method.invoke(frame.getJniEnv(), unityPlayerClass, event).z;
+    if (key) {
+        BD_LOG("INPUT", "nativeInjectEvent keycode=%d action=%d device=%d result=%d",
+               key->getKeyCode(), key->getAction(),
+               key->getDeviceId(), result ? 1 : 0);
+    }
     verbose("UnityPlayerActivity", "Result: %d", result);
     return result == JNI_TRUE;
 }

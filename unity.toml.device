@@ -1,0 +1,82 @@
+[paths]
+# Oddmar (com.mobge.Oddmar, Unity 2018.4.36f1 IL2CPP arm64) — container layout.
+# Same shape as configs/fivehearts.toml: the loader chdir()s into game_files, so
+# every other relative path is written as if the cwd were already gamedata/.
+game_files="./gamedata/"
+support_files="./gamedata/"
+
+android_package_code="./"
+android_external_files="../conf/"
+android_files="../conf/"
+android_cache="../cache/"
+# cwd is already gamedata/ — "./gamedata/" would resolve to gamedata/gamedata/
+android_obb_dirs=["./"]
+android_source_dirs=["./"]
+
+
+[package]
+packageName="com.mobge.Oddmar"
+versionName="0.1"
+# libunity.so of this build recognises exactly: -force-gles20, -force-gles30,
+# -force-gles31, -force-gles31aep, -force-vulkan. There is no -force-gles32 in a
+# 2018.4 build (that flag belongs to the 2022.3 FiveHearts port) and the
+# "-forcegles20" spelling in configs/unity.toml is not a flag Unity parses at
+# all. The loader's GLES thunks expose the ES3.x entry points Unity needs for
+# the video bridge (glTexStorage2D / glDrawBuffers / glBlitFramebuffer), and
+# Unity itself refuses VideoPlayer on Vulkan on Android, so pin GLES 3.1.
+# Oddmar also wants a GLES context on the Android emulator class of devices;
+# llvmpipe gives us GLES 3.2 through EGL.
+mainIntentBundle = { unity = "-force-gles31" }
+
+
+[device]
+# 0 = probe /dev/fb0, and there is no panel in a container. 640x480 is the
+# Anbernic panel, so pin it to keep the video path (720p cutscenes scaled into a
+# 640x480 backbuffer) comparable with the handheld runs.
+displayWidth=640
+displayHeight=480
+displayRefreshRate=0
+displayRotation=0
+
+
+[input]
+controller=true
+controller_name="Xbox 360 Controller"
+dpad_synthesize_hat=true
+start_select_exit = true
+
+[input.remap]
+start   = "BUTTON_START"
+select  = "BUTTON_SELECT"
+back    = "BUTTON_SELECT"
+a       = "SPACE"
+b       = "K"
+x       = "K"
+y       = "SPACE"
+guide   = "ESCAPE"
+
+
+[unity]
+version = "legacy"
+# Oddmar bundles Firebase/Crashlytics; keep the loader from letting analytics
+# work reach the network.
+block_analytics = true
+
+
+[audio]
+# Wwise (libAkSoundEngine.so) goes through the loader's AudioTrack shim.
+backend = "auto"
+
+
+[video]
+# Decode with FFmpeg, upload I420 planes and colour-convert them in GLES.
+path = "yuv_gpu"
+color_matrix = "auto"   # auto | bt601 | bt709
+color_range = "auto"    # auto | limited | full
+
+
+[gpu]
+# Do not cap RGBA storage: Unity builds cutscene RenderTextures with
+# glTexStorage2D and capping them while Unity keeps its own viewport crops the
+# output (docs/CASE_STUDIES.md, FiveHearts).
+textureMaxDim = 0

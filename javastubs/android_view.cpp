@@ -321,6 +321,8 @@ int jnivm::android::view::InputEvent::getSource()
 
 int jnivm::android::view::KeyEvent::getKeyCode()
 {
+    BD_LOG("INPUT", "KeyEvent.getKeyCode -> %d action=%d device=%d source=0x%x",
+           this->keyCode, this->action, this->getDeviceId(), this->getSource());
     return this->keyCode;
 }
 
@@ -331,6 +333,8 @@ int jnivm::android::view::KeyEvent::getMetaState()
 
 int jnivm::android::view::KeyEvent::getAction()
 {
+    BD_LOG("INPUT", "KeyEvent.getAction -> %d keycode=%d",
+           this->action, this->keyCode);
     return this->action;
 }
 
@@ -706,11 +710,37 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::KeyEvent) { FakeJni::Constructor<KeyEvent, std::shared_ptr<jnivm::android::view::InputDevice>, int, int, int> {} },
 
+    { FakeJni::Field<&KeyEvent::KEYCODE_UNKNOWN> {}, "KEYCODE_UNKNOWN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BACK> {}, "KEYCODE_BACK", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_DPAD_UP> {}, "KEYCODE_DPAD_UP", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_DPAD_DOWN> {}, "KEYCODE_DPAD_DOWN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_DPAD_LEFT> {}, "KEYCODE_DPAD_LEFT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_DPAD_RIGHT> {}, "KEYCODE_DPAD_RIGHT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_DPAD_CENTER> {}, "KEYCODE_DPAD_CENTER", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_VOLUME_UP> {}, "KEYCODE_VOLUME_UP", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_VOLUME_DOWN> {}, "KEYCODE_VOLUME_DOWN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_CAMERA> {}, "KEYCODE_CAMERA", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_ZOOM_IN> {}, "KEYCODE_ZOOM_IN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_ZOOM_OUT> {}, "KEYCODE_ZOOM_OUT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_A> {}, "KEYCODE_BUTTON_A", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_B> {}, "KEYCODE_BUTTON_B", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_X> {}, "KEYCODE_BUTTON_X", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_Y> {}, "KEYCODE_BUTTON_Y", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_START> {}, "KEYCODE_BUTTON_START", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_SELECT> {}, "KEYCODE_BUTTON_SELECT", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_BUTTON_MODE> {}, "KEYCODE_BUTTON_MODE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::KEYCODE_ESCAPE> {}, "KEYCODE_ESCAPE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::ACTION_DOWN> {}, "ACTION_DOWN", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::ACTION_UP> {}, "ACTION_UP", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&KeyEvent::ACTION_MULTIPLE> {}, "ACTION_MULTIPLE", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&KeyEvent::getKeyCode> {},     "getKeyCode",     FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getAction> {},      "getAction",      FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getMetaState> {},   "getMetaState",   FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getEventTime> {},   "getEventTime",   FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getDownTime> {},    "getDownTime",    FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getDeviceId> {},    "getDeviceId",    FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getSource> {},      "getSource",      FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&KeyEvent::getDevice> {},      "getDevice",      FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getRepeatCount> {}, "getRepeatCount", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getFlags> {},       "getFlags",       FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&KeyEvent::getScanCode> {},    "getScanCode",    FakeJni::JMethodID::PUBLIC },

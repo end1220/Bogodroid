@@ -7,6 +7,7 @@
 #include "sys_volume.h"
 #include <map>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <cctype>
 #include <cmath>
@@ -61,6 +62,7 @@ static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, cons
     if (!input_start_select_exit || (!is_start && !is_select)) return;
     if (is_start) g_exit_hotkey_start_down = down;
     if (is_select) g_exit_hotkey_select_down = down;
+
     if (g_exit_hotkey_start_down && g_exit_hotkey_select_down) {
         BD_LOG("EXIT", "Start+Select exit hotkey (%s)", source ? source : "input");
         bd_flush_prefs_impl();
@@ -89,6 +91,7 @@ static void bd_axis_synth_pair(BD_AxisDir negativeDir, BD_AxisDir positiveDir, f
                                const std::shared_ptr<jnivm::android::view::InputDevice>& dev,
                                std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey);
 static int bd_remap_dpad_button(int button);
+static bool bd_keycode_uses_keyboard_device(int keyCode);
 
 // "E" / "TAB" / "DPAD_UP" / "KEYCODE_M" -> KeyEvent::KEYCODE_*; -1 if unknown.
 static int parse_keycode_name(std::string s)
@@ -115,14 +118,25 @@ static int parse_keycode_name(std::string s)
     if (s == "DPAD_RIGHT") return K::KEYCODE_DPAD_RIGHT;
     if (s == "BUTTON_A")   return K::KEYCODE_BUTTON_A;
     if (s == "BUTTON_B")   return K::KEYCODE_BUTTON_B;
+    if (s == "BUTTON_C")   return K::KEYCODE_BUTTON_C;
     if (s == "BUTTON_X")   return K::KEYCODE_BUTTON_X;
     if (s == "BUTTON_Y")   return K::KEYCODE_BUTTON_Y;
+    if (s == "BUTTON_Z")   return K::KEYCODE_BUTTON_Z;
+    if (s == "BUTTON_L3")  return K::KEYCODE_BUTTON_THUMBL;
+    if (s == "BUTTON_R3")  return K::KEYCODE_BUTTON_THUMBR;
     if (s == "BUTTON_L1")  return K::KEYCODE_BUTTON_L1;
     if (s == "BUTTON_L2")  return K::KEYCODE_BUTTON_L2;
     if (s == "BUTTON_R1")  return K::KEYCODE_BUTTON_R1;
     if (s == "BUTTON_R2")  return K::KEYCODE_BUTTON_R2;
     if (s == "BUTTON_START")  return K::KEYCODE_BUTTON_START;
     if (s == "BUTTON_SELECT") return K::KEYCODE_BUTTON_SELECT;
+    // Android spells the Guide / "Home" button KEYCODE_BUTTON_MODE. Do NOT bind
+    // a handheld's Menu button to ESCAPE: ESCAPE reaches the game as
+    // KeyCode.Escape, which is the framework-level "Back" for titles built on
+    // input abstractions (InControl's Android profiles map Back -> Escape), so
+    // it pops their quit/pause prompt. Samurai2/Maximus2 tolerate it; Oddmar does
+    // not (docs/ODDMAR.md §0.13).
+    if (s == "BUTTON_MODE")   return K::KEYCODE_BUTTON_MODE;
     if (s == "BUTTON_THUMBL") return K::KEYCODE_BUTTON_THUMBL;
     if (s == "BUTTON_THUMBR") return K::KEYCODE_BUTTON_THUMBR;
     if (s == "NONE" || s == "DISABLE" || s == "OFF") return K::KEYCODE_UNKNOWN;
@@ -159,6 +173,22 @@ static bool is_dpad_button(int button)
 {
     return button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
            button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+}
+
+static bool bd_keycode_uses_keyboard_device(int keyCode)
+{
+    using K = jnivm::android::view::KeyEvent;
+    if (keyCode == K::KEYCODE_UNKNOWN)
+        return false;
+    if (keyCode >= K::KEYCODE_BUTTON_A && keyCode <= K::KEYCODE_BUTTON_MODE)
+        return false;
+    if (keyCode == K::KEYCODE_DPAD_UP ||
+        keyCode == K::KEYCODE_DPAD_DOWN ||
+        keyCode == K::KEYCODE_DPAD_LEFT ||
+        keyCode == K::KEYCODE_DPAD_RIGHT ||
+        keyCode == K::KEYCODE_DPAD_CENTER)
+        return false;
+    return true;
 }
 
 static int bd_remap_dpad_button(int button)
@@ -415,6 +445,49 @@ InputBackend::InputBackend()
                 SDL_GameController* gc = SDL_GameControllerOpen(i);
                 BD_LOG("INPUT", "Opened GameController[%d] %s ptr=%p",
                        i, SDL_GameControllerNameForIndex(i), (void*)gc);
+                // Dump the bindings SDL actually resolved out of the mapping table.
+                // "handheld reports the wrong button index" and "mapping table maps
+                // that index to the wrong SDL button" are indistinguishable from the
+                // game's side; this line names the culprit. Pair with the BD-PAD
+                // lines emitted per press.
+                if (gc) {
+                    // Raw device geometry. This handheld exposes KEY_ESC, two
+                    // KEY_VOLUME* keys and the BTN_* gamepad range on the SAME
+                    // event node, so if SDL counts every set EV_KEY bit the whole
+                    // mapping table shifts and "press A" lands on the entry that
+                    // results in ESCAPE. button count is the tell.
+                    {
+                        SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
+                        if (js) {
+                            BD_LOG("PAD-MAP", "device '%s': %d raw buttons, %d axes, %d hats",
+                                   SDL_JoystickName(js),
+                                   SDL_JoystickNumButtons(js),
+                                   SDL_JoystickNumAxes(js),
+                                   SDL_JoystickNumHats(js));
+                        }
+                        for (auto& kv : g_button_remap) {
+                            BD_LOG("PAD-MAP", "remap[sdl btn %d] -> android keycode %d",
+                                   kv.first, kv.second);
+                        }
+                    }
+                    for (int b = SDL_CONTROLLER_BUTTON_A;
+                         b <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; ++b) {
+                        const char* nm = SDL_GameControllerGetStringForButton(
+                            (SDL_GameControllerButton)b);
+                        SDL_GameControllerButtonBind bind =
+                            SDL_GameControllerGetBindForButton(gc, (SDL_GameControllerButton)b);
+                        if (bind.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON) {
+                            BD_LOG("PAD-MAP", "%-12s <- joy button %d", nm ? nm : "?", bind.value.button);
+                        } else if (bind.bindType == SDL_CONTROLLER_BINDTYPE_HAT) {
+                            BD_LOG("PAD-MAP", "%-12s <- hat %d.%d", nm ? nm : "?",
+                                   bind.value.hat.hat, bind.value.hat.hat_mask);
+                        } else if (bind.bindType == SDL_CONTROLLER_BINDTYPE_AXIS) {
+                            BD_LOG("PAD-MAP", "%-12s <- axis %d", nm ? nm : "?", bind.value.axis);
+                        } else {
+                            BD_LOG("PAD-MAP", "%-12s <- (unbound)", nm ? nm : "?");
+                        }
+                    }
+                }
             } else {
                 BD_LOG("INPUT", "skip joy[%d] (not a GameController)", i);
             }
@@ -603,6 +676,96 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
 void InputBackend::runEventLoop()
 {
     running = true;
+
+    // Diagnostic input playback. BD_PAD_REPLAY="8000:a,12000:b,16000:guide"
+    // presses controller buttons at the given millisecond offsets, holding each
+    // for BD_PAD_REPLAY_HOLD ms (default 120). This drives the *whole* controller
+    // path — SDL button -> remap -> Android KeyEvent -> Unity — with nobody at
+    // the pad, which is the only way to test input routing in a headless
+    // container run. Inert unless the variable is set.
+    struct ReplayStep { Uint32 at, hold; int button; bool down_done, up_done; };
+    std::vector<ReplayStep> replay;
+    if (const char* spec = std::getenv("BD_PAD_REPLAY")) {
+        Uint32 hold = 120;
+        if (const char* h = std::getenv("BD_PAD_REPLAY_HOLD"))
+            hold = (Uint32)std::atoi(h);
+        std::string s(spec);
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t comma = s.find(',', start);
+            std::string item = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos : comma - start);
+            start = (comma == std::string::npos) ? s.size() + 1 : comma + 1;
+            if (item.empty()) continue;
+            size_t colon = item.find(':');
+            if (colon == std::string::npos) continue;
+            Uint32 at = (Uint32)std::atoi(item.substr(0, colon).c_str());
+            std::string name = item.substr(colon + 1);
+            while (!name.empty() && std::isspace((unsigned char)name.front())) name.erase(name.begin());
+            while (!name.empty() && std::isspace((unsigned char)name.back()))  name.pop_back();
+            SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(name.c_str());
+            if (b == SDL_CONTROLLER_BUTTON_INVALID) {
+                BD_LOG("PAD", "replay: unknown button name '%s' — skipped", name.c_str());
+                continue;
+            }
+            replay.push_back({ at, hold, (int)b, false, false });
+            BD_LOG("PAD", "replay: %s at %u ms (hold %u ms)", name.c_str(), at, hold);
+        }
+        if (!replay.empty())
+            BD_LOG("PAD", "replay armed: %zu step(s)", replay.size());
+    }
+    const Uint32 replay_t0 = SDL_GetTicks();
+
+    auto replayInject = [&](int button, bool down) {
+        const char* bname = SDL_GameControllerGetStringForButton(
+            (SDL_GameControllerButton)button);
+        if (!onKey) {
+            BD_LOG("PAD", "REPLAY %s btn=%d (%s) dropped: onKey=null",
+                   down ? "DOWN" : "UP", button, bname ? bname : "?");
+            return;
+        }
+        SDL_ControllerButtonEvent cbe{};
+        cbe.type = down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+        cbe.button = (Uint8)button;
+        int action = down ? jnivm::android::view::KeyEvent::ACTION_DOWN
+                          : jnivm::android::view::KeyEvent::ACTION_UP;
+        int keyCode = this->toAndroidKeycode(cbe);
+        BD_LOG("PAD", "REPLAY %s btn=%d (%s) kc=%d",
+               down ? "DOWN" : "UP", button, bname ? bname : "?", keyCode);
+        // Route the combo through the same hotkey logic a pad press uses, so a
+        // replay can validate (or falsify) the hold behaviour too.
+        bd_exit_hotkey_update(button == SDL_CONTROLLER_BUTTON_START,
+                              button == SDL_CONTROLLER_BUTTON_BACK,
+                              down, "replay");
+        if (keyCode == jnivm::android::view::KeyEvent::KEYCODE_UNKNOWN) {
+            BD_LOG("PAD", "REPLAY %s btn=%d dropped: KEYCODE_UNKNOWN",
+                   down ? "DOWN" : "UP", button);
+            return;
+        }
+        auto dev = bd_keycode_uses_keyboard_device(keyCode)
+            ? devices[INPUT_ID_KEYBOARD]
+            : devices[INPUT_ID_XBOX];
+        auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(
+            dev, action, keyCode, 0);
+        keyEvent->downTime = bd_stamp_keyevent_downtime(
+            dev->id, keyCode, action, keyEvent->timestamp);
+        onKey(keyEvent);
+    };
+
+    auto replayTick = [&]() {
+        if (replay.empty()) return;
+        Uint32 now = SDL_GetTicks() - replay_t0;
+        for (auto& step : replay) {
+            if (!step.down_done && now >= step.at) {
+                step.down_done = true;
+                replayInject(step.button, true);
+            } else if (step.down_done && !step.up_done && now >= step.at + step.hold) {
+                step.up_done = true;
+                replayInject(step.button, false);
+            }
+        }
+    };
+
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -778,15 +941,31 @@ void InputBackend::runEventLoop()
                 uint8_t physicalButton = e.cbutton.button;
                 int logicalButton = bd_remap_dpad_button(physicalButton);
                 int keyCode = toAndroidKeycode(e.cbutton);
+                // Ground truth for which button SDL reported for the key the user
+                // actually pressed. Pair with the PAD-MAP dump to name the exact
+                // mapping-table entry responsible.
+                {
+                    const char* bname = SDL_GameControllerGetStringForButton(
+                        (SDL_GameControllerButton)physicalButton);
+                    BD_LOG("PAD", "%s btn=%d (%s) kc=%d remapped=%s start=%d select=%d",
+                           (action == jnivm::android::view::KeyEvent::ACTION_DOWN) ? "DOWN" : "UP",
+                           (int)physicalButton, bname ? bname : "?",
+                           keyCode, g_button_remap.count(logicalButton) ? "yes" : "no",
+                           (int)(physicalButton == SDL_CONTROLLER_BUTTON_START),
+                           (int)(physicalButton == SDL_CONTROLLER_BUTTON_BACK));
+                }
                 bd_exit_hotkey_update(physicalButton == SDL_CONTROLLER_BUTTON_START,
                                       physicalButton == SDL_CONTROLLER_BUTTON_BACK,
                                       action == jnivm::android::view::KeyEvent::ACTION_DOWN,
                                       "controller");
                 bool is_dpad = is_dpad_button(physicalButton);
+                auto keyDev = bd_keycode_uses_keyboard_device(keyCode)
+                    ? devices[INPUT_ID_KEYBOARD]
+                    : devices[INPUT_ID_XBOX];
                 auto keyEvent = std::make_shared<jnivm::android::view::KeyEvent>(
-                    devices[INPUT_ID_XBOX], action, keyCode, 0);
+                    keyDev, action, keyCode, 0);
                 keyEvent->downTime = bd_stamp_keyevent_downtime(
-                    INPUT_ID_XBOX, keyCode, action, keyEvent->timestamp);
+                    keyDev->id, keyCode, action, keyEvent->timestamp);
 
                 // Mirror dpad on the HAT axis (AOSP fans out KeyEvent+MotionEvent).
                 // Release uses +0.0f to avoid -0.0f sign surprises downstream.
@@ -821,6 +1000,16 @@ void InputBackend::runEventLoop()
 
                 onKey(keyEvent);
                 if (motionEvent) onMotion(motionEvent);
+                if (!motionEvent && onMotion &&
+                    bd_keycode_uses_keyboard_device(keyCode) &&
+                    action == jnivm::android::view::KeyEvent::ACTION_UP) {
+                    auto dev = devices[INPUT_ID_XBOX];
+                    auto flushEvent = std::make_shared<jnivm::android::view::MotionEvent>(
+                        dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
+                    flushEvent->axisValues = mControllerAxisState;
+                    BD_LOG("PAD", "flush neutral motion after keyboard-remapped keycode=%d", keyCode);
+                    onMotion(flushEvent);
+                }
                 break;
             }
 
@@ -829,6 +1018,7 @@ void InputBackend::runEventLoop()
             }
         }
         SDL_Delay(4); // Be a good citizen
+        replayTick();
     }
 }
 
