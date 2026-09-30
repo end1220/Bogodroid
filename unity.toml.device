@@ -39,6 +39,10 @@ displayRefreshRate=0
 displayRotation=0
 
 
+[locale]
+tag = "zh-CN"
+
+
 [input]
 controller=true
 controller_name="Xbox 360 Controller"

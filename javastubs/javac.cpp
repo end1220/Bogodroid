@@ -885,6 +885,21 @@ void HookStringExtensions(FakeJni::Jvm* vm)
     FakeJni::LocalFrame frame(*vm);
     auto stringClass = vm->findClass("java/lang/String");
 
+    // Unity uses String.length() while sizing the temporary OBB path buffer.
+    // Keep this in Java UTF-16 code units, matching the JNI contract; using
+    // std::string::length() here would return UTF-8 bytes instead.
+    stringClass->HookInstanceFunction(&frame.getJniEnv(), "length",
+        [](jnivm::ENV* env, jnivm::Object* self) -> jsize {
+            auto* string = dynamic_cast<FakeJni::JString*>(self);
+            if (!string)
+                return 0;
+            auto owner = self->shared_from_this();
+            std::shared_ptr<FakeJni::JString> value(owner, string);
+            const jstring handle = jnivm::JNITypes<jstring>::ToJNIType(
+                env, value);
+            return env->GetJNIEnv()->GetStringLength(handle);
+        });
+
     // String.equals
     stringClass->HookInstanceFunction(&frame.getJniEnv(), "equals", [](jnivm::ENV* env, jnivm::Object* self, jnivm::Object* obj) {
         verbose("JBRIDGE", "String %s == %s = %d", (*dynamic_cast<FakeJni::JString*>(self)).c_str(), (*dynamic_cast<FakeJni::JString*>(obj)).c_str(), (*dynamic_cast<FakeJni::JString*>(self)) == (*dynamic_cast<FakeJni::JString*>(obj)));

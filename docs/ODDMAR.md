@@ -41,7 +41,7 @@
 
 ## 0. 当前状态与遗留问题
 
-> **最后一次更新：2026-09-24 · 交接版**（分支 `oddmar`）
+> **最后一次更新：2026-09-30 · 掌机 B 启动崩溃修复**（分支 `oddmar`）
 > —— **黑屏基础链路已解决（§0.6-H）**、**Wwise 出声链路已打通（§0.9）**，
 > **启动 crash（OpenSL shim 缓存问题）已解决（§0.13f）**；当前剩余主线是
 > **ABXY/退出确认与进关视频时序、偶发进关黑屏、动作状态刷新**。
@@ -65,6 +65,7 @@
 | **真机（掌机）** | ✅ **2026-09-23 已部署并跑通**（§0.11）：`/mnt/mmc/Roms/ports/Oddmar/` @ `172.16.6.77`（H700 类 / Mali-G31 / 996 MB 无 swap）。判活九项全 0、`redirect external bind`=3、`Silent mode`=0、`Enqueue`=154、GLES 3.2 真驱动；画面 = **开场过场动画** |
 | 游戏是否 quit | 未走 Unity 正常 Quit（末尾 `Caught signal, fast-exiting via _exit` 是 `timeout -s INT` 到点） |
 | hostless URL（L2） | ✅ **已定位**：host = `Application.dataPath`（空串）。上游 `Context.getPackageCodePath()`（port 侧 `bd_compute_source_dir()`）返回的 `<cwd>/UnityDataAssetPack.apk` 不存在 ⇒ 被 Unity 的 `stat()` + `S_IFREG` 闸门挡下 ⇒ `dataPath=""`。**不挡画面**（§0.7） |
+| **默认语言** | ✅ **2026-09-30 已改为简体中文**：Oddmar 会查 `java.util.Locale.getDefault().toLanguageTag()`，IL2CPP 字符串也有 `Application.systemLanguage` / `ChineseSimplified` / `TranslationLocale` / `zh_CN`。端口侧原来 Java Locale 默认 `en-US`，NDK `AConfiguration_getLanguage/Country` 默认 `en/US`；现 `unity.toml.device` 写 `[locale] tag="zh-CN"`，NDK 也从同一项派生 `zh/CN`。PlayerPrefs 当前无语言键，排除存档覆盖。 |
 
 **一句话**：**黑屏已解决。** 挡画面的是一条"asset 路径翻译"链 —— Unity 把
 `jar:file://!/assets/Videos/…mp4` 交给 `libunity+0x4c124c` 翻译成本地路径，翻译失败 → `-10004` → 没有片头视频 → 黑屏。
@@ -93,6 +94,7 @@
 
 | 症状（日志里能看到的） | 根因 | 解法（已落地） | 详见 |
 |---|---|---|---|
+| 从掌机 A 整目录复制到掌机 B 后启动崩溃；崩前出现 ``[STUB-MISS] MethodID: Class=`java/lang/String` Member=`length` Sig=`()I` ``，fault addr 低字节是 `obb\0`，pc=`libunity+0x8d432c` | Unity 在 `libunity+0x317498` 一带拼 `main.%d.%s.obb` / `patch.%d.%s.obb`，先调用 `String.length()` 计算临时栈缓冲区。缺桩返回 0，`sprintf` 随后越界覆盖相邻的引用计数对象，析构时把 OBB 字符串数据当指针解引用。`conf/cache` 只会改变启动路径和复现概率，不是根因 | 在 `HookStringExtensions()` 注册真实 `String.length()I`，复用 jnivm 的 `GetStringLength()`，按 Java 语义返回 UTF-16 code unit 数。`JNIVM_ENABLE_RETURN_NON_ZERO=OFF` 仍须显式构建 | `javastubs/javac.cpp` |
 | 启动即退出；`[BD-SEGV] signal 11 si_addr=0xffffffffffffff80`，pc = `std::rethrow_exception` | Unity 的受管异常经 `JNIEnv::Throw()` 进来，jnivm 只把它置成 **pending**（`except` 为空）；下一次 JNI 调用在 `j2invoke` 尾部 rethrow **空 `exception_ptr`** → 读 `-0x80` | `jnivm::RethrowThrowable()`：`except` 为空时抛普通 `std::runtime_error`；`j2invoke` 仅在 `except` 非空时 rethrow；`Throw()` 保持 pending。**另修 SEGV 回溯**：改用 `SA_SIGINFO` 从 Unity 链式 handler 里取真 `ucontext`（**裸 backtrace 会骗人**） | §10 |
 | 音频线程崩；`[BD-DBUF] GetDirectBufferAddress handle=0x4`，同一个 `Method*` 两次打印出**不同**的 `native` | jnivm 的 `jmethodID` 就是裸 `Method*`；`UnregisterNatives()` 把它从 `methods` 里 `erase` → 最后一个 `shared_ptr` 释放 → **同尺寸分配复用同一块内存** → 缓存的 id 悄悄指向另一个 native 函数 | `RegisterNatives()` 增加**进程级 keepalive 表**（注册给原生代码的方法永不释放）；`fakefmod.cpp` 改为每次调用重新解析并**校验 name/signature** | §11 |
 | hook 装上了、也触发了，但 Unity 仍走失败分支；`could not translate` / `-10004` | `libunity+0x4c124c` 是**虚调用转发 thunk**，真实契约是 `bool f(obj, string* in_out, void** out_base, size_t* out_len)`；原来返回**指针** → 调用点 `tbz w0,#0` 判 bit0 → 对齐指针低位恒 0 → **恒判失败** | hook 改为：**回填 `a1` 路径 + `a2 = NULL` + `a3` = 长度 + 返回 `1`**（`BD_BYPASS_VIDEO_TRANSLATE=1`，实现见 `bypass_video_translate`） | §0.6-C/D/E、§12 |

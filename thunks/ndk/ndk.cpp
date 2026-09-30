@@ -10,6 +10,7 @@ extern toml::table config;
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <poll.h>
+#include <string>
 #include "alooper.h"
 #include "asset_manager.h"
 #include "anative_activity.h"
@@ -81,6 +82,32 @@ extern const char* AMEDIAFORMAT_KEY_TRACK_ID;
 
 static ANativeWindow* default_native_window;
 
+static std::string bd_config_locale_tag()
+{
+    return config["locale"]["tag"].value_or<std::string>("en-US");
+}
+
+static std::string bd_config_locale_language()
+{
+    std::string tag = bd_config_locale_tag();
+    const auto dash = tag.find_first_of("-_");
+    return dash == std::string::npos ? tag : tag.substr(0, dash);
+}
+
+static std::string bd_config_locale_country()
+{
+    std::string tag = bd_config_locale_tag();
+    const auto dash = tag.find_first_of("-_");
+    return dash == std::string::npos ? std::string{} : tag.substr(dash + 1);
+}
+
+static void bd_copy_config_code(char *out, const std::string& value, const char *fallback)
+{
+    const std::string code = value.empty() ? std::string(fallback) : value;
+    out[0] = code.size() > 0 ? code[0] : fallback[0];
+    out[1] = code.size() > 1 ? code[1] : fallback[1];
+}
+
 ABI_ATTR AConfiguration *AConfiguration_new()
 {
     AConfiguration *config = new AConfiguration;
@@ -102,15 +129,13 @@ ABI_ATTR int32_t AConfiguration_getMnc(AConfiguration *aconfig)
 }
 ABI_ATTR void AConfiguration_getLanguage(AConfiguration *aconfig, char *outLanguage)
 {
-    const char *lang = config["device"]["language"].value_or("en");
-    outLanguage[0] = lang[0];
-    outLanguage[1] = lang[1];
+    std::string lang = config["device"]["language"].value_or<std::string>(bd_config_locale_language());
+    bd_copy_config_code(outLanguage, lang, "en");
 }
 ABI_ATTR void AConfiguration_getCountry(AConfiguration *aconfig, char *outCountry)
 {
-    const char *country = config["device"]["country"].value_or("US");
-    outCountry[0] = country[0];
-    outCountry[1] = country[1];
+    std::string country = config["device"]["country"].value_or<std::string>(bd_config_locale_country());
+    bd_copy_config_code(outCountry, country, "US");
 }
 ABI_ATTR int32_t AConfiguration_getOrientation(AConfiguration *aconfig)
 {
@@ -408,5 +433,4 @@ NO_THUNK("AHardwareBuffer_acquire", (uintptr_t)&AHardwareBuffer_acquire),
 NO_THUNK("AHardwareBuffer_release", (uintptr_t)&AHardwareBuffer_release),
 NO_THUNK("AHardwareBuffer_describe", (uintptr_t)&AHardwareBuffer_describe),
     {NULL, (uintptr_t)NULL}};
-
 
