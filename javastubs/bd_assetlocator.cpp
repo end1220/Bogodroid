@@ -35,6 +35,8 @@ extern toml::table config;
 #include <string>
 #include <vector>
 
+extern "C" void bd_video_note_asset_source(const char* path);
+
 namespace {
 
 // The directory AssetLocator paths are resolved against: "assets" under the
@@ -149,6 +151,7 @@ jnivm::com::mobge::assetlocator::AssetLocator::GetReaderWrapper(
 
     auto reader = std::make_shared<AssetReader>(file.string());
     BD_LOG("ASSETLOC", "GetReaderWrapper('%s') -> %s", rel.c_str(), file.string().c_str());
+    bd_video_note_asset_source(file.string().c_str());
     return reader;
 }
 

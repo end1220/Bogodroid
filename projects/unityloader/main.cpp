@@ -15,6 +15,7 @@ toml::table config;
 #include "monocompat/monobridge.h"
 #include "monocompat/il2cpp_log_shim.h"
 #include "platform.h"
+#include "input_backend.h"
 #include "so_util.h"
 #include <baron/baron.h>
 #include <dlfcn.h>
@@ -22,6 +23,7 @@ toml::table config;
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <cstring>
 #include <vector>
 #include <stdlib.h>
 #include <unistd.h>
@@ -94,6 +96,169 @@ extern "C" void bd_media_bench(const char* path, int frames);
 //   v4  a1 = path, a2 = NULL, a3 = length  (this one)
 static uintptr_t g_video_translate_orig = 0;
 
+// Gate state transitions and quarantine only the command that crossed the UI
+// boundary. Fresh A/B commands retain the game's submit/cancel behavior.
+static uintptr_t g_oddmar_pause_toggle_orig = 0;
+static uintptr_t g_oddmar_try_quit_orig = 0;
+static uintptr_t g_oddmar_jump_orig = 0;
+static uintptr_t g_oddmar_raw_button_orig = 0;
+static uintptr_t g_oddmar_attack_orig = 0;
+static uintptr_t g_oddmar_attack2_orig = 0;
+static uintptr_t g_oddmar_walk_orig = 0;
+static uintptr_t g_oddmar_ui_orig[5] = {};
+static bool oddmar_sdl_buttons = false;
+static bool oddmar_raw_button_hook(void* self, int index, void* method)
+{
+    using Fn = bool (*)(void*, int, void*);
+    const bool native = reinterpret_cast<Fn>(g_oddmar_raw_button_orig)(self, index, method);
+    if (!self || *reinterpret_cast<const int*>(static_cast<const unsigned char*>(self) + 0x1a8) != 1)
+        return native;
+    const bool physical = bd_oddmar_input_gate::raw_button_state(index);
+    // Only log changed observations, not every per-frame query.
+    static unsigned char observations[20] = {};
+    static unsigned int logs = 0;
+    if (index >= 0 && index < 20) {
+        const unsigned char observation = 4u | (native ? 1u : 0u) | (physical ? 2u : 0u);
+        if (observations[index] != observation && logs < 160) {
+            observations[index] = observation;
+            ++logs;
+            BD_LOG("INPUT", "Oddmar raw button index=%d native=%d SDL=%d mask=0x%x",
+                   index, native, physical, bd_oddmar_input_gate::controller_buttons());
+        }
+    }
+    return physical;
+}
+static void oddmar_pause_toggle_hook(void* self, void* method)
+{
+    // MRGameHud2::_state: Playing=1, Paused=2, ... (field offset 0x13c).
+    const uint32_t state = self
+        ? *reinterpret_cast<const uint32_t*>(
+              reinterpret_cast<const unsigned char*>(self) + 0x13c)
+        : 1u;
+    const auto serial = bd_oddmar_input_gate::frame_press_serial();
+    if (!bd_oddmar_input_gate::allow_pause_transition(state == 1u)) {
+        static uint64_t logged_serial = UINT64_MAX;
+        if (serial != logged_serial) {
+            logged_serial = serial;
+            BD_LOG("INPUT", "Oddmar pauseToggle blocked state=%u serial=%llu",
+                   state, (unsigned long long)serial);
+        }
+        return;
+    }
+    BD_LOG("INPUT", "Oddmar pauseToggle allowed state=%u serial=%llu",
+           state, (unsigned long long)serial);
+    reinterpret_cast<void (*)(void*, void*)>(g_oddmar_pause_toggle_orig)(self, method);
+}
+static void oddmar_try_quit_hook(void* self, void* method)
+{
+    if (!bd_oddmar_input_gate::consume_menu_back()) {
+        BD_LOG("INPUT", "Oddmar tryQuit blocked without Start/Guide pulse");
+        return;
+    }
+    reinterpret_cast<void (*)(void*, void*)>(g_oddmar_try_quit_orig)(self, method);
+}
+
+// Keep the game's own jump test, but expose only the physical A press edge;
+// this preserves the original one-shot/double-jump state machine and prevents
+// a held or unrelated pad button from retriggering Jump.
+static bool oddmar_jump_hook(void* method)
+{
+    using Fn = bool (*)(void*);
+    const bool game_jump = reinterpret_cast<Fn>(g_oddmar_jump_orig)(method);
+    if (!game_jump || !oddmar_sdl_buttons || !bd_oddmar_input_gate::controller_active())
+        return game_jump;
+    const bool physical = bd_oddmar_input_gate::jump_pressed();
+    static unsigned int blocked_logs = 0;
+    if (!physical && blocked_logs++ < 24)
+        BD_LOG("INPUT", "Oddmar Jump suppressed without A mask=0x%x",
+               bd_oddmar_input_gate::controller_buttons());
+    return physical;
+}
+
+static bool oddmar_attack_hook(void* method)
+{
+    const bool native = reinterpret_cast<bool (*)(void*)>(g_oddmar_attack_orig)(method);
+    if (!bd_oddmar_input_gate::controller_active()) return native;
+    const bool pressed = bd_oddmar_input_gate::attack_pressed();
+    const auto serial = bd_oddmar_input_gate::frame_press_serial();
+    static uint64_t logged_serial = UINT64_MAX;
+    static unsigned int logs = 0;
+    if ((pressed || native) && serial != logged_serial && logs < 160) {
+        logged_serial = serial;
+        ++logs;
+        BD_LOG("INPUT", "Oddmar attack edge native=%d SDL=%d serial=%llu mask=0x%x",
+               native, pressed, (unsigned long long)serial,
+               bd_oddmar_input_gate::controller_buttons());
+    }
+    return pressed;
+}
+
+static bool oddmar_attack2_hook(void* method)
+{
+    const bool native = reinterpret_cast<bool (*)(void*)>(g_oddmar_attack2_orig)(method);
+    if (!oddmar_sdl_buttons || !bd_oddmar_input_gate::controller_active()) return native;
+    const bool pressed = bd_oddmar_input_gate::attack2_pressed();
+    const auto serial = bd_oddmar_input_gate::frame_press_serial();
+    static uint64_t logged_serial = UINT64_MAX;
+    static unsigned int logs = 0;
+    if ((pressed || native) && serial != logged_serial && logs < 160) {
+        logged_serial = serial;
+        ++logs;
+        BD_LOG("INPUT", "Oddmar attack2 edge native=%d SDL=%d serial=%llu mask=0x%x",
+               native, pressed, (unsigned long long)serial,
+               bd_oddmar_input_gate::controller_buttons());
+    }
+    return pressed;
+}
+
+static int oddmar_walk_hook(void* self, const unsigned char* args, void* method)
+{
+    // WalkArgs is a 56-byte value type passed by reference in the ARM64 ABI.
+    const int type = args ? *reinterpret_cast<const int*>(args + 0x20) : -1;
+    const int result = reinterpret_cast<int (*)(void*, const unsigned char*, void*)>(
+        g_oddmar_walk_orig)(self, args, method);
+    static uint64_t logged_serial[9] = {};
+    static unsigned int logs = 0;
+    const auto serial = bd_oddmar_input_gate::frame_press_serial();
+    if (type >= 4 && type <= 8 && logs < 200 && logged_serial[type] != serial) {
+        logged_serial[type] = serial;
+        ++logs;
+        const int air_jumps = self ? *reinterpret_cast<const int*>(
+            static_cast<const unsigned char*>(self) + 0xac) : -1;
+        BD_LOG("INPUT", "Oddmar character command type=%d result=%d airJumps=%d serial=%llu",
+               type, result, air_jumps, (unsigned long long)serial);
+    }
+    return result;
+}
+
+static bool oddmar_ui_query(bool native, unsigned int slot)
+{
+    if (!native || !bd_oddmar_input_gate::controller_active() ||
+        bd_oddmar_input_gate::ui_command_available()) return native;
+    static uint64_t logged_serial[5] = {};
+    static unsigned int logs = 0;
+    const auto serial = bd_oddmar_input_gate::frame_press_serial();
+    if (logs < 80 && logged_serial[slot] != serial) {
+        logged_serial[slot] = serial;
+        ++logs;
+        BD_LOG("INPUT", "Oddmar UI boundary blocked query=%u serial=%llu",
+               slot, (unsigned long long)serial);
+    }
+    return false;
+}
+
+template<unsigned int Slot>
+static bool oddmar_static_ui_hook(void* method)
+{
+    return oddmar_ui_query(reinterpret_cast<bool (*)(void*)>(g_oddmar_ui_orig[Slot])(method), Slot);
+}
+
+template<unsigned int Slot>
+static bool oddmar_instance_ui_hook(void* self, void* method)
+{
+    return oddmar_ui_query(reinterpret_cast<bool (*)(void*, void*)>(g_oddmar_ui_orig[Slot])(self, method), Slot);
+}
+
 // --- video URL -> local file mapping (BD_BYPASS_VIDEO_TRANSLATE) -----------
 // Where the original URL actually lives
 // -------------------------------------
@@ -117,6 +282,11 @@ static uintptr_t g_video_translate_orig = 0;
 // slot and had just been cleared.
 static std::string g_video_root;        // <...>/gamedata
 static std::string g_video_fallback;    // splash, used only if mapping fails
+// AndroidFullScreenVideoImplementation may extract the managed video's
+// IAssetReader into ../cache/temporary_video.mp4 before handing it to the
+// Unity VideoPlayer.  That second URL carries no assets/ component, so keep
+// the source resolved by the immediately preceding real request.
+static std::string g_video_last_source;
 static std::map<std::string, std::string> g_video_url_cache;   // url -> path
 static std::map<std::string, long long> g_video_size_cache;    // path -> bytes
 
@@ -136,6 +306,25 @@ static long long bd_file_size(const std::string& p)
     if (!in) return -1;
     std::streamoff n = in.tellg();
     return n > 0 ? (long long)n : -1;
+}
+
+extern "C" void bd_video_note_asset_source(const char* path)
+{
+    if (!path || !*path) return;
+    std::string p(path);
+    if (p.size() < 4) return;
+    const std::string ext = p.substr(p.size() - 4);
+    if (ext != ".m4v" && ext != ".mp4") return;
+    if (g_video_root.empty()) {
+        g_video_root = bd_gamedata_root();
+        g_video_fallback = g_video_root +
+            "/assets/Videos/mobge_and_senri_splash_video.mp4";
+    }
+    if (!p.empty() && p[0] != '/')
+        p = g_video_root + "/" + p;
+    if (bd_file_size(p) <= 0) return;
+    g_video_last_source = p;
+    BD_LOG("MEDIA", "xlat: noted asset video source %s", p.c_str());
 }
 
 // jar:file://!/assets/Videos/W1L1start.m4v
@@ -207,14 +396,24 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
     // string's buffer is a safe target for the pointer.
     std::string key = url ? std::string(url) : std::string();
     if (key.size() > 512) key.resize(512);
+    const bool temporary_cache_url = url && std::strstr(url, "temporary_video.mp4");
+    if (temporary_cache_url && !g_video_last_source.empty() &&
+        bd_file_size(g_video_last_source) > 0) {
+        // Do this before the URL cache lookup: the same temporary pathname is
+        // reused for multiple cutscenes and must follow the newest source.
+        g_video_url_cache[key] = g_video_last_source;
+        BD_LOG("MEDIA", "xlat: TEMP '%s' -> LAST_SOURCE %s",
+               url, g_video_last_source.c_str());
+    }
     auto ins = g_video_url_cache.emplace(key, std::string());
     std::string& path = ins.first->second;
-    if (ins.second) {
+    if (ins.second && !temporary_cache_url) {
         std::string rel;
         if (bd_video_relpath_from_url(url, rel)) {
             std::string cand = g_video_root + "/assets/" + rel;
             if (bd_file_size(cand) > 0) {
                 path = cand;
+                g_video_last_source = path;
             } else {
                 BD_LOG("MEDIA", "xlat: url='%s' -> NOT FOUND (%s)",
                        url, cand.c_str());
@@ -1367,6 +1566,61 @@ int main(int argc, char* argv[])
     loaded_modules[module_count++] = &lil2cpp;
     BD_TIME("after loading libil2cpp.so");
 
+    const bool oddmar_menu_gate =
+        config["input"]["oddmar_menu_gate"].value_or<bool>(false);
+    bd_oddmar_input_gate::configure(oddmar_menu_gate);
+    if (oddmar_menu_gate && config["package"]["packageName"].value_or<std::string>("") == "com.mobge.Oddmar") {
+        const uintptr_t pause_toggle = addr_lil2cpp + 0x93047C;
+        const uintptr_t try_quit = addr_lil2cpp + 0x8E53AC;
+        hook_address_detour(&lil2cpp, pause_toggle,
+                            (uintptr_t)&oddmar_pause_toggle_hook,
+                            &g_oddmar_pause_toggle_orig);
+        hook_address_detour(&lil2cpp, try_quit,
+                            (uintptr_t)&oddmar_try_quit_hook,
+                            &g_oddmar_try_quit_orig);
+        // MenuForHud, MenuBack, Mobge selectInput, InControl submit/cancel.
+        const uintptr_t ui_rvas[] = {0x948BF8, 0x948E04, 0x97D5F0, 0xFD4C48, 0xFD4C68};
+        const uintptr_t ui_hooks[] = {
+            (uintptr_t)&oddmar_static_ui_hook<0>, (uintptr_t)&oddmar_static_ui_hook<1>,
+            (uintptr_t)&oddmar_instance_ui_hook<2>, (uintptr_t)&oddmar_instance_ui_hook<3>,
+            (uintptr_t)&oddmar_instance_ui_hook<4>
+        };
+        for (unsigned int i = 0; i < 5; ++i)
+            hook_address_detour(&lil2cpp, addr_lil2cpp + ui_rvas[i], ui_hooks[i], &g_oddmar_ui_orig[i]);
+        oddmar_sdl_buttons = config["input"]["oddmar_sdl_buttons"].value_or<bool>(false);
+        if (oddmar_sdl_buttons) {
+            const uintptr_t jump = addr_lil2cpp + 0x9483A8;
+            const uintptr_t raw_button = addr_lil2cpp + 0x17EB88C;
+            const uintptr_t attack = addr_lil2cpp + 0x9485CC;
+            const uintptr_t attack2 = addr_lil2cpp + 0x9487E8;
+            const uintptr_t walk = addr_lil2cpp + 0x94DD00;
+            hook_address_detour(&lil2cpp, raw_button,
+                                (uintptr_t)&oddmar_raw_button_hook,
+                                &g_oddmar_raw_button_orig);
+            hook_address_detour(&lil2cpp, jump,
+                                (uintptr_t)&oddmar_jump_hook,
+                                &g_oddmar_jump_orig);
+            hook_address_detour(&lil2cpp, attack,
+                                (uintptr_t)&oddmar_attack_hook,
+                                &g_oddmar_attack_orig);
+            hook_address_detour(&lil2cpp, attack2,
+                                (uintptr_t)&oddmar_attack2_hook,
+                                &g_oddmar_attack2_orig);
+            hook_address_detour(&lil2cpp, walk,
+                                (uintptr_t)&oddmar_walk_hook,
+                                &g_oddmar_walk_orig);
+            BD_LOG("INPUT", "Oddmar SDL button bridge v4 raw=%p jump=%p attack=%p attack2=%p orig=%p/%p/%p/%p",
+                   (void*)raw_button, (void*)jump, (void*)attack, (void*)attack2,
+                   (void*)g_oddmar_raw_button_orig, (void*)g_oddmar_jump_orig,
+                   (void*)g_oddmar_attack_orig, (void*)g_oddmar_attack2_orig);
+        }
+        BD_LOG("INPUT", "Oddmar menu gate armed pauseToggle=%p tryQuit=%p orig=%p/%p",
+               (void*)pause_toggle, (void*)try_quit,
+               (void*)g_oddmar_pause_toggle_orig, (void*)g_oddmar_try_quit_orig);
+    } else {
+        bd_oddmar_input_gate::configure(false);
+    }
+
     plugin_host::load(&lil2cpp, config_path_abs.c_str());
 
     // HUD surgery (reads [ui_layout]). MUST precede il2cpp_patch::init. Inert if absent.
@@ -1573,6 +1827,7 @@ int main(int argc, char* argv[])
     auto unityNRender = unityClass->getMethod("()Z", "nativeRender");
     BD_TIME("before first nativeRender");
     BOOT_LOG("calling nativeRender from libunity.so\n");
+    bd_oddmar_input_gate::begin_frame();
     auto ret3 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
     BD_TIME("after first nativeRender");
 
@@ -1584,7 +1839,13 @@ int main(int argc, char* argv[])
     // or Unity crashes mid-shutdown. OnApplicationQuit has already saved PlayerPrefs;
     // we only flush our own SharedPreferences and fast-exit (skip dtor cascade).
     while (true) {
+        bd_oddmar_input_gate::begin_frame();
         auto ret4 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+        if (jnivm::com::unity3d::player::activity_finish_ready()) {
+            BD_LOG("EXIT", "Activity.finish requested and input idle - stopping Unity render loop");
+            bd_flush_prefs_impl();
+            _exit(0);
+        }
         if (!ret4.z) {
             BD_LOG("EXIT", "nativeRender returned false - Unity requested quit");
             bd_flush_prefs_impl();

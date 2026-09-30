@@ -44,15 +44,17 @@ controller=true
 controller_name="Xbox 360 Controller"
 dpad_synthesize_hat=true
 start_select_exit = true
+oddmar_menu_gate = true
+oddmar_sdl_buttons = true
 
 [input.remap]
 start   = "BUTTON_START"
 select  = "BUTTON_SELECT"
 back    = "BUTTON_SELECT"
-a       = "SPACE"
-b       = "K"
-x       = "NONE"
-y       = "NONE"
+a       = "BUTTON_A"
+b       = "BUTTON_B"
+x       = "BUTTON_X"
+y       = "BUTTON_Y"
 guide   = "ESCAPE"
 
 

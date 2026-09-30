@@ -41,9 +41,10 @@
 
 ## 0. 当前状态与遗留问题
 
-> **最后一次更新：2026-09-22 深夜 · 第三轮（Wwise 出声）**（分支 `oddmar`）
-> —— **黑屏已解决（§0.6-H）**、**L2 已定位（§0.7）**、**Wwise 初始化已修复（§0.8）**、
-> **Wwise 出声链路已打通（§0.9）**：标题界面既出画面也出 PCM。
+> **最后一次更新：2026-09-24 · 交接版**（分支 `oddmar`）
+> —— **黑屏基础链路已解决（§0.6-H）**、**Wwise 出声链路已打通（§0.9）**，
+> **启动 crash（OpenSL shim 缓存问题）已解决（§0.13f）**；当前剩余主线是
+> **ABXY/退出确认与进关视频时序、偶发进关黑屏、动作状态刷新**。
 > ⚠️ **跑测必带 `BD_BYPASS_VIDEO_TRANSLATE=1`，否则必然黑屏——见 §1.4-0，这是 opt-in 行为不是故障。**
 
 ### 0.1 状态速览
@@ -976,7 +977,7 @@ loader 内部再 `setenv()` 已经太晚 ⇒ 不要指望在 `main.cpp` 里设�
 ## 0.11 掌机部署与真机首跑验收（2026-09-23）
 
 > **结论：Oddmar 已在真机跑通 —— 画面 + 音频 + 判活九项全过，RSS 341 MB（容器 666 MB）。**
-> 部署根：`/mnt/mmc/Roms/ports/Oddmar/`，掌机 `172.16.6.77`（agent `dropbeak 0.6.4`）。
+> 部署根：`/mnt/mmc/Roms/ports/Oddmar/`，当前掌机 `172.16.7.30`（agent `dropbeak 0.6.4`）。
 
 ### A. 真机环境（实测，不是推断）
 
@@ -1200,7 +1201,7 @@ Wwise 一旦回收 player，就会**把整个出口关掉**（连视频音轨一
 > **2026-09-23 晚间更正**：本节 §0.13～§0.13c 保留排查史，但最终判定以 **§0.13d** 为准。
 > 最新真机证据显示：`guide/select/back = NONE` 与 `Start+Select` 长按都不是 ABXY 弹退出框的根因；
 > 用户要求已撤销这两项改动。ABXY 弹框由 Oddmar/InControl 的 Android 手柄按钮路径触发，
-> 当前有效方向是将 Oddmar 的面键映射到该游戏 legacy InputManager 的键盘语义（A/Y=SPACE，B/X=K）。
+> 旧实验映射 A=SPACE、B=K、X/Y=NONE 已被 §0.13d 的新候选映射取代。
 
 **用户现象**：同一台掌机上 Samurai2 / Maximus2 按键完全正确；Oddmar 里按 guide / select / back 会弹
 "是否退出游戏？"，严重时感觉"所有键都变成返回"。
@@ -1410,31 +1411,55 @@ A/B/X/Y/Start/back/guide 的轮次（`seq-nn` / `seq-la` / `seq-bn` / `seq-cn`�
   - `a = "BUTTON_A"`：第一次 A 弹退出确认框；第二次 A 对默认 Yes 执行 `UnityPlayerActivity.finish()`；
   - `a = "SPACE"`：Press-any-key 不弹框；再按 A 可进关；关卡内 A 只跳跃。
   因此问题在 Oddmar/InControl 对 **Android 手柄按钮路径** 的处理，不在 loader 的普通 keycode 映射。
-- B/X/Y 同理：改成键盘语义后，Press-any-key 界面分别按 A/B/X/Y 都不再弹退出框。
+- B/X/Y 的退出框规避依赖键盘化映射；当前候选配置将 B/X 分别映射到 `L`/`K`，Y 保持禁用，
+  具体动作仍需真机确认。
 
-**当前掌机配置（实验态）**：
+**当前掌机配置（2026-09-24 对照测试）**：
 
 ```toml
 [input.remap]
 start  = "BUTTON_START"
 select = "BUTTON_SELECT"
 back   = "BUTTON_SELECT"
-a      = "SPACE"   # Jump / UI confirm
-b      = "K"       # Attack / UI confirm
-x      = "NONE"    # no verified Oddmar action; do not duplicate A/B
-y      = "NONE"    # no verified Oddmar action; do not duplicate A/B
+a      = "BUTTON_A"
+b      = "BUTTON_B"
+x      = "BUTTON_X"
+y      = "BUTTON_Y"
 guide  = "ESCAPE"
 ```
 
-真机表现：
+网上手柄动作表属于推测；游戏键盘绑定 `Jump=space`、`Fire1=k`、`Fire2=l`，不能单独证明推荐手柄映射。
+键盘候选 `A=SPACE, B=L, X=K, Y=NONE` 已撤出真机对照配置。
 
-| 场景 | A | B | X | Y |
-|---|---|---|---|---|
-| Press any button | 不弹退出框 | 不弹退出框 | 已禁用 | 已禁用 |
-| 主界面 / Start 菜单 | 确认 | 确认 | 已禁用 | 已禁用 |
-| 关卡中 | 跳跃 | 攻击 | 已禁用 | 已禁用 |
+2026-09-24 真机在单次启动进程内连续测试四次：A、B 各自连续按后顺利进关；X 连续按的两轮中一轮卡住、一轮成功。
+进关后 ABXY 均会弹确认界面，再按一次关闭弹窗，角色随后跳一下。
 
-X/Y 不再复制 A/B：Oddmar 中没有验证过它们的操作语义，配置为 `NONE`，避免错误注入或改变玩家的按键习惯。
+日志中只有一次 `unityloader` / `main()` 启动，没有第二次 loader 重启；但在同一运行中，
+退出 Yes 会调用未实现的 `UnityPlayerActivity.finish()`（过去记为 `[STUB-MISS]`，实际没有退出），
+关卡视频 `W1L1start.m4v` 已开始后又出现 `temporary_video.mp4 -> splash`，
+`SurfaceTexture` 从 `sinks=1` 增至 `sinks=2`。因此“退出流程与进关流程重叠”是有日志支持的根因假设，
+并非重新启动了 loader 进程。
+
+### 0.13e 修复 Activity.finish 的无操作 stub（2026-09-24）
+
+- `UnityPlayerActivity.finish()V` 已注册为真实 stub：设置原子退出请求，不再出现 `[STUB-MISS]`。
+- 后续输入在 `injectEvent()` 入口被吞掉；主循环等待当前输入注入回调退出后，在 `nativeRender()` 返回处快速退出。
+- 预期效果：确认 Yes 会结束当前端口进程，避免确认键继续驱动正在切换的场景并再次播放启动 splash；
+  Start+Select 即时退出热键不变。需要真机检查日志应有 `UnityPlayerActivity.finish() requested`、
+  `nativeInjectEvent suppressed after Activity.finish()`（若还有后续事件）、
+  `Activity.finish requested and input idle - stopping Unity render loop`，且不应再有 `finish()V -> returning default`。
+- 2026-09-24 首次部署的构建因共享 CMake cache 中 `BD_ENABLE_OPENSLES_SHIM=OFF` 而启动即
+  `Unknown symbol "slCreateEngine"` / `SIGABRT`；Firebase 异常出现在崩溃回溯之后，是次生噪声。
+  已显式 `-DBD_ENABLE_OPENSLES_SHIM=ON` 重建并重推，SHA-256
+  `71e05a297498c3eb442b20d3b9ee4eb4594e7355fe936a5d1abfed2a4f02095c`；
+  后续 Oddmar/Wwise 构建必须显式保留该 flag，不能信任共享 build dir 的旧缓存。
+- 退出确认框第一次出现时的 ABXY 是否已同时开始关卡加载，目前不能仅从现有日志排除。
+  若确认 Yes 立即退出后仍会在出现确认框的那次按键直接触发进关，应继续做“先过滤触发确认框的面键”实验。
+
+2026-09-24 本地候选键位 `A=SPACE, B=L, X=K, Y=NONE` 仍只作映射实验记录；不作为当前掌机映射。
+
+历史实验曾把 X/Y 设为 `NONE` 以避免误注入；这不是当前掌机配置。当前部署恢复
+`x = "BUTTON_X"`、`y = "BUTTON_Y"`，但截至本轮实机测试仍未观察到 X/Y 在关卡内的有效动作。
 
 **未闭环问题（当前最大残留）**：
 
@@ -1453,6 +1478,194 @@ X/Y 不再复制 A/B：Oddmar 中没有验证过它们的操作语义，配置�
 - `[BD-PAD-MAP]`：启动时 dump SDL 映射、raw button 数、remap 表；
 - `BD_PAD_REPLAY`：容器内自动回放按键；
 - `nativeInjectEvent keycode/action/device/result`：确认 Unity native 注入成功；
+
+### 0.13f 当前交接状态：启动已稳定，按键/进关时序仍未闭环（2026-09-24）
+
+这是交给下一轮 AI 对话的当前基线，优先级高于本节之前的排查史：
+
+1. **启动崩溃已排除。** 首次 `finish()` 修复版本因共享 CMake cache
+   `BD_ENABLE_OPENSLES_SHIM=OFF` 出现 `Unknown symbol "slCreateEngine"` / `SIGABRT`；
+   后续已显式用 `BD_ENABLE_OPENSLES_SHIM=ON`、`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`
+   重建并部署。当前掌机 loader SHA-256 为
+   `71e05a297498c3eb442b20d3b9ee4eb4594e7355fe936a5d1abfed2a4f02095c`，
+   本轮用户确认“这次不崩”。以后共享 `build-aarch64/` 每次都要显式核对这两个 CMake
+   选项，不能只依赖旧缓存。
+
+2. **当前掌机仍使用原始 ABXY 映射**（没有 `A=SPACE`、`B=L`、`X=K` 等键盘化实验）：
+   `A/B/X/Y = BUTTON_A/B/X/Y`，`guide = ESCAPE`，`select/back = BUTTON_SELECT`；
+   `Start+Select` 为即时退出热键。此前的 `guide/select/back = NONE` 和长按
+   `1200 ms` 修改均已撤销，不能当作当前状态。
+
+3. **用户最新实机行为：**
+   - 启动后的 “Press any button” 界面按 A/B/X/Y，均不弹退出确认框；
+   - 进入主界面后，A/B 可作为点击键；D-pad 可移动选择；
+   - 关卡内 A=跳跃、B=攻击，X/Y 当前未观察到有效动作；Start/Select 可呼出菜单，
+     菜单中 A/B 可点击；
+   - 但进关加载期间仍可能出现“是否退出游戏？”确认框；按任意 ABXY 可关闭，
+     随后继续显示启动相同的 splash/logo 与下方字幕，再进入关卡。用户怀疑这次按键
+     同时触发了“退出确认/退出流程”和“进关流程”，这与日志里同一进程内
+     `W1L1start.m4v` 后又出现 `temporary_video.mp4 -> splash`、`SurfaceTexture sinks=1`
+     增至 `sinks=2` 的证据相符，但**尚未被证明是唯一根因**。
+   - 进关偶发卡在黑屏；正常加载约 10 秒，异常时可长时间停在黑屏。
+   - 之前“同一键第二次跳跃/攻击无效，先按 D-pad 才恢复”的状态刷新问题也没有获得
+     用户确认的最终修复；不能写成已解决。
+
+   **本轮对应日志已下载到本地**：
+   `C:\Users\Administrator\AppData\Local\Temp\Oddmar-log-20260924-latest-test.txt`
+   （掌机原文件当时约 235 KB，之后仍只保留一个 `log.txt`）。日志给出的时序锚点是：
+   `W1L1start.m4v` 完整读取结束 → `Cannot Prepare a disabled VideoPlayer` →
+   `temporary_video.mp4` 因缺少 `assets/` 路径回退到 `mobge_and_senri_splash_video.mp4` →
+   `SurfaceTexture(texture=119) registered (sinks=2)`。因此“进关时又启动了 splash
+   视频”的观察有直接日志依据；但这仍不能单独证明是 ABXY 触发的退出确认流程，需下一轮
+   取得确认框出现/按键/`finish()` 的同一秒级时间线。
+
+4. **`UnityPlayerActivity.finish()` 当前实现：** 已从无操作 stub 改为原子退出请求；
+   请求后抑制后续 `injectEvent()`，主循环在当前输入回调结束后退出。用户最新测试中
+   未再出现启动 crash；但本轮日志没有出现 `UnityPlayerActivity.finish() requested`
+   或 `Activity.finish requested and input idle - stopping Unity render loop`，进程最后仍是
+   用户按下 Start+Select 触发的即时退出。因此“确认框的 Yes 是否真的调用了 finish()”
+   仍未闭环，尚未取得一次“弹框出现 → 按 Yes → 进程立即结束且不再播 splash”的完整日志。
+   下一轮应保留 `log.txt`，重点检索：
+   `UnityPlayerActivity.finish() requested`、
+   `nativeInjectEvent suppressed after Activity.finish()`、
+   `Activity.finish requested and input idle - stopping Unity render loop`、
+   `nativeRender returned false`，以及视频 `publish/swap` 的先后关系。
+
+5. **下一轮建议的最小取证顺序：**
+   ① 清空掌机 `log.txt`，从 Ports 菜单启动；② 不在视频中按键，等待
+   “Press any button”；③ 按一次 A 并记录是否出现确认框；④ 若进入关卡，在黑屏/
+   splash 出现时立即停止额外按键；⑤ 将完整日志下载到本地后再分析，不要在掌机保留
+   多轮巨型日志；⑥ 对比 `W1L1start.m4v`、`temporary_video.mp4`、splash 的
+   `SurfaceTexture` sink 数量和时间戳。若确认框的 Yes 已触发 `finish()`，则应先验证
+   进程是否退出；若没有 `finish()`，再继续追踪 InControl/场景切换调用链。
+
+6. **构建/部署注意：** 使用 Release + `BD_ENABLE_LOG=ON`、TRACE/VERBOSE/IL2CPP_TRACE
+   全 OFF；每次显式传
+   `-DBD_ENABLE_OPENSLES_SHIM=ON -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`；
+   `strip` 后再推送。掌机目录为 `/mnt/mmc/Roms/ports/Oddmar/`（大小写路径
+   可能显示为 `PORTS`），日志只保留一个 `log.txt`。大文件推送遵循
+   `AGENTS.md` 的 Dropbeak chunk + verify 流程。
+
+   **本项目实际构建路径（交接时不要改成通用 Bogodroid 路径）：**
+
+   ```text
+   源码：     D:\Locke\gitee\Bogodroid-oddmar
+   构建目录： D:\Locke\gitee\Bogodroid-oddmar\build-aarch64
+   容器：     bogo-builder:unity2017-armv7
+   ```
+
+   本轮实际使用的构建命令（PowerShell）：
+
+   ```powershell
+   docker run --rm --platform linux/amd64 `
+     -v "D:\Locke\gitee\Bogodroid-oddmar:/work" `
+     -w /work/build-aarch64 `
+     bogo-builder:unity2017-armv7 bash -c @"
+   cmake .. -DCMAKE_BUILD_TYPE=Release `
+     -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF `
+     -DBD_ENABLE_OPENSLES_SHIM=ON `
+     -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
+   cmake --build . -j2 --target unityloader
+   aarch64-linux-gnu-strip --strip-unneeded unityloader
+   "@
+   ```
+
+   共享 `build-aarch64` 时不要只执行 `cmake --build`：必须先显式重新配置，
+   并核对 `CMakeCache.txt` 中 `BD_ENABLE_OPENSLES_SHIM=ON`、
+   `JNIVM_ENABLE_RETURN_NON_ZERO=OFF`。否则旧缓存可能重新产出缺少 `slCreateEngine`
+   的 loader，启动时直接 `SIGABRT`。
+
+   **本轮成功构建记录（2026-09-24）：**
+
+   - 实际工作树就是 `D:\Locke\gitee\Bogodroid-oddmar`，不能误切到
+     `D:\Locke\gitee\Bogodroid`（那是另一棵 Unity 6 工作树）。
+   - 实际构建目录就是 `D:\Locke\gitee\Bogodroid-oddmar\build-aarch64`；
+     容器内工作目录为 `/work/build-aarch64`。不需要新建 `build-oddmar-video`
+     或其它临时构建目录。
+   - 成功构建使用 `bogo-builder:unity2017-armv7`，挂载
+     `D:\Locke\gitee\Bogodroid-oddmar:/work`，目标为 `unityloader`。
+   - 成功产物（已 `aarch64-linux-gnu-strip --strip-unneeded`）：
+     `build-aarch64/unityloader`，大小 `6,947,576` 字节，
+     SHA-256 `eb4e3d83d2962101a3d6ea34634b3cccfd13774069aeec96465a2e152b465d92`。
+   - 本轮曾因错误地清空共享缓存而暴露依赖问题：`bogo-builder:unity2017-armv7`
+     本身没有 FFmpeg 的 pkg-config 文件，不能把它当作全新空目录配置环境。
+     正常增量构建应沿用已验证的 `build-aarch64` 缓存，并始终显式传入上面的两个
+     关键开关；若必须清缓存，先准备与目标架构匹配的 FFmpeg/SDL 开发文件。
+
+   **本轮部署记录（2026-09-24）：**
+
+   - 掌机地址：`172.16.7.30`；Dropbeak agent：`0.6.4`。
+   - 目标文件：`/mnt/mmc/Roms/ports/Oddmar/unityloader`。
+   - 推送前先保留远端旧文件：`unityloader.bak-pre-video-fix-0924`。
+   - 推送使用 `--force --chunk --chunk-size 16m --verify`；完成后用远端
+     `ls -la` 和 `sha256sum` 核对字节数与本地产物一致。
+   - 本轮本地产物 SHA-256：
+     `eb4e3d83d2962101a3d6ea34634b3cccfd13774069aeec96465a2e152b465d92`。
+
+7. **APK/IL2CPP 反编译结论（2026-09-24）：**
+   - Oddmar APK/staging 与 IL2CPP dump 输入目录（实际路径）：
+     `D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage`。此前交接记录中的
+     `D:\Locke\gitee\LinuxArmPorts\oddmar\_port\_stage` 是旧/误写路径，不能作为输入目录。
+     后续从实际目录取
+     `libil2cpp.so`、`assets\bin\Data\Managed\Metadata\global-metadata.dat`，不要误用
+     FiveHeartsProject 自己的 APK 文件。
+   - `Il2CppDumper` 最近一次输出副本位于
+     `C:\Users\Administrator\AppData\Local\Temp\oddmar-dumper-0924\`，含 `dump.cs`、
+     `il2cpp.h`、`script.json`、`stringliteral.json`、`DummyDll\`；这是临时目录，若不存在，
+     使用上面的 staging 输入重新运行 Il2CppDumper。
+   - 使用 `Il2CppDumper.exe`（`E:\BaiduNetdiskDownload\Games\FiveHeartsProject\Docs\tools\il2cppdumper\bin`）
+     对 staging 的 `libil2cpp.so` + `global-metadata.dat` 成功生成了
+     `dump.cs`、`il2cpp.h`、`DummyDll`。该 APK 是 Unity `2018.4.36f1`、IL2CPP metadata
+     `24.1`，不是 metadata 损坏；之前 Cpp2IL 失败是工具版本兼容问题。
+   - 关键托管调用链已确认：`MRMapData.Video.play` →
+     `FullScreenVideo.playFullScreenVideo` → `AndroidFullScreenVideoImplementation`；
+     后者将 `IAssetReader` 交给 `StandaloneFullscreenVideo` 的
+     `UnityEngine.Video.VideoPlayer`，并可能抽取到 `../cache/temporary_video.mp4`。
+   - 因而日志中的 `temporary_video.mp4` 不是退出流程专属文件，也不是第二个 splash 资源。
+     它是 Mobge Android 全屏播放器为当前关卡视频生成的临时文件名。原端口 URL 翻译器在
+     无 `assets/` 的 URL 上一律回退 splash，导致 `W1L1start.m4v` 播放链随后被错误改成
+     splash，正是黑屏/重复 logo 的直接高可信根因。
+   - 已在 `projects/unityloader/main.cpp` + `javastubs/bd_assetlocator.cpp` 修正：成功解析真实
+     `assets/...` 视频或 `AssetLocator.GetReaderWrapper()` 打开 `.m4v/.mp4` 时记录最近源；遇到
+     `temporary_video.mp4` 时复用该源，并输出 `xlat: TEMP ... -> LAST_SOURCE ...`。这覆盖
+     `W1L1start.m4v` 这类先经 `AssetLocator` 完整读入、再交给临时文件名播放的链路，避免错配到
+     上一段 `game-start.m4v` 或 splash。同一临时 URL 会在每次请求前更新，适配多段关卡视频。
+     staging 与 APK 未改动。
+
+8. **按键问题的 IL2CPP/RVA 静态分析（2026-09-24，未修改/未部署）：**
+   - 实际分析文件为
+     `D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage\Oddmar\gamedata\lib\arm64-v8a\libil2cpp.so`，
+     metadata 为同一 staging 下的
+     `Oddmar\gamedata\assets\bin\Data\Managed\Metadata\global-metadata.dat`；
+     反编译副本仍在 `C:\Users\Administrator\AppData\Local\Temp\oddmar-dumper-0924\`。
+   - `dump.cs` 确认 Oddmar 使用 Mobge `MRInput` + InControl。`MRInput.get_menuButton()`（RVA
+     `0x948D78`）经过 InControl 的 `CommandWasPressed`，`MRInput.get_menuBack()`（RVA
+     `0x948E04`）组合 InControl action 的 `WasPressed`；它们不是只读取 Android Back/ESC。
+   - 实际 `Xbox360AndroidUnityProfile.Define()`（RVA `0x1772BE8`）写入逻辑
+     `Action1..Action4`（枚举值 `19..22`），并建立 Android/Xbox 手柄 profile 的按钮映射。
+     因而 ABXY 进入游戏后会经过 InControl 的逻辑 action 层；loader 日志中
+     `A=96`、`B=97`、`X=99`、`Y=100` 只能证明 Android keycode 本身未混入 ESC/Back，
+     不能证明 UI 不会把这些 action 当作 submit/cancel。
+   - `InControlInputModule` 还存在独立的 `submitButton/cancelButton`、`SubmitWasPressed`、
+     `CancelWasPressed` 路径。当前静态证据尚未闭合到“退出确认框”的唯一调用点，也尚未证明掌机
+     运行时一定选中了 `Xbox360AndroidUnityProfile`；所以暂不能把问题定性为单纯 keycode 错位。
+   - 当前最可信的待验证方向是：InControl profile 映射、UI cancel 分流、Unity legacy
+     keyboard 与 InControl 双路输入叠加，以及 Android Back/finish 路径之间的组合；视频
+     `temporary_video.mp4` 属于全屏播放器临时文件名，不能单凭文件名认定为退出流程。
+
+   **后续静态/运行时验证计划（按顺序）：**
+
+   1. 从 `Xbox360AndroidUnityProfile.Define()` 和 `GenericAndroidUnityProfile.Define()` 的
+      `InputControlMapping` 构造参数中解出每个逻辑目标对应的物理 Button/KeyCode，并反查
+      InControl 的 profile 选择器，确认掌机的 `Xbox 360 Controller` 实际命中哪个 profile。
+   2. 搜索 `MRInput.get_menuBack()`、`get_menuButton()` 及 `InControlInputModule.CancelWasPressed`
+      的调用者，闭合到 `MRMenuManager`/暂停或退出确认 UI 的入口；区分托管菜单逻辑与
+      Android Activity `finish()`。
+   3. 在一次清空日志的实机测试中记录按键时间线：单独 A/B/X/Y、guide、Start+Select，分别在
+      Press-any-button、主菜单、关卡剧情视频和操作阶段测试；同时记录 InControl profile、
+      `Submit/CancelWasPressed`、`finish()` 和视频 `stop/stopIfPlaying` 日志。
+   4. 只有当上述证据确认输入分流后，再决定修改 remap、UI cancel 屏蔽或视频取消策略；在此之前
+      不改源码、不重新构建、不部署，避免把多个输入路径混在一起。
 - 默认屏蔽高频 `[BD-FINDCLASS]` 与 `[BD-ANY-MISS]`，需要完整 JNI 噪声时用 `BD_JNI_TRACE=1`。
 
 **下一步建议**：
@@ -1461,7 +1674,275 @@ X/Y 不再复制 A/B：Oddmar 中没有验证过它们的操作语义，配置�
 2. 若仍无效，继续沿“Unity legacy keyboard state 没刷新”查，而不要回到 guide/select/back：
    - 尝试让键盘化面键走真实 `SDL_KEYDOWN/UP` 分支等价路径；
    - 或在 remap 层为键盘化按钮合成 `MotionEvent + KeyEvent` 的不同顺序/延迟；
+
+### 0.14 菜单入口闸门实验（2026-09-30）
+
+用户期望的输入语义是：只有 `guide` 或 `start` 能打开退出确认/暂停 UI；UI 打开后，
+`d-pad` 与 `ABXY` 才用于导航和确认；游戏态下 `d-pad` 与 `ABXY` 只能控制角色。
+
+对 staging 中的实际 `libil2cpp.so`（`D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage`）及
+`dump.cs` 做了静态核对：
+
+- `MRMainMenuUI2.Update()`（RVA `0x92130C`）在 `MRInput.get_MenuExceptController()` 为真时
+  直接调用 `MRLevelContext.tryQuit()`（RVA `0x8E53AC`），这是 ABXY 误触退出确认的明确入口；
+- `MRGameHud2.Update()`（RVA `0x92F048`）在游戏态通过 `updateMenuNavigation()` 检查
+  `MenuForHud/MenuBack`，随后落到 `pauseClick()`（RVA `0x92E9C8`）和 `pauseToggle()`；
+- `MRInput.get_menuButton()`（RVA `0x948D78`）和 `get_menuBack()`（RVA `0x948E04`）只是
+  InControl 状态 getter，同时被暂停 UI 的导航/取消路径复用，不能在 getter 层一刀切；
+- `InControlInputModule` 的 `SubmitWasPressed` / `CancelWasPressed` / `MoveAction` 是独立
+  的 UI 路径，不能通过简单的 Android keycode 重映射可靠地区分“游戏态”和“UI 态”；
+- `Xbox360AndroidUnityProfile.Define()` RVA `0x1772BE8` 确认 ABXY 被注册为 Action1..4，
+  所以不应再把 ABXY 改成 SPACE/K/L 来“躲开”菜单。
+
+已加入一个默认关闭的 loader hack：`[input] oddmar_menu_gate = true` 时，仅对
+`com.mobge.Oddmar` 的 `pauseClick()` 与 `tryQuit()` 安装 detour。SDL 输入层将 Start/Guide
+记录为同一个一次性菜单脉冲：游戏态 `MRGameHud2::_state == Playing (1)` 时，只有带脉冲的
+`pauseClick()` 才能打开暂停 UI；主菜单的 `tryQuit()` 同样必须带脉冲。进入 UI 后不再过滤
+`MRInput` getter，因此 ABXY/D-pad 仍可由 InControl 处理确认、取消和导航。
+
+首轮曾将 Oddmar 配置的 loader `start_select_exit` 设为 `false`，避免“按 Start 打开菜单后
+再按 Select”被 loader 自己抢先退出。容器 `GlES_Dev` 已恢复并使用 Release、LOG=ON、
+`BD_ENABLE_OPENSLES_SHIM=ON`、`JNIVM_ENABLE_RETURN_NON_ZERO=OFF` 重建；待产物校验后推送
+`172.16.7.30:/mnt/mmc/Roms/PORTS/Oddmar`，上机日志应出现 `pauseClick/tryQuit` 闸门地址和
+`Oddmar menu pulse armed`。
    - 必要时反查 Unity 2018 Android legacy keyboard 状态是否只在特定 input update 阶段刷新。
+
+### 0.14a SDL 按钮桥接 v2 与恢复快速退出（2026-09-30，已构建/部署）
+
+掌机首轮反馈：ABXY 不再弹退出确认或暂停菜单，但四键均变成跳跃，Start+Select 也不能退出。
+日志确认 A/B/X/Y 仍分别是 Android keycode 96/97/99/100，`pauseClick blocked while Playing`
+与按键对应；不能据此宣称 Unity/InControl 四路状态正确。快速退出失效则由配置的
+`start_select_exit=false` 直接解释，已恢复 `true`，沿用原来的即时组合键退出，不新增长按。
+
+继续核对实际 IL2CPP（SHA256
+`e2b47ae47e9732f34a081773505903fac4658075bb97b41ce727c64aaa028dd9`）后：
+
+- `UnityInputDevice.ReadRawButtonState(int)` RVA `0x17EB88C` 经生成的 joystick button 字符串
+  查询 Unity `Input.GetKey(string)`，并不是直接拿 Android keycode 当 InControl 按钮号。
+- `Xbox360AndroidUnityProfile.Define()` 的原始按钮索引为 A/B/X/Y=0/1/2/3、肩键=4/5、
+  扳机=6/7、摇杆点击=8/9、Start=10、Select=11；`JoystickId` 字段偏移为 `0x1A8`。
+- `MRInput.get_jumpDir()` 使用 Action1，`get_attack()` 使用 Action3，`get_attack2()` 使用
+  Action2；键盘 fallback 为 Space/K/L。这里只确定输入契约，尚未证明“四键跳跃”的底层根因。
+
+新增默认关闭的 `[input] oddmar_sdl_buttons=true`，仅在 Oddmar 包名且菜单门控打开时安装：
+
+1. hook `ReadRawButtonState`，仅对 `JoystickId==1` 返回独立 SDL 物理按钮状态；其它 joystick
+   保留原方法。原方法仍执行以便记录 native/SDL 差异，变化日志上限 160 条。
+2. hook `MRInput.get_jump()`（RVA `0x9483A8`）：手柄被使用后，原方法为 true 时还必须物理 A
+   按下才放行，阻止 B/X/Y 经另一条 fallback 路径跳跃。此为限定范围 workaround，
+   不等于已定位 Unity 状态异常；UI submit/cancel getter 不改。
+3. SDL replay 同样更新物理状态与菜单脉冲，Start/Guide 的同一个脉冲最多存活 300 ms，
+   防止延迟进入 UI。保留原来的 `pauseClick/tryQuit` 转换点门控。
+
+`GlES_Dev` 使用 Release + LOG=ON、TRACE/VERBOSE/IL2CPP_TRACE=OFF、OpenSLES shim=ON、
+`JNIVM_ENABLE_RETURN_NON_ZERO=OFF` 构建并 strip。`tools/oddmar_input_smoke.sh` 用实际游戏库、
+Xvfb 和 SDL replay 验证启动、ABXY 四路状态与 Start+Select 退出码 0；最终 staging 配置复跑
+通过，日志在容器 `/tmp/oddmar-input-smoke.3t3nKG/`。观测到独立 mask 0x1/0x2/0x4/0x8。
+native/SDL 瞬时不同可能来自查询/事件时序，不能仅凭这一点证明原状态合并。
+
+已从本地 `D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage\Oddmar` 推送到
+`172.16.7.30:/mnt/mmc/Roms/PORTS/Oddmar`，chunk/force/verify 及远端 SHA256、大小核对通过：
+
+- `unityloader`：6,656,080 bytes，SHA256
+  `e0084b43b5a61403bd34c757a26c8424799535148f4268cc129fde74deaf7757`。
+- `unity.toml`：2,775 bytes，SHA256
+  `b12dff72568536de168652bbb72ac18af5d8f85319e982e5fad496d0769e4d90`。
+- 启用 `start_select_exit=true`、`oddmar_menu_gate=true`、`oddmar_sdl_buttons=true`，
+  controller 名称为 `Xbox 360 Controller`，ABXY 保持 `BUTTON_A/B/X/Y`。
+- 本地/远端旧程序与配置备份后缀为 `.bak-pre-sdl-v2-20260930-142411`；
+  远端旧日志另存 `log.bak-pre-sdl-v2-20260930-142411.txt`，未清空原日志，未远程启动游戏。
+
+**实机仍待验证**：关卡内 A 跳跃、B/X 的攻击/其它原始动作、Y 原始动作、D-pad 移动，
+Start/Guide 打开 UI 后 D-pad 与 ABXY 的导航/确认/取消，以及 Start+Select 快速退出。
+容器 smoke 不覆盖实际关卡动作和 UI 导航，不能写成“实机已修复”；新版启动应有
+`Oddmar SDL button bridge v2`、`Start+Select hotkey enabled=1`，并记录 raw button mask。
+
+### 0.14b v3：菜单跨界输入隔离与 X 攻击边沿（2026-09-30）
+
+v2 实机确认 A 跳跃、X smash 已分别生效，但出现两项新反馈：单次 Start/其它 UI 按键
+会打开后立即关闭菜单；连续 X 经常只有一次攻击。已拉取实机日志到 staging
+`Oddmar\log-sdl-v2-20260930.txt`（913,778 bytes）。X DOWN/UP 均为 124 次，Guide 各 3 次；
+Start 为 14/13 次，末次 Start+Select 热键直接退出，因此没有末次 UP。数量匹配只能排除
+明显的物理事件缺失，不能证明每次攻击被游戏接受。
+
+静态核对发现 v2 门控的确定漏洞：`pauseClick` 只在 Playing 检查脉冲，原方法最终 tail-call
+`pauseToggle`（RVA `0x93047C`）。第一次打开后 `_state` 改为 Paused，第二条调用路径便
+绕过 v2 的 Playing 分支。`MRGameHud2.Update/updateMenuNavigation`、Mobge UI 和
+InControl 均能参与切换，但旧日志没有记录放行调用，尚不能指认实机每次双切换的唯一来源。
+
+v3 改动：
+
+- 新增可独立测试的 `OddmarInputState`，SDL 真正的 DOWN 沿才递增输入序号；重复 DOWN
+  不再生成菜单脉冲。每次 `nativeRender` 前固定按钮/扳机快照，快速 DOWN/UP 之间的按下沿
+  至少保留在下一次渲染快照，同帧多次查询不会消耗它；下一快照清除，不做无限连发或跨帧重放。
+- 闸门改到 `pauseToggle`：Playing 仍必须有 Start/Guide 脉冲；打开或关闭菜单均只能对
+  一次物理输入序号放行一次。旧输入松开后，新的 A/B 命令可以正常确认/取消，不要求
+  所有 UI 关闭操作都按 Start。菜单脉冲/切换输入的有效期仍为 300 ms。
+- 已用于菜单切换/`tryQuit` 的输入序号不再交给下一层 UI submit/cancel。对应查询是
+  `MRInput.get_menuForHud` (`0x948BF8`)、`get_menuBack` (`0x948E04`)、
+  `MRMenuControlWithoutCursor.get_selectInput` (`0x97D5F0`)、InControl submit/cancel
+  (`0xFD4C48` / `0xFD4C68`)。新输入保留原逻辑，方向导航 getter 不修改。
+- Mobge 的 `selectInput` 静态确认会复用 Jump、MenuButton 和 Attack，这解释了为何
+  “仅入口门控、UI 层完全不碰”不足以保证一键一切换。
+- `MRInput.get_attack` (`0x9485CC`) 原先是 Action3.WasPressed 与 Unity Fire1 的 OR，
+  v3 在使用手柄后改为同帧稳定的物理 X 按下沿。其上层 `get_Attack` (`0x94709C`)
+  仍保留输入优先级/禁用检查，角色动作与攻击冷却未修改，不承诺冷却中每次按键都会出招。
+- 新日志为 `Oddmar SDL button bridge v3`、`attack edge native/SDL/serial/mask`、
+  `pauseToggle allowed/blocked state/serial` 和 `UI boundary blocked query/serial`。
+  UI 日志的 query 0..4 按上面的五条查询路径对应。
+
+新增 `tools/oddmar_input_state_test.cpp`（容器 C++17，`-Wall -Wextra -Werror`），覆盖 ABXY
+独立快照、快速点按、12 次连续 X 边沿、重复 DOWN、同帧/跨帧菜单重复调用、松开后 A/B
+确认取消、按住 D-pad 开菜单后仍可确认、退出弹框输入隔离、300 ms 过期和 SDL tick 回绕。
+容器状态测试通过。
+`tools/oddmar_input_smoke.sh` 同时加强 ABXY mask 断言；启动 smoke 不等于关卡连击或
+完整菜单动画实测，最终构建/推送信息见本节后续部署记录。
+
+**最终部署记录（2026-09-30 16:10）：**
+
+- `GlES_Dev` Release + LOG=ON、TRACE/VERBOSE/IL2CPP_TRACE=OFF、OpenSLES=ON、
+  `JNIVM_ENABLE_RETURN_NON_ZERO=OFF` 构建、strip 完成。保留原有 LTO type-mismatch 警告，
+  无构建错误；本地与容器修改源码已核对 SHA256 一致。
+- 最终 smoke 日志：`/tmp/oddmar-input-smoke.P6DL22/`。全部 10 个 detour 成功安装，
+  ABXY 独立 mask、三次 X 按下/释放与 Start+Select 退出码 0 通过，未发现 SEGV/terminate。
+- 从真实 staging 推送 `unityloader` 到 `172.16.7.30:/mnt/mmc/Roms/PORTS/Oddmar`，
+  大小 6,660,224 bytes，SHA256
+  `a3b9e43689be381378ab0d1261cfb102395caf88453a7aa065e36954aaca8d92`。
+  Dropbeak chunk/force/verify 与远端复核通过，执行权限已设置、已 sync。
+- `unity.toml` 未修改/未重新推送，远端 SHA256 仍为
+  `b12dff72568536de168652bbb72ac18af5d8f85319e982e5fad496d0769e4d90`。
+- 本地与掌机旧程序/配置备份后缀 `.bak-pre-sdl-v3-20260930-160539`；掌机旧日志为
+  `log.bak-pre-sdl-v3-20260930-160539.txt`。推送前确认没有运行中的 `unityloader`，未手动
+  清空日志，也未远程启动游戏。
+
+**下一轮实机检查**：单按 Start/Guide 后菜单是否稳定停留、A/B 确认取消、连续 X 的 smash
+以及 Start+Select 退出。如果还有漏攻击，按 `attack edge SDL=1` 和输入 serial 区分
+“已交付攻击请求”与“角色动作拒绝/冷却”，不要仅凭物理 DOWN/UP 日志宣称动作已执行。
+
+### 0.14c v4：恢复原版按下沿语义并隔离 Attack2（2026-09-30）
+
+本轮先拉取上一版实机日志到
+`Oddmar\\log-sdl-v3-20260930-latest.txt`（588,883 bytes，SHA256
+`D029F3167F949B65295FD6B368FDBF41DE31DF758FB40963AB6B9EDFB575AA86`）。日志显示 X 的
+每次 DOWN/UP 都能到达 `MRInput.get_attack`（serial 185..217，`SDL=1`），因此“只能攻击一次”
+不是物理边沿丢失；同时 A/B/Y 的 native attack 也会被置 1，说明 Unity 键盘回退路径仍在
+串扰。Guide/Start 与后续 A/B 的菜单 serial 已能区分，Start+Select 仍可退出。
+
+原版静态逻辑（`libil2cpp.so` 与 `dump.cs`）核对结果：
+
+- `MRJoypadControl.Update` (`0x8DC97C`) 先检查 Jump，再检查 Attack (`0x94709C`)，随后检查
+  Attack2 (`0x9499D0`)；同一帧后者会把 `WalkArgs.type` 从普通攻击 type 6 覆盖为 type 4。
+  `0x19AB9B8` 跳表对应 type 4=down gesture、6=normal attack、7=jump、8=down jump。
+- `MRInput.get_jump` (`0x9483A8`) 最终使用 `Action1.WasPressed`/`Jump.GetButtonDown`；
+  `get_attack` (`0x9485CC`) 使用 `Action3.WasPressed`/`Fire1.GetButtonDown`；
+  `get_attack2` (`0x9487E8`) 使用 `Action2.WasPressed`/`Fire2.GetButtonDown`，均为按下沿，
+  不是 held 电平。
+- `MRCharacter2.readyToDoubleJump` (`0x94C190`) 要求 `doubleJumpEnabled` 且
+  `leftAirJumpCount>0`；`doSecondJump` (`0x94D0FC`) 会递减计数，`setLeftAirJumpCount`
+  (`0x94DB30`) 才会补回 1。因此原版不会因持续按住/快速轮询而无限跳。
+- `MRCharacter2.walkToTarget` (`0x94DD00`) 的 type 6 分支调用当前 melee attack；
+  `MRCharacter2MeleeAttack.attack` (`0x951E54`) 与 `MGWCComboAttack.attack` (`0xB70F2C`)
+  都没有“本关只能一次”的永久锁，后续 X 无动作应优先检查请求是否被 Attack2 覆盖或仍处于
+  动作状态机的合法冷却，而不是强行绕过冷却。
+
+v4 最小修正：
+
+- Jump hook 改为 SDL A 的按下沿，不再把 A held 当作每次查询都可跳；保留原版公共 Jump
+  优先级/禁用检查，DoubleJump 计数仍由角色状态机管理。
+- 新增 `MRInput.get_attack2` 私有 RVA `0x9487E8` 的 SDL B 按下沿桥接，避免原生键盘
+  `Fire2`/Action2 串入；普通 X 继续走 SDL X 按下沿。
+- 新增 `walkToTarget` (`0x94DD00`) 诊断日志，记录 type、返回值和剩余空中跳次数，用于
+  区分“请求已交付但状态机拒绝”与“输入被覆盖”。未修改 melee/down-attack 冷却或角色动作。
+
+容器 smoke 已通过：ABXY 独立 mask、三次 X 点按、Start+Select 退出码 0，未见 SEGV/terminate；
+v4 二进制最终 SHA256 与实机推送记录如下：
+
+- `GlES_Dev` 使用 Release、`BD_ENABLE_LOG=ON`、TRACE/VERBOSE/IL2CPP_TRACE 全 OFF、
+  OpenSLES shim ON、`JNIVM_ENABLE_RETURN_NON_ZERO=OFF` 构建并 strip；产物
+  `/workspace/Bogodroid/build-oddmar/unityloader` 为 6,660,240 bytes，SHA256
+  `4210d1d49ab41e69a60d0c4d08f58dfbc41e6fb4cbdf1e06645903b954f74702`。
+- 已推送到 `172.16.7.30:/mnt/mmc/Roms/PORTS/Oddmar/unityloader`，Dropbeak
+  `--force --chunk --verify` 与远端 SHA256/字节数复核一致；旧程序和旧日志备份为
+  `unityloader.bak-pre-action-v4-20260930-172101`、
+  `log.bak-pre-action-v4-20260930-172101.txt`。`unity.toml` 未改。
+- 2026-09-30 复核时，远端 loader mtime 为 `17:21:19`，但 `log.txt` mtime 仍为
+  `16:30:56`，启动头仍写 `Oddmar SDL button bridge v3`。也就是说当前日志是 v4 部署前的
+  旧运行，尚不能用来判断 v4 的 X 连击或 A 跳跃；下一次有效日志必须出现
+  `Oddmar SDL button bridge v4`、`Oddmar attack2 edge`，并可看到
+  `Oddmar character command`。
+
+结合原版调用顺序，v3 的两个现象可以由同一条串扰链解释：A/X 的原生键盘 fallback 若同时
+令 Attack2 为真，`MRJoypadControl.Update` 会在同帧把前面形成的跳跃/普通攻击命令覆盖成
+type 4 down gesture。v4 因而先隔离 Attack2，而没有绕过 melee/combo 的合法冷却；只有在 v4
+日志确认连续 X 均形成 type 6 且角色仍拒绝后，才继续向 `MRCharacter2MeleeAttack` /
+`MGWCComboAttack` 状态取证。
+
+### 0.14d v4 实机验证闭环（2026-09-30，问题已解决）
+
+用户实机确认：X 已可连续攻击，A 不再在起跳/下落期间无节制地重复跳跃，菜单输入与退出流程
+也符合预期。成功运行日志已拉取到
+`D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage\Oddmar\log-action-v4-success-20260930.txt`：
+
+- 日志大小 `586,686` bytes，SHA256
+  `b9f144650a32612f22821aec2fc97c08805eadeca7a2c08301442559a1be23b0`；运行时间为
+  `17:49:02` 至 `17:54:44`。
+- 启动阶段出现 `Oddmar SDL button bridge v4`；raw button、Jump、Attack、Attack2、
+  `walkToTarget` 以及五条 UI 边界 hook 共 12 个 Oddmar detour 均成功安装。
+- 物理 X 的 `attack edge SDL=1` 共 29 次，恰好对应 29 次 type 6 普通攻击命令；其中
+  `result=1`（`CanBeUsedButNotHandled`）8 次、`result=2`（`Handled`）21 次，没有
+  `CantBeUsed`。这证明连续攻击请求没有再被输入桥丢失，也没有被 Attack2 覆盖。
+- 游戏态物理 B 形成 4 次 type 4 down gesture，4 次均为 `Handled`。X/A/Y 的
+  Attack2 诊断仍可看到原生 fallback 为 true，但 hook 返回的 `SDL` 始终为 0；只有物理 B
+  才有 `attack2 SDL=1`，说明串扰已在 getter 边界被隔离。
+- 快速 A 测试产生的 68 次 type 7 请求均返回 `result=0`（`CantBeUsed`）。结合实际手感已经
+  恢复，说明非法起跳/空中重复跳跃由原版角色状态机拒绝，没有再被 held/fallback 路径绕过；
+  v4 没有修改 `leftAirJumpCount`、双跳能力或动作冷却。
+- Start/Guide 仅在 `state=1` 时凭菜单脉冲打开 UI；UI 内新的 A/B 输入可以在 `state=2`
+  关闭或确认。游戏态普通按键产生的 103 次 `pauseToggle` 调用全部被挡住，没有复现
+  “菜单展示后立即关闭”。
+- 最终退出走 `UnityPlayerActivity.finish() requested` → 等输入回调退出 →
+  `Activity.finish requested and input idle` → PlayerPrefs flush → `unityloader exited (0)`；
+  无 `BD-SEGV`、`terminate` 或 `Invalid Reference`。
+
+因此本轮输入问题闭环为：底层 SDL 事件没有丢失，真正故障是 Unity legacy keyboard fallback
+与 InControl/Android joystick 双路状态串扰；尤其 Attack2 在 Joypad 更新顺序中最后写入，覆盖
+了此前的 Jump/Attack 命令。修复策略是稳定的逐帧物理按下沿快照，并只在 Oddmar 私有 getter
+边界隔离 A/X/B，而不是更改角色移动、攻击、连击或双跳状态机。
+
+### 0.14e 后续架构：将 Oddmar 特例迁移到 plugin
+
+当前修复先以最小风险落在 loader 本体中并完成实机验证；后续应考虑把游戏私有逻辑迁移为
+`unityloader.d/oddmar_compat.so`，避免 `projects/unityloader/main.cpp` 和通用输入后端持续积累
+包名、RVA、字段偏移和游戏状态枚举。建议边界如下。
+
+**应迁入 Oddmar plugin 的内容：**
+
+- `com.mobge.Oddmar` 包名判断、`oddmar_menu_gate` / `oddmar_sdl_buttons` 配置解析；
+- 所有 Oddmar 私有 RVA 与 ABI：`MRInput` Jump/Attack/Attack2、`pauseToggle`、`tryQuit`、
+  UI submit/cancel、`ReadRawButtonState`、`walkToTarget`；
+- `MRGameHud2::_state + 0x13c`、`UnityInputDevice.JoystickId + 0x1a8`、Xbox360 profile 的
+  A/B/X/Y/trigger 索引映射；
+- Start/Guide 菜单脉冲消费、UI 跨界输入隔离，以及本次使用的 type/result/air-jump 诊断；
+- Oddmar/Mobge 全屏视频的 `temporary_video.mp4` 最近源映射及固定 libunity RVA hook。若视频
+  逻辑也同时迁移，plugin 需要获得 libunity 模块加载通知，AssetLocator 侧则应通过通用观察者
+  API 报告成功打开的资产，而不是直接调用 Oddmar 专用符号。
+
+**应保留在 unityloader 本体的通用能力：**
+
+- SDL controller 的原始 button/axis 采集、硬件重复过滤、线程安全状态保存，以及
+  `nativeRender` 前的逐帧快照时机；
+- Start+Select loader 快速退出、按键 remap、D-pad/HAT 合成等所有游戏共用输入设施；
+- `Activity.finish()` 的安全延迟退出、输入回调 in-flight 计数、PlayerPrefs flush 与正常
+  render-loop 收尾；
+- plugin ABI、detour、配置读取、日志、IL2CPP post-init/JNI/present callback 等通用宿主能力。
+
+现有 plugin ABI v3 已能取得 `il2cpp` 模块并安装 detour，所以大部分 Oddmar IL2CPP hook
+可以直接迁移；但完整拆分前还缺两类通用接口：一是只读的 controller frame snapshot/edge API
+或 input-frame callback，避免 plugin 反向依赖 `InputBackend` 内部对象；二是模块加载通知或
+`libunity` 模块句柄，供视频 hook 使用。推荐先扩展 ABI 并给 snapshot 写独立测试，再创建
+`projects/unityloader/plugins/oddmar_compat/`，最后用本次成功日志的 29 次 X、B-only type 4、
+菜单单次切换和 exit=0 作为迁移回归基线。当前已验证版本应先冻结，不在同一提交中立即进行
+plugin 重构。
 
 ## 1. 环境与复现
 
@@ -2266,7 +2747,7 @@ libstdc++ 的 `rethrow_exception` 要读异常对象**下方 0x80 字节**的 `_
 > **本文件原名 `docs/HANDOFF-ODDMAR.md`**，2026-09-22 收尾时改名为 `docs/ODDMAR.md`。
 > 旧日志、代码注释里出现的 `HANDOFF-ODDMAR.md`，以及简称 "HANDOFF"，指的都是**本文件**。
 
-**版本**：2026-09-22 深夜 · 收尾（第六版 —— **改名 `ODDMAR.md` + 结论汇总 + 任务整理**）。
+**版本**：2026-09-24 · 交接版（启动 crash 已修复；按键与进关时序仍待闭环）。
 本版相对第五版：文件改名并在 §13 说明；新增 **§0.3「主要问题：症状 → 根因 → 解法」速查表**
 （原 §0.3 顺延为 §0.4）；§7 由「建议的下一步」改为 **「后续任务（按优先级）」**，并增加与 §0.2 的
 L# 对应速览表；同步修掉 §7.0 与 §9.2 里残留的旧 `init time` 判据；全仓 4 处代码注释与

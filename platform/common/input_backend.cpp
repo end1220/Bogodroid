@@ -12,6 +12,8 @@
 #include <cctype>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include "oddmar_input_state.h"
 #include <unistd.h>
 
 #include "toml++/toml.hpp"
@@ -56,6 +58,132 @@ static bool input_dpad_synthesize_hat = true;
 static bool input_start_select_exit = true;
 static bool g_exit_hotkey_start_down = false;
 static bool g_exit_hotkey_select_down = false;
+
+namespace bd_oddmar_input_gate {
+static std::atomic<bool> enabled{false};
+static constexpr uint32_t menu_mask =
+    (1u << SDL_CONTROLLER_BUTTON_START) | (1u << SDL_CONTROLLER_BUTTON_GUIDE);
+static std::mutex state_mutex;
+static OddmarInputState state{menu_mask};
+static std::atomic<bool> pad_active{false};
+static std::atomic<uint32_t> triggers{0};
+static uint32_t frame_triggers = 0;
+
+void configure(bool value)
+{
+    enabled.store(value, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(state_mutex);
+    state = OddmarInputState{menu_mask};
+    frame_triggers = 0;
+    triggers.store(0, std::memory_order_release);
+    pad_active.store(false, std::memory_order_release);
+}
+
+void note_controller_button(int button, bool down)
+{
+    if (!enabled.load(std::memory_order_acquire))
+        return;
+    if (button < 0 || button >= SDL_CONTROLLER_BUTTON_MAX) return;
+    pad_active.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const bool rising = state.note_button(button, down, SDL_GetTicks());
+    if (rising && (button == SDL_CONTROLLER_BUTTON_START ||
+                 button == SDL_CONTROLLER_BUTTON_GUIDE)) {
+        BD_LOG("INPUT", "Oddmar menu pulse armed button=%d", button);
+    }
+}
+
+void note_controller_axis(int axis, int value)
+{
+    if (!enabled.load(std::memory_order_acquire)) return;
+    const uint32_t bit = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? 1u
+        : axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT ? 2u : 0u;
+    if (!bit) return;
+    if (value > 19660) triggers.fetch_or(bit, std::memory_order_acq_rel);
+    else if (value < 9830) triggers.fetch_and(~bit, std::memory_order_acq_rel);
+}
+
+void begin_frame()
+{
+    if (!enabled.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(state_mutex);
+    state.begin_frame(SDL_GetTicks());
+    frame_triggers = triggers.load(std::memory_order_acquire);
+}
+
+uint32_t controller_buttons()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.buttons();
+}
+bool controller_active() { return pad_active.load(std::memory_order_acquire); }
+
+bool jump_pressed()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.pressed(SDL_CONTROLLER_BUTTON_A);
+}
+
+bool attack_pressed()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.pressed(SDL_CONTROLLER_BUTTON_X);
+}
+
+bool attack2_pressed()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.pressed(SDL_CONTROLLER_BUTTON_B);
+}
+
+uint64_t frame_press_serial()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.frame_serial();
+}
+
+bool allow_pause_transition(bool playing)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.allow_pause_transition(playing);
+}
+
+bool ui_command_available()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.ui_command_available();
+}
+
+bool raw_button_state(int index)
+{
+    // Xbox360AndroidUnityProfile: A/B/X/Y, bumpers, triggers, sticks, Start/Select.
+    static constexpr int map[] = {
+        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,
+        SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y,
+        SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+        -1, -1, SDL_CONTROLLER_BUTTON_LEFTSTICK, SDL_CONTROLLER_BUTTON_RIGHTSTICK,
+        SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK
+    };
+    if (index < 0 || index >= 12) return false;
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (index == 6 || index == 7)
+        return (frame_triggers & (1u << (index - 6))) != 0;
+    return (state.buttons() & (1u << map[index])) != 0;
+}
+
+bool consume_menu_button()
+{
+    if (!enabled.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return state.consume_menu();
+}
+
+bool consume_menu_back()
+{
+    return consume_menu_button();
+}
+
+} // namespace bd_oddmar_input_gate
 
 static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, const char* source)
 {
@@ -363,6 +491,7 @@ InputBackend::InputBackend()
     input_mouse_accurate_mode = config["input"]["accurate_mode"].value_or<bool>(false);
     input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
     input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
+    BD_LOG("EXIT", "Start+Select hotkey enabled=%d", input_start_select_exit);
     if (auto* calibration = config["input"]["axis_calibration"].as_table()) {
         auto read_range = [&](const char* key, float fallback) {
             auto configured = (*calibration)[key].value<double>();
@@ -730,6 +859,7 @@ void InputBackend::runEventLoop()
         int action = down ? jnivm::android::view::KeyEvent::ACTION_DOWN
                           : jnivm::android::view::KeyEvent::ACTION_UP;
         int keyCode = this->toAndroidKeycode(cbe);
+        bd_oddmar_input_gate::note_controller_button(button, down);
         BD_LOG("PAD", "REPLAY %s btn=%d (%s) kc=%d",
                down ? "DOWN" : "UP", button, bname ? bname : "?", keyCode);
         // Route the combo through the same hotkey logic a pad press uses, so a
@@ -925,6 +1055,7 @@ void InputBackend::runEventLoop()
             }
 
             case SDL_CONTROLLERAXISMOTION: {
+                bd_oddmar_input_gate::note_controller_axis(e.caxis.axis, e.caxis.value);
                 dispatchControllerAxisMotion(e.caxis.axis, e.caxis.value);
                 break;
             }
@@ -939,6 +1070,9 @@ void InputBackend::runEventLoop()
                               ? jnivm::android::view::KeyEvent::ACTION_DOWN
                               : jnivm::android::view::KeyEvent::ACTION_UP;
                 uint8_t physicalButton = e.cbutton.button;
+                bd_oddmar_input_gate::note_controller_button(
+                    physicalButton,
+                    e.type == SDL_CONTROLLERBUTTONDOWN);
                 int logicalButton = bd_remap_dpad_button(physicalButton);
                 int keyCode = toAndroidKeycode(e.cbutton);
                 // Ground truth for which button SDL reported for the key the user

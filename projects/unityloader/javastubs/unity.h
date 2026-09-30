@@ -88,6 +88,11 @@ namespace com {
                 FakeJni::JBoolean MouseInside = JNI_TRUE;
                 std::shared_ptr<FakeJni::JBooleanArray> PressedStates = std::make_shared<FakeJni::JBooleanArray>(330);
 
+                // Android Activity.finish(): Oddmar uses this from its
+                // "exit game" confirmation dialog.  Keep it as a deferred
+                // request so the JNI/input callback can unwind safely; the
+                // loader's render loop performs the actual fast exit.
+                void finish();
                 bool injectEvent(std::shared_ptr<android::view::InputEvent> event);
             };
 
@@ -113,6 +118,8 @@ namespace com {
                 static std::shared_ptr<UnityPlayerActivity> currentActivity;
     
             };
+
+            bool activity_finish_ready();
 
             class ReflectionHelper : public FakeJni::JObject {
             public:

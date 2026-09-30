@@ -12,6 +12,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <atomic>
 #include <vector>
 
 extern toml::table config;
@@ -82,6 +83,21 @@ std::shared_ptr<FakeJni::JString> pad_name_or_default(
 ///// UnityPlayer
 std::shared_ptr<jnivm::com::unity3d::player::UnityPlayerActivity> jnivm::com::unity3d::player::UnityPlayer::currentActivity = nullptr;
 
+static std::atomic<bool> g_activity_finish_requested{false};
+static std::atomic<unsigned int> g_activity_input_inflight{0};
+
+bool jnivm::com::unity3d::player::activity_finish_ready()
+{
+    return g_activity_finish_requested.load(std::memory_order_acquire) &&
+           g_activity_input_inflight.load(std::memory_order_acquire) == 0;
+}
+
+void jnivm::com::unity3d::player::UnityPlayerActivity::finish()
+{
+    g_activity_finish_requested.store(true, std::memory_order_release);
+    BD_LOG("EXIT", "UnityPlayerActivity.finish() requested; deferring loader exit");
+}
+
 static bool g_soft_input_active = false;
 static std::string g_soft_input_text;
 static bool is_soft_input_confirm_key(int code);
@@ -95,6 +111,18 @@ bool jnivm::com::unity3d::player::UnityPlayerActivity::injectEvent(std::shared_p
     // which in turn calls the native function.
 
     verbose("UnityPlayerActivity", "Injecting input event into native engine.");
+
+    struct InputCallGuard {
+        InputCallGuard() { g_activity_input_inflight.fetch_add(1, std::memory_order_acq_rel); }
+        ~InputCallGuard() { g_activity_input_inflight.fetch_sub(1, std::memory_order_acq_rel); }
+    } inputCallGuard;
+
+    // Once Android's Activity.finish() has been requested, do not deliver
+    // later controller events into a scene that is already being torn down.
+    if (g_activity_finish_requested.load(std::memory_order_acquire)) {
+        BD_LOG("INPUT", "nativeInjectEvent suppressed after Activity.finish()");
+        return true;
+    }
 
     FakeJni::LocalFrame frame(vm);
 
@@ -1160,6 +1188,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::unity3d::player::IAssetPackManagerStatusQuer
     { FakeJni::Field<&UnityPlayerActivity::MouseMode> {}, "MouseMode", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&UnityPlayerActivity::MouseInside> {}, "MouseInside", FakeJni::JFieldID::PUBLIC },
     { FakeJni::Field<&UnityPlayerActivity::PressedStates> {}, "PressedStates", FakeJni::JFieldID::PUBLIC },
+    { FakeJni::Function<&UnityPlayerActivity::finish> {}, "finish", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&jnivm::android::app::Activity::getWindowManager> {}, "getWindowManager", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
