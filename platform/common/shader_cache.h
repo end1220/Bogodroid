@@ -17,7 +17,7 @@
 //
 // Bump BD_SHADER_REWRITE_VERSION whenever the video shader rewrite changes in a
 // way that invalidates previously compiled programs.
-#define BD_SHADER_REWRITE_VERSION 2
+#define BD_SHADER_REWRITE_VERSION 3
 
 namespace bd_shader_cache {
 

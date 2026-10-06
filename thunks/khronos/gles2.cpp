@@ -19,6 +19,7 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <set>
 #include "bd_video.h"
 #include "device_display.h"
 #include <toml++/toml.hpp>
@@ -741,6 +742,11 @@ static bool bd_is_guest_video_texture(GLuint texture)
 // glShaderSource/glLinkProgram ever runs and fixup_video_bindings() has no
 // program to key on. Swapping the name here makes the video independent of both
 // Unity's state cache and its program cache.
+// Introduced here, defined with the rest of the program/sampler tracking below.
+static GLuint bd_current_program();
+static void bd_log_program_samplers(GLuint program, const char* why);
+static void bd_trace_gl_error(const char* where);
+
 static bool bd_video_bind_swap(GLuint texture)
 {
     if (!bd_is_guest_video_texture(texture))
@@ -748,16 +754,42 @@ static bool bd_video_bind_swap(GLuint texture)
     const GLuint backing = bd_ensure_backing_texture();
     if (backing == 0)
         return false;
-    if (glad_glBindTexture)
+    bd_trace_gl_error("bind swap: before any call (pre-existing?)");
+    if (glad_glBindTexture) {
         glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+        bd_trace_gl_error("bind swap: glBindTexture(2D, backing)");
+    }
     g_bound_tex_2d = backing;
     const int index = unit_index(g_active_unit);
     if (index >= 0)
         g_unit_2d[index] = backing;
-    if (++g_video_swaps <= 5 || (g_video_swaps % 600) == 0)
+    // A GLES3 sampler object with a mipmap min-filter makes the single-level
+    // backing texture incomplete; PowerVR then paints the quad with its
+    // "incomplete texture" colour instead of the video. Drop the sampler and
+    // force the filter Unity's external texture would have had.
+    if (glad_glBindSampler && index >= 0) {
+        glad_glBindSampler(index, 0);
+        bd_trace_gl_error("bind swap: glBindSampler(unit, 0)");
+    }
+    if (glad_glTexParameteri) {
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER,
+                             BD_GL_LINEAR);
+        bd_trace_gl_error("bind swap: glTexParameteri(MIN, LINEAR)");
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER,
+                             BD_GL_LINEAR);
+        bd_trace_gl_error("bind swap: glTexParameteri(MAG, LINEAR)");
+    }
+    if (++g_video_swaps <= 5 || (g_video_swaps % 600) == 0) {
         BD_LOG("VIDEO",
                "video texture bind %u -> GL_TEXTURE_2D %u (bind swap #%llu)",
                texture, backing, (unsigned long long)g_video_swaps);
+        // The program bound at this moment is the one Unity is about to draw
+        // the video quad with; its sampler types decide whether the rewrite
+        // reached the material.
+        bd_log_program_samplers(bd_current_program(),
+                                "active while binding the video texture");
+    }
+    bd_trace_gl_error("video bind swap");
     return true;
 }
 
@@ -795,6 +827,13 @@ extern "C" void bd_glBindTexture(GLenum target, GLuint texture)
             BD_LOG("VIDEO", "bind #%d target=0x%x texture=%u unit=0x%x", logged,
                    (unsigned)target, texture, (unsigned)g_active_unit);
         }
+    }
+    if (target == BD_GL_TEXTURE_EXTERNAL_OES && !bd_video::has_sink()) {
+        static uint64_t unhandled = 0;
+        if (++unhandled <= 10 || (unhandled % 600) == 0)
+            BD_LOG("VIDEO",
+                   "external bind %u passed through (no live sink) #%llu",
+                   texture, (unsigned long long)unhandled);
     }
     // A GL_TEXTURE_EXTERNAL_OES cannot receive decoder output on this device,
     // so while a video sink is live, send it to the texture we can fill.
@@ -860,6 +899,209 @@ extern "C" void bd_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES ima
 // black video quad far more directly than any amount of texture-side logging.
 #include <map>
 
+// Trimui PowerVR GE8300 advertises GL_OES_EGL_image but not
+// GL_OES_EGL_image_external. Unity's VideoPlayer blit is still the Android
+// #version 100 shader with `samplerExternalOES` and
+// `#extension GL_OES_EGL_image_external : require`. Mali accepts a sampler
+// rewrite that leaves the require in place; PowerVR compiles it as
+// GL_INVALID_OPERATION and the blit never samples the backing texture (pink
+// uninit / garbage). Strip the extension lines when the sampler is rewritten.
+//
+// The declaration is in the vertex stage too, where there is no sampler to
+// rewrite at all - `#extension ... : require` on an extension the driver does
+// not know is a hard compile error, so that stage is *only* fixable this way
+// (see bd_glShaderSource: shader 46 came back "Compile failed.", and Unity
+// answered with the magenta error material).
+static unsigned bd_strip_oes_external_extension(std::string& source)
+{
+    static const char* names[] = {
+        "GL_OES_EGL_image_external_essl3",
+        "GL_OES_EGL_image_external",
+        "GL_NV_EGL_stream_consumer_external",
+    };
+    unsigned stripped = 0;
+    for (const char* name : names) {
+        size_t pos = 0;
+        while ((pos = source.find(name, pos)) != std::string::npos) {
+            size_t line = source.rfind('\n', pos);
+            line = (line == std::string::npos) ? 0 : line + 1;
+            size_t end = source.find('\n', pos);
+            if (end == std::string::npos)
+                end = source.size();
+            else
+                ++end;
+            const std::string line_text = source.substr(line, end - line);
+            if (line_text.find("#extension") != std::string::npos) {
+                source.erase(line, end - line);
+                ++stripped;
+                pos = line;
+            } else {
+                pos += strlen(name);
+            }
+        }
+    }
+    return stripped;
+}
+
+static void bd_log_video_shader_source(const std::string& source)
+{
+    static bool dumped = false;
+    if (dumped)
+        return;
+    dumped = true;
+    const size_t chunk = 1500;
+    unsigned part = 0;
+    for (size_t offset = 0; offset < source.size(); offset += chunk) {
+        std::string snippet = source.substr(offset, chunk);
+        for (char& ch : snippet) {
+            if (ch == '\n')
+                ch = ' ';
+        }
+        BD_LOG("VIDEO", "video shader source part %u: %s", part++,
+               snippet.c_str());
+    }
+}
+
+// Diagnostic for the shaders the sampler rewrite does not touch. Unity's video
+// blit declares `varying vec2 textureCoord;` and samples `_MainTex`; if a shader
+// with that shape reaches the driver unrewritten, it is either a variant this
+// rewrite does not know or (more likely) Unity's magenta error shader. Printing
+// the tail of the source - where the `void main()` lives - tells the two apart.
+static void bd_log_unrewritten_sampler_source(GLuint shader, GLsizei count,
+                                              const GLchar* const* string,
+                                              const GLint* length)
+{
+    static int logged = 0;
+    if (logged >= 60)
+        return;
+    std::string source;
+    for (GLsizei i = 0; i < count; i++) {
+        if (!string[i])
+            continue;
+        if (length && length[i] >= 0)
+            source.append(string[i], (size_t)length[i]);
+        else
+            source.append(string[i]);
+    }
+    if (source.find("textureCoord") == std::string::npos &&
+        source.find("MainTex") == std::string::npos &&
+        source.find("external") == std::string::npos &&
+        source.find("External") == std::string::npos)
+        return;
+    ++logged;
+    const size_t tail = 320;
+    std::string snippet = source.size() > tail ? source.substr(source.size() - tail)
+                                              : source;
+    for (char& ch : snippet) {
+        if (ch == '\n')
+            ch = ' ';
+    }
+    BD_LOG("VIDEO", "shader %u NOT rewritten (len=%zu) tail: %s", shader,
+           source.size(), snippet.c_str());
+}
+
+// glUniform1i is how Unity points a sampler at a texture unit. Recording it for
+// every program that has a sampler answers "which unit does the video blit
+// read", which is otherwise guesswork.
+// Diagnostics for Unity's verdict. The video shader pair is compiled and then
+// silently abandoned in favour of a program with no sampler at all (the magenta
+// error material), so the decision is taken on some returned value rather than
+// on a GL error. These hooks record the values Unity looks at.
+static void bd_log_pname_result(const char* what, GLuint id, GLenum pname,
+                                GLint value)
+{
+    static int logged = 0;
+    if (logged >= 120)
+        return;
+    ++logged;
+    BD_LOG("VIDEO", "%s(%u, 0x%04x) -> %d", what, id, (unsigned)pname, value);
+}
+
+extern "C" void bd_glGetShaderiv(GLuint shader, GLenum pname, GLint* params)
+{
+    if (glad_glGetShaderiv)
+        glad_glGetShaderiv(shader, pname, params);
+    if (params && (pname == 0x8B81 /*GL_COMPILE_STATUS*/ ||
+                   pname == 0x8B82 /*GL_INFO_LOG_LENGTH*/))
+        bd_log_pname_result("glGetShaderiv", shader, pname, *params);
+}
+
+extern "C" void bd_glGetProgramiv(GLuint program, GLenum pname, GLint* params)
+{
+    if (glad_glGetProgramiv)
+        glad_glGetProgramiv(program, pname, params);
+    if (params && (pname == 0x8B82 /*GL_LINK_STATUS*/ ||
+                   pname == 0x8B83 /*GL_VALIDATE_STATUS*/ ||
+                   pname == 0x8B84 /*GL_INFO_LOG_LENGTH*/))
+        bd_log_pname_result("glGetProgramiv", program, pname, *params);
+}
+
+extern "C" void bd_glGetShaderInfoLog(GLuint shader, GLsizei bufSize,
+                                      GLsizei* length, GLchar* infoLog)
+{
+    if (glad_glGetShaderInfoLog)
+        glad_glGetShaderInfoLog(shader, bufSize, length, infoLog);
+    if (infoLog && infoLog[0]) {
+        static int logged = 0;
+        if (logged++ < 20)
+            BD_LOG("VIDEO", "shader %u info log: %s", shader, infoLog);
+    }
+}
+
+extern "C" void bd_glGetProgramInfoLog(GLuint program, GLsizei bufSize,
+                                       GLsizei* length, GLchar* infoLog)
+{
+    if (glad_glGetProgramInfoLog)
+        glad_glGetProgramInfoLog(program, bufSize, length, infoLog);
+    if (infoLog && infoLog[0]) {
+        static int logged = 0;
+        if (logged++ < 20)
+            BD_LOG("VIDEO", "program %u info log: %s", program, infoLog);
+    }
+}
+
+extern "C" GLenum bd_glCheckFramebufferStatus(GLenum target)
+{
+    GLenum status = glad_glCheckFramebufferStatus
+                        ? glad_glCheckFramebufferStatus(target)
+                        : 0;
+    static int logged = 0;
+    if (logged++ < 40)
+        BD_LOG("VIDEO", "glCheckFramebufferStatus -> 0x%04x", (unsigned)status);
+    return status;
+}
+
+extern "C" void bd_glUniform1i(GLint location, GLint value)
+{
+    if (glad_glUniform1i)
+        glad_glUniform1i(location, value);
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* setting = getenv("BD_TRACE_SAMPLER_UNITS");
+        enabled = (setting && *setting && strcmp(setting, "0") != 0) ? 1 : 0;
+    }
+    if (!enabled || location < 0 || value < 0 || value > 15)
+        return;
+    GLint program = 0;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
+    if (program == 0)
+        return;
+    char name[128] = {};
+    if (glad_glGetActiveUniform) {
+        GLsizei written = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glad_glGetActiveUniform(program, (GLuint)location, sizeof(name) - 1,
+                                &written, &size, &type, name);
+    }
+    static std::set<std::pair<GLuint, GLint>> seen;
+    if (seen.size() > 60 || !seen.insert({(GLuint)program, location}).second)
+        return;
+    BD_LOG("VIDEO", "program %u uniform[%d] '%s' <- sampler unit %d", program,
+           location, name, value);
+}
+
 extern "C" void bd_glShaderSource(GLuint shader, GLsizei count,
                                   const GLchar* const* string, const GLint* length)
 {
@@ -870,15 +1112,40 @@ extern "C" void bd_glShaderSource(GLuint shader, GLsizei count,
         return;
     }
 
+    // Two markers matter. `samplerExternalOES` is the sampler type we have to
+    // rewrite, and it only appears in the fragment stage. `GL_OES_EGL_image_external`
+    // is the *extension declaration*, which Unity emits in BOTH stages of the
+    // video blit - and the vertex stage then fails to compile on PowerVR, which
+    // does not support the extension: the pair is dropped and Unity paints its
+    // magenta error material instead of the video. So scan for the extension
+    // name as well, and strip the declaration from shaders that never use it.
     const char* needle = "samplerExternalOES";
     const size_t needle_len = strlen(needle);
+    static const char* const external_names[] = {
+        "GL_OES_EGL_image_external_essl3",
+        "GL_OES_EGL_image_external",
+        "GL_NV_EGL_stream_consumer_external",
+    };
     bool found = false;
     for (GLsizei i = 0; i < count && !found; i++) {
-        if (string[i] && (!length || length[i] != 0) &&
-            strstr(string[i], needle))
+        if (!string[i] || (length && length[i] == 0))
+            continue;
+        if (strstr(string[i], needle))
             found = true;
+        for (const char* name : external_names) {
+            if (strstr(string[i], name)) {
+                found = true;
+                break;
+            }
+        }
     }
     if (!found) {
+        // A video blit shader that this rewrite does not recognise is a wrong
+        // sampler type that no amount of texture-side work can fix, and it is
+        // invisible unless the source is logged. Anything that looks like the
+        // video blit (`textureCoord` is Unity's varying in that shader) gets its
+        // tail printed along with the zero replacement count.
+        bd_log_unrewritten_sampler_source(shader, count, string, length);
         glad_glShaderSource(shader, count, string, length);
         return;
     }
@@ -899,53 +1166,235 @@ extern "C" void bd_glShaderSource(GLuint shader, GLsizei count,
         pos += strlen("sampler2D");
         ++replacements;
     }
+    const unsigned stripped = bd_strip_oes_external_extension(source);
     const GLchar* ptr = source.c_str();
     GLint len = (GLint)source.size();
     g_rewritten_shaders.insert(shader);
-    BD_LOG("VIDEO",
-           "shader %u: samplerExternalOES -> sampler2D x%u (%zu bytes)",
-           shader, replacements, source.size());
-    // The video blit shader comes from the game's shader assets, not from
-    // libunity.so, so dump it once to see how it samples the texture.
-    static bool dumped = false;
-    if (!dumped) {
-        dumped = true;
-        std::string snippet = source.substr(0, 2048);
-        for (auto& ch : snippet) {
-            if (ch == '\n') ch = ' ';
-        }
-        BD_LOG("VIDEO", "video shader source: %s", snippet.c_str());
-    }
+    if (replacements == 0)
+        BD_LOG("VIDEO",
+               "shader %u: no external sampler to rewrite, but stripped %u "
+               "OES-external extension line(s) (%zu bytes)",
+               shader, stripped, source.size());
+    else
+        BD_LOG("VIDEO",
+               "shader %u: samplerExternalOES -> sampler2D x%u, stripped %u "
+               "OES-external extension line(s) (%zu bytes)",
+               shader, replacements, stripped, source.size());
+    bd_log_video_shader_source(source);
     glad_glShaderSource(shader, 1, &ptr, &len);
+    bd_trace_gl_error("glShaderSource (rewritten video shader)");
+}
+
+extern "C" void bd_glCompileShader(GLuint shader)
+{
+    if (glad_glCompileShader)
+        glad_glCompileShader(shader);
+    if (!g_rewritten_shaders.count(shader))
+        return;
+    GLint ok = 1;
+    if (glad_glGetShaderiv)
+        glad_glGetShaderiv(shader, 0x8B81 /*GL_COMPILE_STATUS*/, &ok);
+    char message[1024]{};
+    GLsizei length = 0;
+    if (glad_glGetShaderInfoLog)
+        glad_glGetShaderInfoLog(shader, sizeof(message) - 1, &length, message);
+    for (GLsizei i = 0; i < length; ++i) {
+        if (message[i] == '\n')
+            message[i] = ' ';
+    }
+    BD_LOG("VIDEO", "compile rewritten shader %u status=%d log=\"%s\"", shader,
+           (int)ok, message);
+    const auto found = g_shader_to_program.find(shader);
+    if (found != g_shader_to_program.end()) {
+        BD_LOG("VIDEO", "rewritten shader %u already attached to program %u",
+               shader, found->second);
+    }
 }
 
 extern "C" void bd_glAttachShader(GLuint program, GLuint shader)
 {
     if (glad_glAttachShader)
         glad_glAttachShader(program, shader);
+    // Unity often attaches an empty shader object, then glShaderSource +
+    // glCompileShader. Record every attach so a later rewrite still maps to
+    // the program (otherwise g_video_programs stays empty and magenta/pink
+    // draws never get the backing-texture fixup).
+    g_shader_to_program[shader] = program;
+    {
+        static uint64_t attaches = 0;
+        if (++attaches <= 40)
+            BD_LOG("VIDEO", "attach shader %u -> program %u (rewritten=%d)",
+                   shader, program, (int)g_rewritten_shaders.count(shader));
+    }
     if (g_rewritten_shaders.count(shader)) {
-        g_shader_to_program[shader] = program;
         BD_LOG("VIDEO", "attach: rewritten shader %u -> program %u", shader,
                program);
     }
 }
 
-extern "C" void bd_glLinkProgram(GLuint program)
+static bool bd_program_uses_rewritten_shader(GLuint program)
 {
-    if (!glad_glLinkProgram)
-        return;
-    bool video_program = false;
+    if (program == 0)
+        return false;
     for (const auto& entry : g_shader_to_program) {
-        if (entry.second == program) {
-            video_program = true;
-            break;
+        if (entry.second == program && g_rewritten_shaders.count(entry.first))
+            return true;
+    }
+    if (!glad_glGetAttachedShaders)
+        return false;
+    GLuint attached[8]{};
+    GLsizei count = 0;
+    glad_glGetAttachedShaders(program, 8, &count, attached);
+    for (GLsizei i = 0; i < count; ++i) {
+        if (g_rewritten_shaders.count(attached[i]))
+            return true;
+    }
+    return false;
+}
+
+// Which sampler types does this program actually have? A program that still
+// declares SAMPLER_EXTERNAL_OES cannot read the loader's GL_TEXTURE_2D (and
+// PowerVR GE8300 has no GL_OES_EGL_image_external at all), so it draws its
+// error material instead. Logged once per program: this is the direct answer to
+// "is the rewrite reaching the program Unity draws with".
+static void bd_log_program_samplers(GLuint program, const char* why)
+{
+    static std::set<GLuint> seen;
+    if (program == 0 || !seen.insert(program).second)
+        return;
+    if (!glad_glGetProgramiv || !glad_glGetActiveUniform)
+        return;
+    GLint count = 0;
+    glad_glGetProgramiv(program, 0x8B86 /*ACTIVE_UNIFORMS*/, &count);
+    int external = 0;
+    int sampler2d = 0;
+    char first_external[128] = {};
+    char names[4][64] = {};
+    int named = 0;
+    for (GLint i = 0; i < count && i < 64; ++i) {
+        char name[128] = {};
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glad_glGetActiveUniform(program, (GLuint)i, sizeof(name) - 1, &length,
+                                &size, &type, name);
+        if (named < 4 && type != 0x8B50 /*GL_FLOAT_VEC4*/) {
+            snprintf(names[named], sizeof(names[named]), "%s:0x%x", name,
+                     (unsigned)type);
+            ++named;
+        }
+        if (type == 0x8D65 /*GL_SAMPLER_EXTERNAL_OES*/) {
+            ++external;
+            if (!first_external[0])
+                snprintf(first_external, sizeof(first_external), "%s", name);
+        } else if (type == 0x8B5E /*GL_SAMPLER_2D*/) {
+            ++sampler2d;
         }
     }
+    BD_LOG("VIDEO",
+           "program %u samplers: 2D=%d external=%d%s%s (uniforms=%d, %s) "
+           "[%s %s %s %s]",
+           program, sampler2d, external, external ? " name=" : "",
+           external ? first_external : "", (int)count, why, names[0], names[1],
+           names[2], names[3]);
+}
+
+// Program currently bound with glUseProgram. Used to identify which program is
+// about to draw the video: Unity binds its video texture right before the blit,
+// so the active program at bind time is the blit program.
+static GLuint bd_current_program()
+{
+    GLint program = 0;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
+    return (GLuint)program;
+}
+
+// Opt-in (BD_GL_ERROR_TRACE=1) wrapper around the GL calls the loader makes
+// while the video is live. Reads glGetError() - which clears it - so it can hide
+// a Unity error as well as show ours; only enabled while diagnosing.
+static void bd_trace_gl_error(const char* where)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_GL_ERROR_TRACE");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    if (!enabled || !glad_glGetError)
+        return;
+    const GLenum error = glad_glGetError();
+    if (error != 0)
+        BD_LOG("VIDEO", "GL error 0x%x after %s", (unsigned)error, where);
+}
+
+extern "C" GLuint bd_glCreateProgram(void)
+{
+    const GLuint program = glad_glCreateProgram ? glad_glCreateProgram() : 0;
+    static uint64_t created = 0;
+    if (++created <= 40)
+        BD_LOG("VIDEO", "createProgram #%llu -> %u",
+               (unsigned long long)created, program);
+    return program;
+}
+
+// Unity replays compiled programs from <port>/cache/UnityShaderCache with
+// glProgramBinary. That path never runs glShaderSource, so a program cached
+// before the sampler rewrite keeps its external sampler forever; the loader
+// stamps the cache directory (BD_SHADER_REWRITE_VERSION) to invalidate it, and
+// these two hooks make the reuse visible when it still happens.
+extern "C" void bd_glProgramBinary(GLuint program, GLenum binaryFormat,
+                                   const void* binary, GLsizei length)
+{
+    BD_LOG("VIDEO", "programBinary program=%u format=0x%x len=%d (bypasses the "
+                    "sampler rewrite)", program, (unsigned)binaryFormat,
+           (int)length);
+    if (glad_glProgramBinary)
+        glad_glProgramBinary(program, binaryFormat, binary, length);
+    bd_log_program_samplers(program, "after programBinary");
+}
+
+extern "C" void bd_glGetProgramBinary(GLuint program, GLsizei bufSize,
+                                      GLsizei* length, GLenum* binaryFormat,
+                                      void* binary)
+{
+    if (glad_glGetProgramBinary)
+        glad_glGetProgramBinary(program, bufSize, length, binaryFormat, binary);
+    static uint64_t saved = 0;
+    if (++saved <= 40)
+        BD_LOG("VIDEO", "getProgramBinary #%llu program=%u len=%d format=0x%x",
+               (unsigned long long)saved, program, length ? (int)*length : -1,
+               binaryFormat ? (unsigned)*binaryFormat : 0u);
+}
+
+extern "C" void bd_glLinkProgram(GLuint program)
+{
+    if (!glad_glLinkProgram) {
+        BD_LOG("VIDEO", "link program %u: glad_glLinkProgram is NULL", program);
+        return;
+    }
+    const bool video_program = bd_program_uses_rewritten_shader(program);
     glad_glLinkProgram(program);
-    if (!video_program)
+    static uint64_t links = 0;
+    const bool log_this = video_program || ++links <= 40;
+    if (!log_this)
         return;
     GLint status = 0;
-    glad_glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (glad_glGetProgramiv)
+        glad_glGetProgramiv(program, GL_LINK_STATUS, &status);
+    GLuint attached[8]{};
+    GLsizei attached_count = 0;
+    if (glad_glGetAttachedShaders)
+        glad_glGetAttachedShaders(program, 8, &attached_count, attached);
+    BD_LOG("VIDEO",
+           "link program %u status=%d rewritten=%d attached=%d [%u %u %u %u]",
+           program, (int)status, (int)video_program, (int)attached_count,
+           attached_count > 0 ? attached[0] : 0,
+           attached_count > 1 ? attached[1] : 0,
+           attached_count > 2 ? attached[2] : 0,
+           attached_count > 3 ? attached[3] : 0);
+    bd_log_program_samplers(program, "after link");
+    if (!video_program)
+        return;
     GLint log_len = 0;
     glad_glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
     std::string info;
@@ -984,12 +1433,28 @@ static int fixup_video_bindings()
         return 0;
     int rebound = 0;
     for (int unit = 0; unit < BD_MAX_UNITS; unit++) {
-        if (g_unit_ext[unit] == 0 || g_unit_2d[unit] == backing)
+        const bool video_unit =
+            g_unit_ext[unit] != 0 || bd_is_guest_video_texture(g_unit_2d[unit]);
+        if (!video_unit)
             continue;
         glad_glActiveTexture((GLenum)(0x84C0 + unit));
+        // A GLES3 sampler object can impose NEAREST_MIPMAP_LINEAR on a
+        // texture that has no mipmaps (PowerVR then samples magenta /
+        // GL_INVALID_OPERATION). Drop it so the backing's LINEAR filter wins.
+        if (glad_glBindSampler)
+            glad_glBindSampler(unit, 0);
+        if (g_unit_2d[unit] != backing) {
+            glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+            g_unit_2d[unit] = backing;
+            ++rebound;
+        }
+    }
+    if (rebound && glad_glTexParameteri) {
         glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
-        g_unit_2d[unit] = backing;
-        ++rebound;
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER,
+                             BD_GL_LINEAR);
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER,
+                             BD_GL_LINEAR);
     }
     if (rebound)
         glad_glActiveTexture(g_active_unit);
@@ -1785,9 +2250,173 @@ static void bd_dump_unit_textures()
     glad_glActiveTexture((GLenum)previous_unit);
 }
 
+// Framebuffers Unity renders the video into, remembered from the draws while a
+// video sink was live (see bd_dump_video_rt).
+static GLuint g_video_fbos[4] = {};
+static int g_video_fbo_count = 0;
+
+// Debug switch (BD_VIDEO_TRACE_DRAWS=1): while a video sink is live, log one
+// line per distinct (program, framebuffer) pair drawn. That is the direct
+// answer to "what draws the video quad", which the program-tracking above
+// cannot give when Unity takes the program-binary path.
+static bool bd_trace_draws_enabled()
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_VIDEO_TRACE_DRAWS");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    return enabled == 1;
+}
+
+static void bd_trace_video_draw()
+{
+    if (!bd_video::has_sink())
+        return;
+    GLint program = 0;
+    GLint fbo = 0;
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
+        glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
+    }
+    if (fbo != 0) {
+        bool known = false;
+        for (int i = 0; i < g_video_fbo_count; ++i) {
+            if (g_video_fbos[i] == (GLuint)fbo)
+                known = true;
+        }
+        if (!known && g_video_fbo_count < 4)
+            g_video_fbos[g_video_fbo_count++] = (GLuint)fbo;
+    }
+    if (!bd_trace_draws_enabled())
+        return;
+    static std::set<std::pair<GLuint, GLuint>> seen;
+    if (seen.size() > 80 || !seen.insert({(GLuint)program, (GLuint)fbo}).second)
+        return;
+    BD_LOG("VIDEO",
+           "draw while video live: program=%u fbo=%u known_video_program=%d "
+           "unit_2d=[%u %u %u %u] unit_ext=[%u %u %u %u] backing=%u",
+           (unsigned)program, (unsigned)fbo,
+           (int)(g_video_programs.count((GLuint)program) > 0), g_unit_2d[0],
+           g_unit_2d[1], g_unit_2d[2], g_unit_2d[3], g_unit_ext[0],
+           g_unit_ext[1], g_unit_ext[2], g_unit_ext[3],
+           bd_video::backing_texture());
+    bd_log_program_samplers((GLuint)program, "program drawing while video live");
+}
+
+// Read back the framebuffers the video is drawn into, in the same PPM format as
+// the loader's frame dump. The panel shows a flat magenta rectangle, and this
+// is what tells the two possible causes apart:
+//   * the video render texture is magenta too  -> the blit into it failed;
+//   * the video render texture holds the video -> the present path failed.
+extern "C" void bd_dump_video_rt(int swap_index)
+{
+    if (g_video_fbo_count == 0 || !glad_glBindFramebuffer || !glad_glReadPixels ||
+        !glad_glGetIntegerv || !glad_glGetFramebufferAttachmentParameteriv)
+        return;
+    const char* prefix = getenv("BD_DUMP_FRAME");
+    if (!prefix || !*prefix)
+        return;
+    // Same shape as the frame dump: BD_DUMP_FRAME_AT, x2 and x3.
+    const char* at_env = getenv("BD_DUMP_FRAME_AT");
+    int at = at_env && *at_env ? atoi(at_env) : 600;
+    if (at <= 0)
+        at = 600;
+    if (swap_index != at && swap_index != at * 2 && swap_index != at * 3)
+        return;
+    GLint previous_fbo = 0;
+    glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &previous_fbo);
+    for (int i = 0; i < g_video_fbo_count; ++i) {
+        const GLuint fbo = g_video_fbos[i];
+        glad_glBindFramebuffer(0x8D40 /*GL_FRAMEBUFFER*/, fbo);
+        GLint attachment_type = 0;
+        GLint attachment = 0;
+        glad_glGetFramebufferAttachmentParameteriv(
+            0x8D40, 0x8CE0 /*GL_COLOR_ATTACHMENT0*/,
+            0x8CD0 /*GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE*/, &attachment_type);
+        glad_glGetFramebufferAttachmentParameteriv(
+            0x8D40, 0x8CE0, 0x8CD1 /*OBJECT_NAME*/, &attachment);
+        int width = 0;
+        int height = 0;
+        if (attachment_type == 0x1702 /*GL_TEXTURE*/ && attachment > 0 &&
+            glad_glGetTexLevelParameteriv) {
+            glad_glBindTexture(BD_GL_TEXTURE_2D, (GLuint)attachment);
+            glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0,
+                                          0x1000 /*GL_TEXTURE_WIDTH*/, &width);
+            glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0,
+                                          0x1001 /*GL_TEXTURE_HEIGHT*/, &height);
+        } else if (attachment_type == 0x8D41 /*GL_RENDERBUFFER*/ &&
+                   glad_glGetRenderbufferParameteriv) {
+            glad_glGetRenderbufferParameteriv(0x8D41, 0x8D42, &width);
+            glad_glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height);
+        }
+        if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+            BD_LOG("VIDEO",
+                   "rt fbo=%u attachment=%d type=0x%x size=%dx%d (skipped)",
+                   fbo, attachment, (unsigned)attachment_type, width, height);
+            continue;
+        }
+        std::vector<uint8_t> pixels((size_t)width * (size_t)height * 3u);
+        glad_glFinish();
+        glad_glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE,
+                          pixels.data());
+        char path[512];
+        snprintf(path, sizeof(path), "%s.rt%u.%d.ppm", prefix, fbo, swap_index);
+        FILE* file = fopen(path, "wb");
+        if (!file)
+            continue;
+        fprintf(file, "P6\n%d %d\n255\n", width, height);
+        for (int y = height - 1; y >= 0; --y)
+            fwrite(pixels.data() + (size_t)y * width * 3u, 1, (size_t)width * 3u,
+                   file);
+        fclose(file);
+        uint64_t sum = 0;
+        for (size_t p = 0; p < pixels.size(); p += 3)
+            sum += pixels[p];
+        BD_LOG("VIDEO",
+               "rt fbo=%u attachment=%d %dx%d -> %s mean R=%llu", fbo,
+               attachment, width, height, path,
+               (unsigned long long)(sum / (pixels.size() / 3)));
+    }
+    glad_glBindFramebuffer(0x8D40, (GLuint)previous_fbo);
+}
+
+// Experiment switch (BD_FORCE_VIDEO_TEXTURE=1): bind the loader's backing
+// texture on every unit before every draw while the video is live. Crude on
+// purpose - it answers "if the video quad sampled our texture, would it show
+// the video?" without needing to know which program/unit Unity uses.
+static void bd_force_video_texture()
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_FORCE_VIDEO_TEXTURE");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    if (!enabled || !bd_video::has_sink())
+        return;
+    const GLuint backing = bd_video::backing_texture();
+    if (backing == 0)
+        return;
+    for (GLint unit = 0; unit < BD_MAX_UNITS; ++unit) {
+        if (glad_glActiveTexture)
+            glad_glActiveTexture((GLenum)(0x84C0 + unit));
+        if (glad_glBindTexture)
+            glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
+        g_unit_2d[unit] = backing;
+    }
+    if (glad_glTexParameteri) {
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER,
+                             BD_GL_LINEAR);
+        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER,
+                             BD_GL_LINEAR);
+    }
+}
+
 template <typename DrawFn>
 static void video_draw_guard(DrawFn&& draw)
 {
+    bd_trace_video_draw();
+    bd_force_video_texture();
     if (g_video_program_active) {
         bd_dump_unit_textures();
         bd_remember_video_rt();
@@ -1864,34 +2493,131 @@ extern "C" void bd_glUseProgram(GLuint program)
 {
     if (glad_glUseProgram)
         glad_glUseProgram(program);
+    // Every program is scanned exactly once (the helper dedups), so no cap is
+    // needed: a program that still declares SAMPLER_EXTERNAL_OES has to show up
+    // no matter how late Unity switches to it.
+    bd_log_program_samplers(program, "on first use");
+    if (bd_program_uses_rewritten_shader(program))
+        g_video_programs.insert(program);
     g_video_program_active = g_video_programs.count(program) > 0;
     if (!g_video_program_active)
         return;
-    static uint64_t uses = 0;
-    ++uses;
-    if (uses <= 12 || (uses % 120) == 0) {
+    static uint64_t video_uses = 0;
+    ++video_uses;
+    if (video_uses <= 12 || (video_uses % 120) == 0) {
         BD_DEBUG("VIDEO",
                "video draw #%llu program=%u unit_2d=[%u %u %u %u] unit_ext=[%u %u %u %u] backing=%u",
-               (unsigned long long)uses, program, g_unit_2d[0], g_unit_2d[1],
+               (unsigned long long)video_uses, program, g_unit_2d[0], g_unit_2d[1],
                g_unit_2d[2], g_unit_2d[3], g_unit_ext[0], g_unit_ext[1],
                g_unit_ext[2], g_unit_ext[3], bd_video::backing_texture());
     }
 }
 
-extern "C" void bd_glTexParameteri(GLenum target, GLenum pname, GLint param)
+// The loader serves the guest's GL_TEXTURE_EXTERNAL_OES texture from its own
+// GL_TEXTURE_2D (see bd_redirect_video_bind), so any guest call that names the
+// external target lands on a unit holding a 2D texture.
+//
+// For a state-setting call that is merely GL_INVALID_OPERATION. For a *query* it
+// is worse: the call fails and leaves the output variable untouched, so Unity
+// reads a 0x0 external texture, concludes the VideoPlayer material is invalid and
+// paints its magenta error shader - while the decode, the uploads and the
+// rewritten blit shader are all perfectly healthy (the log shows the rewritten
+// shader compiled and then never attached to a program).
+//
+// So: name the target we can actually satisfy, and drop the calls that would
+// reconfigure the texture we fill with decoder output.
+static bool bd_external_target_is_video(GLenum target)
 {
-    if (target == BD_GL_TEXTURE_EXTERNAL_OES && bd_video::backing_texture() != 0 &&
-        g_bound_tex_2d == bd_video::backing_texture())
-        target = BD_GL_TEXTURE_2D;
-    if (glad_glTexParameteri) glad_glTexParameteri(target, pname, param);
+    return target == BD_GL_TEXTURE_EXTERNAL_OES &&
+           bd_video::backing_texture() != 0;
 }
 
+extern "C" void bd_glTexParameteri(GLenum target, GLenum pname, GLint param)
+{
+    if (bd_external_target_is_video(target))
+        target = BD_GL_TEXTURE_2D;
+    // Backing texture is a single level. Unity's GLES3 sampler state often
+    // sets NEAREST_MIPMAP_LINEAR, which makes the 2D texture incomplete on
+    // PowerVR (fullscreen magenta).
+    if (pname == BD_GL_TEXTURE_MIN_FILTER && g_bound_tex_2d != 0 &&
+        g_bound_tex_2d == bd_video::backing_texture() &&
+        (param == 0x2700 || param == 0x2701 || param == 0x2702 ||
+         param == 0x2703)) {
+        param = BD_GL_LINEAR;
+    }
+    if (glad_glTexParameteri) glad_glTexParameteri(target, pname, param);
+    bd_trace_gl_error("glTexParameteri");
+}
 extern "C" void bd_glTexParameterf(GLenum target, GLenum pname, GLfloat param)
 {
-    if (target == BD_GL_TEXTURE_EXTERNAL_OES && bd_video::backing_texture() != 0 &&
-        g_bound_tex_2d == bd_video::backing_texture())
+    if (bd_external_target_is_video(target))
         target = BD_GL_TEXTURE_2D;
     if (glad_glTexParameterf) glad_glTexParameterf(target, pname, param);
+}
+
+// Queries on the external target: answer from our 2D texture, and never let a
+// failed query leave a zero size behind - that zero is what makes Unity discard
+// the video material.
+extern "C" void bd_glGetTexLevelParameteriv(GLenum target, GLint level,
+                                            GLenum pname, GLint* params)
+{
+    if (bd_external_target_is_video(target))
+        target = BD_GL_TEXTURE_2D;
+    if (glad_glGetTexLevelParameteriv)
+        glad_glGetTexLevelParameteriv(target, level, pname, params);
+    if (!params || target != BD_GL_TEXTURE_2D || level != 0)
+        return;
+    if (g_video_tex_w <= 0 || g_video_tex_h <= 0)
+        return;
+    if (pname == 0x1000 /*GL_TEXTURE_WIDTH*/ && *params <= 0)
+        *params = g_video_tex_w;
+    else if (pname == 0x1001 /*GL_TEXTURE_HEIGHT*/ && *params <= 0)
+        *params = g_video_tex_h;
+}
+
+extern "C" void bd_glGetTexParameteriv(GLenum target, GLenum pname, GLint* params)
+{
+    if (bd_external_target_is_video(target))
+        target = BD_GL_TEXTURE_2D;
+    if (glad_glGetTexParameteriv)
+        glad_glGetTexParameteriv(target, pname, params);
+}
+
+extern "C" void bd_glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params)
+{
+    if (bd_external_target_is_video(target))
+        target = BD_GL_TEXTURE_2D;
+    if (glad_glGetTexParameterfv)
+        glad_glGetTexParameterfv(target, pname, params);
+}
+
+// Storage-definition calls cannot be redirected meaningfully - they would
+// reallocate the texture we upload frames into - so they are dropped for the
+// video's external target. The storage already exists (the loader allocated it).
+extern "C" void bd_glTexImage2D(GLenum target, GLint level, GLint internalformat,
+                                GLsizei width, GLsizei height, GLint border,
+                                GLenum format, GLenum type, const void* pixels)
+{
+    if (bd_external_target_is_video(target)) {
+        static uint64_t dropped = 0;
+        if (++dropped <= 5)
+            BD_LOG("VIDEO",
+                   "ignored glTexImage2D on the video external target "
+                   "(%dx%d); the loader owns that storage",
+                   (int)width, (int)height);
+        return;
+    }
+    if (glad_glTexImage2D)
+        glad_glTexImage2D(target, level, internalformat, width, height, border,
+                          format, type, pixels);
+}
+
+extern "C" void bd_glGenerateMipmap(GLenum target)
+{
+    if (bd_external_target_is_video(target))
+        return;
+    if (glad_glGenerateMipmap)
+        glad_glGenerateMipmap(target);
 }
 
 extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
@@ -1974,6 +2700,14 @@ extern "C" void bd_glTexSubImage2D(GLenum target, GLint level,
                                     GLsizei width, GLsizei height,
                                     GLenum format, GLenum type, const void* pixels)
 {
+    if (bd_external_target_is_video(target)) {
+        static uint64_t dropped = 0;
+        if (++dropped <= 5)
+            BD_LOG("VIDEO",
+                   "ignored glTexSubImage2D on the video external target; the "
+                   "loader uploads decoder frames itself");
+        return;
+    }
     auto it = g_tex_scales.find(g_bound_tex_2d);
     if (it == g_tex_scales.end() || target != 0x0DE1 /*GL_TEXTURE_2D*/) {
         if (glad_glTexSubImage2D)
@@ -2016,6 +2750,192 @@ static void bd_symtable_override(const char* sym, uintptr_t fn)
             return;
         }
     }
+    // Silent failure here is how a hook "mysteriously never fires": the symbol
+    // was not in the table this build, so the guest keeps the raw driver entry.
+    BD_LOG("VIDEO", "override %s NOT PRESENT in gles2 symtable (%d entries)", sym,
+           symtable_gles2_index);
+}
+
+// ---------------------------------------------------------------------------
+// Capability substitution: two lies told through the extension list, each about
+// a capability the loader either emulates or must keep Unity away from.
+//
+//  1. GL_OES_EGL_image_external is advertised although PowerVR GE8300 does not
+//     have it. Unity's VideoPlayer samples decoder output through an external
+//     texture; without the extension it has no program for the video material
+//     and paints the quad with its magenta error shader. The loader owns the
+//     whole external-texture path - it rewrites the blit shader to sample a
+//     sampler2D, redirects the guest's external binds to its own GL_TEXTURE_2D
+//     and uploads the converted frames there - so the claim is honest: the
+//     capability exists, just not in the driver. Opt out with
+//     BD_FAKE_EXTERNAL_EXT=0.
+//
+//  2. The program-binary extensions are hidden. Unity caches compiled programs
+//     in <port>/cache/UnityShaderCache and replays them with glProgramBinary,
+//     which never runs glShaderSource - so a cached program keeps the external
+//     sampler that rewrite (1) exists to remove, and the video quad stays
+//     magenta however healthy the decode is (the log shows the rewritten shader
+//     being compiled and then discarded in favour of a binary: "programBinary
+//     program=20 ... bypasses the sampler rewrite"). With the extension gone
+//     Unity compiles from GLSL source and the rewrite takes effect. The cost is
+//     shader compile time at startup, once. Opt out with
+//     BD_HIDE_PROGRAM_BINARY=0.
+// ---------------------------------------------------------------------------
+static bool bd_env_default_on(const char* name)
+{
+    const char* value = getenv(name);
+    return !(value && strcmp(value, "0") == 0);
+}
+
+static bool bd_fake_external_extension()
+{
+    static const bool enabled = bd_env_default_on("BD_FAKE_EXTERNAL_EXT");
+    return enabled;
+}
+
+static bool bd_hide_program_binary()
+{
+    static const bool enabled = bd_env_default_on("BD_HIDE_PROGRAM_BINARY");
+    return enabled;
+}
+
+static bool bd_is_program_binary_extension(const std::string& extension)
+{
+    return extension == "GL_OES_get_program_binary" ||
+           extension == "GL_IMG_program_binary" ||
+           extension == "GL_ARB_get_program_binary";
+}
+
+// The extension list as the guest sees it: driver list, program-binary entries
+// removed (when hiding), external-texture entries ensured. Built once from the
+// raw driver queries - never through the wrappers above, which would recurse.
+static const std::vector<std::string>& bd_extension_list()
+{
+    static std::vector<std::string> list;
+    static bool built = false;
+    if (built)
+        return list;
+    built = true;
+
+    std::string text;
+    if (glad_glGetStringi && glad_glGetIntegerv) {
+        GLint count = 0;
+        glad_glGetIntegerv(0x821D /*GL_NUM_EXTENSIONS*/, &count);
+        for (GLint i = 0; i < count && i < 4096; ++i) {
+            const char* extension = (const char*)glad_glGetStringi(0x1F03, (GLuint)i);
+            if (extension)
+                text += std::string(extension) + ' ';
+        }
+    }
+    if (text.empty() && glad_glGetString) {
+        const char* extensions = (const char*)glad_glGetString(0x1F03);
+        if (extensions)
+            text.assign(extensions);
+    }
+    if (text.empty())
+        return list; // Query failed: fall back to the driver answers.
+
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find(' ', pos);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string extension = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (extension.empty())
+            continue;
+        if (bd_hide_program_binary() && bd_is_program_binary_extension(extension))
+            continue;
+        list.push_back(extension);
+    }
+    if (bd_fake_external_extension()) {
+        const char* const external[] = {"GL_OES_EGL_image_external",
+                                        "GL_OES_EGL_image_external_essl3"};
+        for (const char* name : external) {
+            bool present = false;
+            for (const std::string& extension : list)
+                present = present || extension == name;
+            if (!present)
+                list.push_back(name);
+        }
+    }
+    BD_LOG("VIDEO",
+           "extension list: %zu entries (external=%d, program-binary hidden=%d)",
+           list.size(), (int)bd_fake_external_extension(),
+           (int)bd_hide_program_binary());
+    return list;
+}
+
+static const std::string& bd_extension_string()
+{
+    static std::string joined;
+    if (joined.empty() && !bd_extension_list().empty()) {
+        for (const std::string& extension : bd_extension_list()) {
+            if (!joined.empty())
+                joined += ' ';
+            joined += extension;
+        }
+    }
+    return joined;
+}
+
+extern "C" const GLubyte* bd_glGetString(GLenum name)
+{
+    if (name == 0x1F03 /*GL_EXTENSIONS*/ && !bd_extension_string().empty())
+        return (const GLubyte*)bd_extension_string().c_str();
+    return glad_glGetString ? glad_glGetString(name) : nullptr;
+}
+
+extern "C" const GLubyte* bd_glGetStringi(GLenum name, GLuint index)
+{
+    if (name == 0x1F03 /*GL_EXTENSIONS*/ && index < bd_extension_list().size())
+        return (const GLubyte*)bd_extension_list()[index].c_str();
+    return glad_glGetStringi ? glad_glGetStringi(name, index) : nullptr;
+}
+
+extern "C" void bd_glGetIntegerv(GLenum pname, GLint* params)
+{
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(pname, params);
+    if (!params)
+        return;
+    // GLES3 extension enumeration must agree with the list above, or Unity
+    // walks off the end of it.
+    if (pname == 0x821D /*GL_NUM_EXTENSIONS*/ && !bd_extension_list().empty()) {
+        *params = (GLint)bd_extension_list().size();
+    } else if (bd_hide_program_binary() && pname == 0x87FE /*GL_NUM_PROGRAM_BINARY_FORMATS*/) {
+        // Belt and braces: Unity also asks for the count directly, and a
+        // driver that reports a format will have it try glProgramBinary.
+        *params = 0;
+    }
+}
+
+// Opt-in (BD_GL_ERROR_TRACE=1): report every error Unity reads, with the read
+// order, to locate the call that left it behind.
+//
+// BD_SWALLOW_GL_ERROR=1 answers the next question: when Unity reads an error
+// right after it builds the video material, does it throw the material away and
+// draw its magenta error shader? With the switch on, glGetError always reports
+// "no error" to the guest - a diagnostic, not a fix.
+extern "C" GLenum bd_glGetError(void)
+{
+    const GLenum error = glad_glGetError ? glad_glGetError() : 0;
+    static int enabled = -1;
+    static int swallow = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_GL_ERROR_TRACE");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+        const char* hide = getenv("BD_SWALLOW_GL_ERROR");
+        swallow = (hide && *hide && strcmp(hide, "0") != 0) ? 1 : 0;
+    }
+    if (error != 0 && (enabled || swallow)) {
+        static uint64_t reported = 0;
+        if (++reported <= 60 || (reported % 300) == 0)
+            BD_LOG("VIDEO", "Unity read GL error 0x%x%s (#%llu)",
+                   (unsigned)error, swallow ? " (swallowed)" : "",
+                   (unsigned long long)reported);
+    }
+    return swallow ? 0 : error;
 }
 
 void load_gles2_funcs()
@@ -2983,6 +3903,10 @@ void load_gles2_funcs()
 	// GL_TEXTURE_2D the loader fills from the MediaCodec thunk, and the blit
 	// shader's samplerExternalOES is rewritten to sampler2D.
 	bd_symtable_override("glShaderSource", (uintptr_t)&bd_glShaderSource);
+	bd_symtable_override("glCreateProgram", (uintptr_t)&bd_glCreateProgram);
+	bd_symtable_override("glProgramBinary", (uintptr_t)&bd_glProgramBinary);
+	bd_symtable_override("glGetProgramBinary", (uintptr_t)&bd_glGetProgramBinary);
+	bd_symtable_override("glCompileShader", (uintptr_t)&bd_glCompileShader);
 	bd_symtable_override("glAttachShader", (uintptr_t)&bd_glAttachShader);
 	bd_symtable_override("glLinkProgram", (uintptr_t)&bd_glLinkProgram);
 	bd_symtable_override("glUseProgram", (uintptr_t)&bd_glUseProgram);
@@ -2994,8 +3918,30 @@ void load_gles2_funcs()
 	bd_symtable_override("glViewport", (uintptr_t)&bd_glViewport);
 	bd_symtable_override("glTexParameteri", (uintptr_t)&bd_glTexParameteri);
 	bd_symtable_override("glTexParameterf", (uintptr_t)&bd_glTexParameterf);
+	bd_symtable_override("glTexImage2D", (uintptr_t)&bd_glTexImage2D);
+	bd_symtable_override("glGenerateMipmap", (uintptr_t)&bd_glGenerateMipmap);
+	bd_symtable_override("glGetTexLevelParameteriv",
+	                     (uintptr_t)&bd_glGetTexLevelParameteriv);
+	bd_symtable_override("glGetTexParameteriv",
+	                     (uintptr_t)&bd_glGetTexParameteriv);
+	bd_symtable_override("glGetTexParameterfv",
+	                     (uintptr_t)&bd_glGetTexParameterfv);
 	bd_symtable_override("glEGLImageTargetTexture2DOES",
 	                     (uintptr_t)&bd_glEGLImageTargetTexture2DOES);
+	// Advertise the external-texture extension the loader emulates, and watch
+	// the GL error stream while diagnosing (BD_GL_ERROR_TRACE).
+	bd_symtable_override("glGetString", (uintptr_t)&bd_glGetString);
+	bd_symtable_override("glGetStringi", (uintptr_t)&bd_glGetStringi);
+	bd_symtable_override("glGetIntegerv", (uintptr_t)&bd_glGetIntegerv);
+	bd_symtable_override("glGetError", (uintptr_t)&bd_glGetError);
+	bd_symtable_override("glUniform1i", (uintptr_t)&bd_glUniform1i);
+	bd_symtable_override("glGetShaderiv", (uintptr_t)&bd_glGetShaderiv);
+	bd_symtable_override("glGetProgramiv", (uintptr_t)&bd_glGetProgramiv);
+	bd_symtable_override("glGetShaderInfoLog", (uintptr_t)&bd_glGetShaderInfoLog);
+	bd_symtable_override("glGetProgramInfoLog",
+	                     (uintptr_t)&bd_glGetProgramInfoLog);
+	bd_symtable_override("glCheckFramebufferStatus",
+	                     (uintptr_t)&bd_glCheckFramebufferStatus);
 	// Wire the bridge's per-frame upload to SurfaceTexture.updateTexImage().
 	bd_video::set_upload_hook(&bd_video_present);
 }

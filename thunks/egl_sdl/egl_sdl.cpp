@@ -89,6 +89,11 @@ static uint32_t bd_fb_channel(uint8_t value, const fb_bitfield& field)
         << field.offset;
 }
 
+// Reads back the video render targets (see thunks/khronos/gles2.cpp). Dumps
+// next to the frame dump: a magenta video RT means the blit into it failed, a
+// video-coloured RT means the present path failed.
+extern "C" void bd_dump_video_rt(int swap_index);
+
 // Debug aid: dump real rendered frames to PPM so a black screen can be told
 // apart from a black video texture. Enabled by BD_DUMP_FRAME=<path prefix>
 // (nothing is written unless set); BD_DUMP_FRAME_AT selects the swap index
@@ -98,7 +103,7 @@ static void bd_dump_frame_if_requested()
 {
     static int swap_index = 0;
     ++swap_index;
-    const char* prefix = getenv("BD_DUMP_FRAME");
+    bd_dump_video_rt(swap_index);    const char* prefix = getenv("BD_DUMP_FRAME");
     if (!prefix || !*prefix)
         return;
     const char* at_env = getenv("BD_DUMP_FRAME_AT");

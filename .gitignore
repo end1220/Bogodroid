@@ -34,3 +34,6 @@ log.txt
 unity_player.log
 tmp/
 /hollow_knight_viewport.so
+# Scratch dir for on-device runs: log.txt, framebuffer dumps, pushed binaries
+# and tarballs. Large (100 MB+) and not source; keep it out of the repo.
+_trimui_logs/
