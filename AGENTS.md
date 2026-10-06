@@ -91,3 +91,41 @@ curl.exe -L --max-time 7200 -o <local-out> $uri
 1. `dropbeak-cli ping` 是否通。  
 2. 远端 `ls -la` 是否等于本地长度。  
 3. 若偏小 → 当残缺文件处理，用 `--force --chunk` **整文件重推**，不要 resume 半成品。
+
+## TrimUI Smart Pro：远程启动 / 停止（Oddmar 及同类 port）
+
+掌机不需要手按，主机侧就能把 port 拉起来并收回。
+
+### 拓扑
+
+- 正式入口是 `Roms/PORTS/Oddmar.sh`（菜单由此进入），结尾直接前台跑 `$GAMEDIR/unityloader unity.toml`。
+- `GAMEDIR` = `/mnt/SDCARD/Data/ports/Oddmar`：`control.txt` 里 `directory="mnt/SDCARD/Data"`，脚本再前缀一个 `/` 拼出来。
+
+### 远程启动
+
+固件常驻 `/usr/trimui/bin/runtrimui.sh`（由 `/etc/rc.d/S99runtrimui` 起）在循环里做这件事：**MainUI 退出后，若存在 `/tmp/cmd_to_run.sh` 就前台执行它，然后删掉它**。利用这点：
+
+1. 把要跑的脚本先写到 SD 卡上 —— `/tmp` 不在 dropbeak 允许写入的路径里，直接 push 会 403；
+   `cp <sdcard>/xxx.sh /tmp/cmd_to_run.sh && chmod +x /tmp/cmd_to_run.sh`
+2. `killall -9 MainUI`，runtrimui 随后就会执行我们的脚本。
+3. 脚本**必须前台 `exec` loader**，绝不能 `&` 后台：一旦后台，脚本立即返回，runtrimui 会马上把 MainUI 拉回来，表现为系统界面与游戏交替闪烁。
+4. 停止：`killall -9 unityloader`。MainUI 由 runtrimui 自动拉起，不用管；`/tmp/cmd_to_run.sh` 会被同一轮循环删掉（清理是自动的）。
+
+`Data/ports/Oddmar/` 下的 `cmd_to_run.sh` → `trimui_run.sh` 就是这么一条遥控入口，`launch*.sh` 是更早的版本。
+
+### 必须自己设 `LD_LIBRARY_PATH`
+
+`runtrimui.sh` 里是 **`export LD_LIBRARY_PATH=${SDCARD_TRIMUI_DIR}/lib`（覆盖式赋值，不追加）**，而 `/etc/ld.so.conf` 不存在、`/etc/ld.so.conf.d/` 是空的、loader 也没有 `RUNPATH`。`/usr/lib` 装的是 FFmpeg 6（`libav*.so.60`），loader 链的却是 FFmpeg 4.2（`libav*.so.58`）。所以启动脚本里必须显式写：
+
+```sh
+export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:$GAMEDIR/ff58${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+漏掉这行，进程连动态链接都过不去（`error while loading shared libraries: libavformat.so.58`），不是"少了点功能"而已。
+
+### 验证画面
+
+- `Data/ports/Oddmar/log.txt` 是正式脚本 `tee` 的落点；**LOG=OFF 的 build 里应只剩 SDL/EGL 原生噪声**（`SDL_UDEV_*`、`MALI_CreateWindow`、`OpenGL Renderer:`），**零 `[BD-*]` 行**。有 `[BD-*]` 就说明拿错了带 LOG 的二进制。
+- 帧导出（`BD_DUMP_FRAME` / `BD_VIDEO_DUMP_FRAME`，默认关闭，说明见 `trimui_run.sh` 注释）一次全开会留约 31 MB PPM，用完记得清。
+- 部署后核对哈希：`sha256sum` 掌机文件 vs 本地构建产物，别只看大小。
+- dropbeak `exec` 有约 30 s HTTP 超时：启动命令要后台化，或避免在里面长 `sleep`；大文件按上文 `--chunk` 走。
