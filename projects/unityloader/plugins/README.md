@@ -23,7 +23,8 @@ is invoked immediately if the requested module is already present, otherwise
 when the host registers it after `so_load`.
 
 Plugins must verify `abi_version` and `struct_size` before accessing the API.
-Build the loader and deployed plugins from the same Plugin ABI revision.
+Build the loader and deployed plugins from the same Plugin ABI revision. The
+current ABI is v7.
 
 ## Build and deploy
 
@@ -87,13 +88,19 @@ api->register_present_callback(my_cb, userdata);
 Do **not** export game-specific symbols for the core to `dlsym`. The host calls
 `bd_plugin_run_present_callbacks()` from `eglSwapBuffers`.
 
-Oddmar's `AssetLocator`/`AssetReader` is not yet a plugin. The current A3
-transition keeps it behind `BD_ENABLE_MOBGE_ASSETLOCATOR` in the loader build;
-moving it into `unityloader.d` requires object, byte-array, string-array, and
-plugin-owned instance-lifetime ABI support. An experimental DSO exists behind
-`BD_ENABLE_ODDMAR_ASSETLOCATOR_PLUGIN`, but it is disabled by default: direct
-cross-DSO jnivm descriptor registration is unsafe with the loader's static C++
-runtime and must not be deployed.
+Oddmar's `AssetLocator`/`AssetReader` is provided by `oddmar_assetlocator.so`.
+It uses the v7 host-owned C ABI for object userdata, byte arrays, string arrays,
+and object construction. The plugin must be deployed beside `unityloader` in
+`unityloader.d/`; the core `BD_ENABLE_MOBGE_ASSETLOCATOR` implementation remains
+available as an A/B and rollback path. Plugins must not include jnivm C++ headers
+or share C++ descriptors across the DSO boundary.
+
+The A3 container acceptance run on 2026-10-08 used
+`BD_ENABLE_MOBGE_ASSETLOCATOR=OFF` and `JNIVM_ENABLE_RETURN_NON_ZERO=OFF`.
+It ran the plugin path for about 30 seconds, reached `bundle1` through
+`bundle8`, produced loader GL frame dumps, and had no `BD-SEGV` or archive
+header errors. No TrimUI deployment was performed because the device was
+offline.
 
 ## Input observers (ABI v6)
 

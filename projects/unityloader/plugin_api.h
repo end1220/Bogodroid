@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define BOGODROID_PLUGIN_ABI_VERSION 6u
+#define BOGODROID_PLUGIN_ABI_VERSION 7u
 
 enum BogoPluginInitResult {
     BOGO_PLUGIN_OK = 0,
@@ -23,7 +23,6 @@ typedef void (*BogoAssetSourceCallback)(const char* path, void* userdata);
 typedef void (*BogoModuleLoadedCallback)(const char* name,
                                          BogoSoModule* module,
                                          void* userdata);
-
 typedef union BogoJniValue {
     uint8_t z;
     int8_t b;
@@ -86,6 +85,14 @@ typedef struct BogoPluginApi {
     int (*jni_string_utf8)(void* env, void* string_ref,
                            char* output, uint32_t output_size);
     void* (*jni_new_string_utf8)(void* env, const char* value);
+    void* (*jni_new_object)(void* env, const char* class_name, void* userdata);
+    void* (*jni_object_userdata)(void* object);
+    void* (*jni_new_byte_array)(void* env, uint32_t length);
+    int (*jni_byte_array_write)(void* env, void* array, const int8_t* data,
+                                uint32_t length);
+    void* (*jni_new_string_array)(void* env, uint32_t length);
+    int (*jni_string_array_set)(void* env, void* array, uint32_t index,
+                                void* string_ref);
 
     void (*log)(const char* tag, const char* fmt, ...);
 } BogoPluginApi;

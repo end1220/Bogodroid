@@ -854,6 +854,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
         if (body) {
             ctor->nativehandle = body->nativehandle;
             ctor->native = body->native;
+            ctor->dynamic = body->dynamic;
             ctor->_static = true;
             BD_LOG("JavaReflect", "getConstructorID: bound %s%s -> %s%s",
                    clazz->nativeprefix.c_str(), ctor->signature.c_str(),

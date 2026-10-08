@@ -315,6 +315,7 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
 #include <algorithm>
 #include <cstring>
 #include <dirent.h>
+#include <unordered_map>
 #include <ctime>
 #include <cstdio>
 #include <cinttypes>
@@ -739,6 +740,9 @@ namespace plugin_host {
     static std::vector<ModuleLoadedEntry> g_module_loaded_callbacks;
     static std::set<std::string> g_loaded_paths;
     static std::vector<void*> g_handles;
+    static std::mutex g_plugin_object_mutex;
+    static std::unordered_map<void*, void*> g_plugin_object_userdata;
+    static std::vector<std::shared_ptr<jnivm::Object>> g_plugin_objects;
     static std::string g_config_path;
     static so_module* g_il2cpp = nullptr;
     static FakeJni::Jvm* g_jvm = nullptr;
@@ -933,6 +937,11 @@ namespace plugin_host {
             method->name = descriptor.name;
             method->signature = descriptor.signature;
             method->_static = is_static;
+            // GetMethodID uses the native bit to select methods registered by
+            // JNI_OnLoad-style code. The actual implementation is the safe
+            // C-ABI dynamic callback below; the non-null marker only makes
+            // the method discoverable through that JNI lookup path.
+            method->native = reinterpret_cast<void*>(1);
             const uint32_t argument_count =
                 jni_argument_count(descriptor.signature);
             const BogoJniMethodCallback callback = descriptor.callback;
@@ -976,6 +985,75 @@ namespace plugin_host {
         return env ? (void*)env->NewStringUTF(value ? value : "") : nullptr;
     }
 
+    static void* api_jni_new_object(void* env_ptr, const char* class_name,
+                                    void* userdata) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        if (!env || !class_name || !*class_name || !g_jvm) return nullptr;
+        auto clazz = g_jvm->findClass(class_name);
+        if (!clazz || !clazz->Instantiate) return nullptr;
+        auto object = clazz->Instantiate(jnivm::ENV::FromJNIEnv(env));
+        if (!object) return nullptr;
+        void* raw = static_cast<void*>(object.get());
+        {
+            std::lock_guard<std::mutex> lock(g_plugin_object_mutex);
+            g_plugin_object_userdata[raw] = userdata;
+            g_plugin_objects.push_back(std::move(object));
+        }
+        BD_LOG("PLUGIN", "jni_new_object %s raw=%p userdata=%p", class_name,
+               raw, userdata);
+        return raw;
+    }
+
+    static void* api_jni_object_userdata(void* object) {
+        std::lock_guard<std::mutex> lock(g_plugin_object_mutex);
+        auto it = g_plugin_object_userdata.find(object);
+        if (it != g_plugin_object_userdata.end()) return it->second;
+        // JNI references normally are the underlying Object pointer in this
+        // VM, but a few return paths hand callbacks a Global/Weak wrapper.
+        // Unwrap those references before consulting the host-owned map.
+        if (auto* global = dynamic_cast<jnivm::Global*>(static_cast<jnivm::Object*>(object))) {
+            auto wrapped = global->wrapped;
+            auto inner = g_plugin_object_userdata.find(wrapped.get());
+            if (inner != g_plugin_object_userdata.end()) return inner->second;
+        }
+        if (auto* weak = dynamic_cast<jnivm::Weak*>(static_cast<jnivm::Object*>(object))) {
+            auto wrapped = weak->wrapped.lock();
+            auto inner = g_plugin_object_userdata.find(wrapped.get());
+            if (inner != g_plugin_object_userdata.end()) return inner->second;
+        }
+        return nullptr;
+    }
+
+    static void* api_jni_new_byte_array(void* env_ptr, uint32_t length) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        return env ? (void*)env->NewByteArray((jsize)length) : nullptr;
+    }
+
+    static int api_jni_byte_array_write(void* env_ptr, void* array,
+                                        const int8_t* data, uint32_t length) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        if (!env || !array || (length && !data)) return 0;
+        env->SetByteArrayRegion((jbyteArray)array, 0, (jsize)length,
+                                (const jbyte*)data);
+        return 1;
+    }
+
+    static void* api_jni_new_string_array(void* env_ptr, uint32_t length) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        if (!env) return nullptr;
+        auto string_class = env->FindClass("java/lang/String");
+        return (void*)env->NewObjectArray((jsize)length, string_class, nullptr);
+    }
+
+    static int api_jni_string_array_set(void* env_ptr, void* array,
+                                        uint32_t index, void* string_ref) {
+        auto* env = static_cast<JNIEnv*>(env_ptr);
+        if (!env || !array) return 0;
+        env->SetObjectArrayElement((jobjectArray)array, (jsize)index,
+                                   (jobject)string_ref);
+        return 1;
+    }
+
     static void set_jvm(FakeJni::Jvm* vm) { g_jvm = vm; }
 
     static void api_log(const char* tag, const char* fmt, ...) {
@@ -1016,6 +1094,12 @@ namespace plugin_host {
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;
         api.jni_new_string_utf8 = &api_jni_new_string_utf8;
+        api.jni_new_object = &api_jni_new_object;
+        api.jni_object_userdata = &api_jni_object_userdata;
+        api.jni_new_byte_array = &api_jni_new_byte_array;
+        api.jni_byte_array_write = &api_jni_byte_array_write;
+        api.jni_new_string_array = &api_jni_new_string_array;
+        api.jni_string_array_set = &api_jni_string_array_set;
         api.log = &api_log;
         return api;
     }

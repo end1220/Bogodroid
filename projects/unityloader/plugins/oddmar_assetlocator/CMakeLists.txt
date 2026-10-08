@@ -1,0 +1,1 @@
+bogodroid_add_unityloader_plugin(oddmar_assetlocator oddmar_assetlocator.cpp)

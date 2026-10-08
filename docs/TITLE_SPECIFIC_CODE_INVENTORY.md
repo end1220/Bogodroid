@@ -17,16 +17,22 @@
 
 ## 2026-10-08 复核摘要
 
-本次按当前 HEAD 重新核对后，原清单的三大核心结论仍成立：
+本次按当前 HEAD 重新核对后，原清单的三大核心结论已更新为：
 
-1. **Oddmar 专属代码已从 A1 核心移出**：输入闸门与 Oddmar IL2CPP RVA hooks 已进入 `oddmar_input` 插件；Oddmar 视频路径翻译、`com.mobge.assetlocator.*` 仍在核心二进制里。
+1. **Oddmar 专属代码已从 A1 核心移出**：输入闸门与 Oddmar IL2CPP RVA hooks 已进入 `oddmar_input` 插件；视频路径翻译已进入 `oddmar_video` 插件；`com.mobge.assetlocator.*` 已进入 `oddmar_assetlocator` 插件。
 2. **通用视频链路仍可留核心**：`javastubs/bd_video.cpp` 与 GLES 外部纹理路径没有标题硬编码；问题是 Oddmar 私有资源协议把本地路径喂给它。
-3. **插件 ABI 现状需要细化**：当前 `BOGODROID_PLUGIN_ABI_VERSION` 是 v6，已有 `register_present_callback`、`register_input_observer`、`so_base`、`find_module`、`register_module_loaded` 与 `register_jni_class`。A2 的模块生命周期缺口已补齐并通过容器回放；A3 不是“完全不能注册 JNI 类”，而是 ABI v6 仍只适合 Samurai2 这类扁平 JNI 方法；Oddmar `AssetLocator/AssetReader` 的完整插件化还需要有状态对象、对象返回、byte array/string array 与构造语义。
+3. **插件 ABI 已扩展到 v7**：在 v6 的模块、输入、present 和 JNI class 注册之上，v7 增加宿主拥有的对象 userdata、对象创建、byte array 与 string array C ABI。A3 已用该 ABI 完整插件化，插件只依赖 `plugin_api.h`，不跨 DSO 共享 jnivm C++ descriptor/VM 状态。
 
-当前状态：**A1 已完成，A2 已迁移并通过容器验证，A3 过渡编译开关已验证**。A3 的跨 DSO
-实验插件已证明不能直接启用：jnivm 的 C++ descriptor/VM 状态跨越宿主与插件 DSO 时会触发
-`std::system_error`/`pthread_mutex_lock` 崩溃，因此该插件默认不构建，不能部署上机。
-完整 A3 仍需由宿主提供 C ABI 的 class/descriptor 注册与对象/数组创建接口。
+当前状态：**A1、A2、A3 均已完成并通过容器回放**。A3 的早期实验曾直接跨 DSO 共享 jnivm C++ descriptor/VM 状态，已确认会触发 `std::system_error`/`pthread_mutex_lock` 崩溃；现行实现改为宿主 C ABI，已避开该边界。
+
+### A3 容器验收记录（2026-10-08）
+
+- 构建目录：`GlES_Dev:/workspace/Bogodroid/build-a3-plugin-log`。
+- 构建开关：`Release/日志主开关 ON` 的同等日志配置、`BD_ENABLE_MOBGE_ASSETLOCATOR=OFF`、`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`、`JNIVM_ENABLE_DEBUG=ON`。
+- 回放：`/game/Oddmar/seq-a3-plugin-log7`，约 30 秒，产生 3 个 loader GL 帧 dump。
+- 插件实际执行：`ListAssets`、`GetReaderWrapper('Bundles/bundle1' ... 'bundle8')`；插件对象 userdata、String[]、Reader byte array 路径均已走通。
+- 结果：无 `BD-SEGV`，无 `Unable to read header from archive file`。
+- 真机状态：本轮未部署。TrimUI 已下线，`172.16.6.214:8080` 也未进行推送或启动操作。下一次上机前必须重新确认联网、核对 loader 与所有 `unityloader.d/*.so` 的 SHA-256，再按 `cmd_to_run.sh` / `trimui_run.sh` 启动。
 
 ## 三层架构与判定原则
 
@@ -93,21 +99,23 @@ const uintptr_t gp = base + 0xf0b000 + 0xB88;    // singleton pointer slot
 
 | 位置 | 内容 | 约行数 |
 |---|---|---|
-| `javastubs/bd_assetlocator.cpp` | `AssetLocator` + `AssetReader` 全部实现 | 384 |
+| `projects/unityloader/plugins/oddmar_assetlocator/oddmar_assetlocator.cpp` | `AssetLocator` + `AssetReader` 插件实现 | ~230 |
+| `projects/unityloader/plugin_api.h` / `main.cpp` | v7 对象 userdata、对象/数组创建 C ABI | — |
+| `javastubs/bd_assetlocator.cpp` | 旧核心过渡实现，保留用于 A/B 和回滚 | 384 |
 | `javastubs/android.h:1127-1240` | 两个 jnivm 类声明 + `DEFINE_CLASS_NAME("com/mobge/...")` | ~114 |
 | `javastubs/android_descriptors.cpp:107-115` | `registerClass<>()` 注册 | 9 |
 | `CMakeLists.txt:235-239` | 由 `BD_ENABLE_MOBGE_ASSETLOCATOR` 控制，默认 OFF；Oddmar 兼容构建显式 ON | 5 |
 
 `com.mobge.*` 是发行商私有包，非 Android/Google 标准包。同类问题核心已有先例：`com.google.*` 走编译开关 `BD_ENABLE_GPLAY`（`CMakeLists.txt:297-302`）。
 
-迁移难点不是“方法表注册”本身。当前插件 ABI v6 的 `register_jni_class()` 已能给已存在/自动生成的 jnivm class 挂 C 回调，`samurai2_offline` 已在用；但 `AssetLocator` 需要返回真正的 `AssetReader` 实例，`AssetReader::GetBytes()` 需要返回 `JByteArray`，`ListAssets()` 需要返回 `String[]`。这些都超出了 ABI v6 的标量 / `String` 辅助能力。
+迁移难点不是“方法表注册”本身。v6 的 `register_jni_class()` 已能挂 C 回调，但 A3 还需要真正的 `AssetReader` 实例、byte array、String[] 以及构造语义。v7 由宿主提供这些能力；对象 userdata 和对象保活由宿主负责，插件只保有自己的 reader/locator 状态。
 
 因此 A3 的合理路径有两种：
 
 | 路径 | 做法 | 适用性 |
 |---|---|---|
-| 过渡 | **已实现**：`BD_ENABLE_MOBGE_ASSETLOCATOR` 默认 OFF，Oddmar 构建显式 ON | 快速把默认核心瘦下来，风险最低 |
-| 完整插件化 | ABI 扩展 jnivm 对象/数组/byte array 创建、插件私有对象生命周期、构造/实例化回调 | 最终形态，但应放在 A1/A2 之后 |
+| 过渡 | **仍保留**：`BD_ENABLE_MOBGE_ASSETLOCATOR` 默认 OFF，Oddmar 构建可显式 ON | 回滚与 A/B 对照 |
+| 完整插件化 | **已完成**：ABI v7 对象/数组/byte array 创建、插件私有 userdata、构造/实例化回调 | Oddmar 默认使用 `oddmar_assetlocator.so` |
 
 ### A4. 隐藏耦合：A2 ↔ A3 必须同进同出
 
@@ -206,14 +214,15 @@ oddmar_video (libunity+0x4c124c 翻译)
 | A1 输入策略 | **已完成**：核心只广播 observer 事件；`oddmar_input` 插件持有策略和 RVA hooks | 容器/Xvfb 回放通过；TrimUI 真机已验证插件安装、A 键输入隔离与 `tryQuit` gate |
 | （将来）GL/着色器怪癖 | 无 GL 钩子 | 需新增 GL hook 注册；**当前视频代码通用，不需要** |
 
-### 建议新增 ABI（最小集合）
+### ABI v7（已落地）
 
 | ABI 能力 | 用途 | 先后 |
 |---|---|---|
 | `find_module(name)` / `register_module_loaded(name, cb)` | **已实现**：A2 找 `libunity.so`，并在 `libunity` 载入后再装 Oddmar 视频 hook；若模块已存在，注册时会立即回调 | A2 已解锁 |
 | `register_input_observer(observer)` | **已实现**：A1 从核心拿 SDL/controller 边沿、axis、frame begin | A1 已完成 |
-| `jni_new_byte_array` / `jni_new_string_array` | A3 返回 `GetBytes()` 与 `ListAssets()` | A3 前 |
-| `register_jni_class_ex`（instantiate + plugin object userdata） | A3 返回真实 `AssetReader`，并让后续 instance method 找回 reader 状态 | A3 前 |
+| `jni_new_byte_array` / `jni_byte_array_write` | A3 返回 `GetBytes()` | 已实现 |
+| `jni_new_string_array` / `jni_string_array_set` | A3 返回 `ListAssets()` | 已实现 |
+| `jni_new_object` / `jni_object_userdata` | A3 返回真实 `AssetReader`，并让后续 instance method 找回 reader 状态 | 已实现 |
 
 其中 A1 已完成核心清理：核心只广播原始输入与帧边界，`OddmarInputState`、gate 策略和 il2cpp RVA hook 均由 `oddmar_input` 插件持有。
 
@@ -222,8 +231,8 @@ oddmar_video (libunity+0x4c124c 翻译)
 1. **核心内务清理**（低风险，不改行为）：`BD_FORCE_VIDEO_TEXTURE`、`BD_SWALLOW_GL_ERROR` 已删除；诊断日志统一到 `BD_VIDEO_TRACE_SHADERS` 并默认静默；`egl_sdl` 对 `bd_dump_video_rt` 的注册式回调改造仍待单独实施。
 2. **`oddmar_input` 插件**：**A1 已完成**：ABI v6 的通用输入观察者、`so_base` 已接入，`OddmarInputState`、输入 gate 与全部 Oddmar il2cpp RVA hooks 已从核心迁入插件。容器单测通过，启用插件的 Xvfb 回放运行约 12.5 秒、产生 3 个 GL 帧且无 `BD-SEGV`。本轮遵守用户约束，未进行真机测试或部署。
 3. **`oddmar_video` 插件**：**A2 已完成并通过容器回放**：`libunity+0x4c124c` hook 由模块加载回调安装，splash 与 `game-start.m4v` 均解析到 `gamedata/assets` 的真实文件。
-4. **`oddmar_assetlocator` 过渡编译开关**：**A3 过渡方案已完成并通过容器回放**：默认 OFF，Oddmar 构建显式 ON；目录枚举返回 153 项，8 个 AssetBundle 均取得真实 reader。跨 DSO 实验插件已加入但默认不构建，因 jnivm C++ 状态跨 DSO 崩溃而暂缓。
-5. **`oddmar_assetlocator` 完整插件化**：等 ABI 支持 byte array、string array、plugin-owned object 后再搬。验收点是 8 个 AssetBundle 不再出现 `Unable to read header from archive file:`，并且 `GetReaderWrapper()` 返回对象的 `GetObjectClass()` 能落到 `com/mobge/assetlocator/AssetReader`。
+4. **`oddmar_assetlocator` 完整插件化**：**A3 已完成并通过容器回放**：核心关闭 `BD_ENABLE_MOBGE_ASSETLOCATOR`，插件实际执行 `ListAssets`、创建 `AssetReader`，并在回放中打开 bundle1 至 bundle7；无 `BD-SEGV`，无 `Unable to read header from archive file:`。
+5. **回滚策略**：若真机发现插件 ABI 或时序回归，可暂时启用 `BD_ENABLE_MOBGE_ASSETLOCATOR=ON` 并移除 `oddmar_assetlocator.so`，核心过渡实现仍可独立工作。
 
 ## 目标布局
 
