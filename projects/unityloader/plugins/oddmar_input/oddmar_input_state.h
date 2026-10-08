@@ -2,8 +2,6 @@
 
 #include <cstdint>
 
-// Access is serialized by the SDL bridge. Game queries use one render-frame
-// snapshot; a tap between frames still contributes its press edge.
 class OddmarInputState {
 public:
     explicit OddmarInputState(uint32_t menu_mask) : menu_mask_(menu_mask) {}
@@ -72,8 +70,6 @@ public:
         if (playing) {
             if (!consume_menu()) return false;
         } else {
-            // Opening/closing must not reuse a held key, even through a
-            // second UI handler. Release it before issuing a new command.
             if (held_ & transition_held_) return false;
             consumed_menu_serial_ = frame_menu_serial_;
         }

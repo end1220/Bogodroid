@@ -116,7 +116,6 @@ add_executable(${CMAKE_PROJECT_NAME}
     javastubs/android_media.cpp
     javastubs/android_misc.cpp
     javastubs/android_descriptors.cpp
-    javastubs/bd_assetlocator.cpp
     javastubs/bd_video.cpp
     javastubs/javac.cpp
     platform/common/toml_include.cpp
@@ -124,6 +123,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     platform/common/config.cpp
     platform/common/device_display.cpp
     platform/common/input_backend.cpp
+    platform/common/input_observer.cpp
     platform/common/shader_cache.cpp
     platform/common/sys_volume.cpp
     platform/common/audio_bus.cpp
@@ -227,6 +227,17 @@ set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STAND
 
 if(CMAKE_PROJECT_NAME STREQUAL "unityloader")
     add_subdirectory(projects/unityloader/plugins EXCLUDE_FROM_ALL)
+endif()
+
+# MobGe's AssetLocator/AssetReader are Oddmar-specific Java helpers, not
+# Android platform stubs. The preferred path is the oddmar_assetlocator plugin;
+# this option remains as a source-compatible transition switch for older
+# deployments and explicit A/B comparisons.
+option(BD_ENABLE_MOBGE_ASSETLOCATOR "Compile Oddmar com.mobge.assetlocator stubs" OFF)
+if(BD_ENABLE_MOBGE_ASSETLOCATOR)
+    message(STATUS "BD_ENABLE_MOBGE_ASSETLOCATOR on -> compiling Oddmar asset locator stubs")
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE javastubs/bd_assetlocator.cpp)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BD_ENABLE_MOBGE_ASSETLOCATOR)
 endif()
 
 # Get all libc thunk files to exclude from PCH

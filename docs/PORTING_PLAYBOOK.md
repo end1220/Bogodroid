@@ -110,7 +110,8 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern 'JNIVM_ENABLE|BD_ENABL
 | 进程内存 | `[debug] mem_log_interval_ms`；**可省略**（默认 2000 ms），`BD_MEM_LOG_MS` 环境变量优先，`0` 关闭；需 `BD_ENABLE_LOG`（关掉时整段编译移除，不再每 2 s 读 `/proc`）；标签 `[BD-MEM]` |
 | 分辨率 / 刷新率自动探测 | `[device] displayWidth/Height/RefreshRate`；`0` 或省略 = 探测（SDL → `/dev/fb0` → 640x480@60）。实现 `platform/common/device_display.cpp`，日志标签 `[BD-DEVICE]` |
 | PAD Java stub | `[play_asset_delivery] enabled/default_pack/pack_version/pack_path_template` |
-| 每帧 present 钩子 | Plugin ABI v3：`register_present_callback` |
+| 每帧 present 钩子 | Plugin ABI v6：`register_present_callback` |
+| 模块生命周期 | Plugin ABI v6：`find_module(name)` / `register_module_loaded(name, cb, userdata)` |
 | CPU present / swap pause | `BD_EGL_CPU_PRESENT`、`BD_EGL_SWAP_PAUSE`（插件可 setenv） |
 
 一份 TOML 适配多机型：`[device]` 的三项留 `0` 即可跟随面板；只有需要 letterbox / 逻辑分辨率与物理面板不同时才写死。JNI 桩（`Display`、`DisplayMode`、`ANativeWindow`、`eglQuerySurface`、纹理上传判定）全部读同一份探测结果，勿再各自查 toml。
@@ -121,9 +122,10 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern 'JNIVM_ENABLE|BD_ENABL
 
 ## 4. 插件约定
 
-1. `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **3**）。
+1. `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **6**）。
 2. 每帧工作用 `register_present_callback`，不要让核心 `dlsym` 游戏名符号。
-3. PAD 路径补丁 / IL2CPP hook 留在插件。
+3. 非 IL2CPP 模块 hook 先用 `find_module()` 查询；若模块稍后才加载，用 `register_module_loaded()`。
+4. PAD 路径补丁 / IL2CPP hook 留在插件。
 
 ## 5. 选游戏与引擎初判
 

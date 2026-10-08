@@ -6,7 +6,11 @@ function(bogodroid_add_unityloader_plugin name)
     set(target "bogodroid_unityloader_plugin_${name}")
     add_library(${target} SHARED EXCLUDE_FROM_ALL ${ARGN})
     add_custom_target("plugin_${name}" DEPENDS ${target})
-    target_include_directories(${target} PRIVATE ${PROJ_SOURCE_DIR})
+    target_include_directories(${target} PRIVATE
+        ${PROJ_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/platform/common
+    )
+    target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(${target} PRIVATE BOGODROID_PLUGIN_BUILD)
     set_target_properties(${target} PROPERTIES
         CXX_STANDARD 20

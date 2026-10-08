@@ -2,12 +2,13 @@
 #define BOGODROID_PLUGIN_API_H
 
 #include <stdint.h>
+#include "input_observer.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define BOGODROID_PLUGIN_ABI_VERSION 3u
+#define BOGODROID_PLUGIN_ABI_VERSION 6u
 
 enum BogoPluginInitResult {
     BOGO_PLUGIN_OK = 0,
@@ -18,6 +19,10 @@ typedef struct so_module BogoSoModule;
 typedef void (*BogoIl2cppPostInitCallback)(void* userdata);
 typedef void (*BogoJniInitCallback)(void* jvm, void* userdata);
 typedef void (*BogoPresentCallback)(void* userdata);
+typedef void (*BogoAssetSourceCallback)(const char* path, void* userdata);
+typedef void (*BogoModuleLoadedCallback)(const char* name,
+                                         BogoSoModule* module,
+                                         void* userdata);
 
 typedef union BogoJniValue {
     uint8_t z;
@@ -60,11 +65,21 @@ typedef struct BogoPluginApi {
     int64_t (*config_get_i64)(const char* dotted_key, int64_t fallback);
 
     uintptr_t (*so_symbol)(BogoSoModule* mod, const char* name);
+    uintptr_t (*so_base)(BogoSoModule* mod);
+    BogoSoModule* (*find_module)(const char* name);
     void (*hook_address_detour)(BogoSoModule* mod, uintptr_t addr, uintptr_t dst, uintptr_t* orig_out);
     int (*register_il2cpp_post_init)(BogoIl2cppPostInitCallback cb, void* userdata);
     int (*register_jni_init)(BogoJniInitCallback cb, void* userdata);
+    int (*register_module_loaded)(const char* name,
+                                  BogoModuleLoadedCallback cb,
+                                  void* userdata);
     // Called from the render/present thread (eglSwapBuffers). Keep work small.
     int (*register_present_callback)(BogoPresentCallback cb, void* userdata);
+    // SDL controller events and render-frame boundaries. Callbacks run on the
+    // input/render thread; they must be bounded and must not throw.
+    int (*register_input_observer)(const BogoInputObserver* observer);
+    int (*register_asset_source_callback)(BogoAssetSourceCallback cb,
+                                          void* userdata);
     int (*register_jni_class)(const char* class_name,
                               const BogoJniMethod* methods,
                               uint32_t method_count);

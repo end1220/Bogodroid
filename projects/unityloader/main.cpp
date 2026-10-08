@@ -96,169 +96,6 @@ extern "C" void bd_media_bench(const char* path, int frames);
 //   v4  a1 = path, a2 = NULL, a3 = length  (this one)
 static uintptr_t g_video_translate_orig = 0;
 
-// Gate state transitions and quarantine only the command that crossed the UI
-// boundary. Fresh A/B commands retain the game's submit/cancel behavior.
-static uintptr_t g_oddmar_pause_toggle_orig = 0;
-static uintptr_t g_oddmar_try_quit_orig = 0;
-static uintptr_t g_oddmar_jump_orig = 0;
-static uintptr_t g_oddmar_raw_button_orig = 0;
-static uintptr_t g_oddmar_attack_orig = 0;
-static uintptr_t g_oddmar_attack2_orig = 0;
-static uintptr_t g_oddmar_walk_orig = 0;
-static uintptr_t g_oddmar_ui_orig[5] = {};
-static bool oddmar_sdl_buttons = false;
-static bool oddmar_raw_button_hook(void* self, int index, void* method)
-{
-    using Fn = bool (*)(void*, int, void*);
-    const bool native = reinterpret_cast<Fn>(g_oddmar_raw_button_orig)(self, index, method);
-    if (!self || *reinterpret_cast<const int*>(static_cast<const unsigned char*>(self) + 0x1a8) != 1)
-        return native;
-    const bool physical = bd_oddmar_input_gate::raw_button_state(index);
-    // Only log changed observations, not every per-frame query.
-    static unsigned char observations[20] = {};
-    static unsigned int logs = 0;
-    if (index >= 0 && index < 20) {
-        const unsigned char observation = 4u | (native ? 1u : 0u) | (physical ? 2u : 0u);
-        if (observations[index] != observation && logs < 160) {
-            observations[index] = observation;
-            ++logs;
-            BD_LOG("INPUT", "Oddmar raw button index=%d native=%d SDL=%d mask=0x%x",
-                   index, native, physical, bd_oddmar_input_gate::controller_buttons());
-        }
-    }
-    return physical;
-}
-static void oddmar_pause_toggle_hook(void* self, void* method)
-{
-    // MRGameHud2::_state: Playing=1, Paused=2, ... (field offset 0x13c).
-    const uint32_t state = self
-        ? *reinterpret_cast<const uint32_t*>(
-              reinterpret_cast<const unsigned char*>(self) + 0x13c)
-        : 1u;
-    const auto serial = bd_oddmar_input_gate::frame_press_serial();
-    if (!bd_oddmar_input_gate::allow_pause_transition(state == 1u)) {
-        static uint64_t logged_serial = UINT64_MAX;
-        if (serial != logged_serial) {
-            logged_serial = serial;
-            BD_LOG("INPUT", "Oddmar pauseToggle blocked state=%u serial=%llu",
-                   state, (unsigned long long)serial);
-        }
-        return;
-    }
-    BD_LOG("INPUT", "Oddmar pauseToggle allowed state=%u serial=%llu",
-           state, (unsigned long long)serial);
-    reinterpret_cast<void (*)(void*, void*)>(g_oddmar_pause_toggle_orig)(self, method);
-}
-static void oddmar_try_quit_hook(void* self, void* method)
-{
-    if (!bd_oddmar_input_gate::consume_menu_back()) {
-        BD_LOG("INPUT", "Oddmar tryQuit blocked without Start/Guide pulse");
-        return;
-    }
-    reinterpret_cast<void (*)(void*, void*)>(g_oddmar_try_quit_orig)(self, method);
-}
-
-// Keep the game's own jump test, but expose only the physical A press edge;
-// this preserves the original one-shot/double-jump state machine and prevents
-// a held or unrelated pad button from retriggering Jump.
-static bool oddmar_jump_hook(void* method)
-{
-    using Fn = bool (*)(void*);
-    const bool game_jump = reinterpret_cast<Fn>(g_oddmar_jump_orig)(method);
-    if (!game_jump || !oddmar_sdl_buttons || !bd_oddmar_input_gate::controller_active())
-        return game_jump;
-    const bool physical = bd_oddmar_input_gate::jump_pressed();
-    static unsigned int blocked_logs = 0;
-    if (!physical && blocked_logs++ < 24)
-        BD_LOG("INPUT", "Oddmar Jump suppressed without A mask=0x%x",
-               bd_oddmar_input_gate::controller_buttons());
-    return physical;
-}
-
-static bool oddmar_attack_hook(void* method)
-{
-    const bool native = reinterpret_cast<bool (*)(void*)>(g_oddmar_attack_orig)(method);
-    if (!bd_oddmar_input_gate::controller_active()) return native;
-    const bool pressed = bd_oddmar_input_gate::attack_pressed();
-    const auto serial = bd_oddmar_input_gate::frame_press_serial();
-    static uint64_t logged_serial = UINT64_MAX;
-    static unsigned int logs = 0;
-    if ((pressed || native) && serial != logged_serial && logs < 160) {
-        logged_serial = serial;
-        ++logs;
-        BD_LOG("INPUT", "Oddmar attack edge native=%d SDL=%d serial=%llu mask=0x%x",
-               native, pressed, (unsigned long long)serial,
-               bd_oddmar_input_gate::controller_buttons());
-    }
-    return pressed;
-}
-
-static bool oddmar_attack2_hook(void* method)
-{
-    const bool native = reinterpret_cast<bool (*)(void*)>(g_oddmar_attack2_orig)(method);
-    if (!oddmar_sdl_buttons || !bd_oddmar_input_gate::controller_active()) return native;
-    const bool pressed = bd_oddmar_input_gate::attack2_pressed();
-    const auto serial = bd_oddmar_input_gate::frame_press_serial();
-    static uint64_t logged_serial = UINT64_MAX;
-    static unsigned int logs = 0;
-    if ((pressed || native) && serial != logged_serial && logs < 160) {
-        logged_serial = serial;
-        ++logs;
-        BD_LOG("INPUT", "Oddmar attack2 edge native=%d SDL=%d serial=%llu mask=0x%x",
-               native, pressed, (unsigned long long)serial,
-               bd_oddmar_input_gate::controller_buttons());
-    }
-    return pressed;
-}
-
-static int oddmar_walk_hook(void* self, const unsigned char* args, void* method)
-{
-    // WalkArgs is a 56-byte value type passed by reference in the ARM64 ABI.
-    const int type = args ? *reinterpret_cast<const int*>(args + 0x20) : -1;
-    const int result = reinterpret_cast<int (*)(void*, const unsigned char*, void*)>(
-        g_oddmar_walk_orig)(self, args, method);
-    static uint64_t logged_serial[9] = {};
-    static unsigned int logs = 0;
-    const auto serial = bd_oddmar_input_gate::frame_press_serial();
-    if (type >= 4 && type <= 8 && logs < 200 && logged_serial[type] != serial) {
-        logged_serial[type] = serial;
-        ++logs;
-        const int air_jumps = self ? *reinterpret_cast<const int*>(
-            static_cast<const unsigned char*>(self) + 0xac) : -1;
-        BD_LOG("INPUT", "Oddmar character command type=%d result=%d airJumps=%d serial=%llu",
-               type, result, air_jumps, (unsigned long long)serial);
-    }
-    return result;
-}
-
-static bool oddmar_ui_query(bool native, unsigned int slot)
-{
-    if (!native || !bd_oddmar_input_gate::controller_active() ||
-        bd_oddmar_input_gate::ui_command_available()) return native;
-    static uint64_t logged_serial[5] = {};
-    static unsigned int logs = 0;
-    const auto serial = bd_oddmar_input_gate::frame_press_serial();
-    if (logs < 80 && logged_serial[slot] != serial) {
-        logged_serial[slot] = serial;
-        ++logs;
-        BD_LOG("INPUT", "Oddmar UI boundary blocked query=%u serial=%llu",
-               slot, (unsigned long long)serial);
-    }
-    return false;
-}
-
-template<unsigned int Slot>
-static bool oddmar_static_ui_hook(void* method)
-{
-    return oddmar_ui_query(reinterpret_cast<bool (*)(void*)>(g_oddmar_ui_orig[Slot])(method), Slot);
-}
-
-template<unsigned int Slot>
-static bool oddmar_instance_ui_hook(void* self, void* method)
-{
-    return oddmar_ui_query(reinterpret_cast<bool (*)(void*, void*)>(g_oddmar_ui_orig[Slot])(self, method), Slot);
-}
-
 // --- video URL -> local file mapping (BD_BYPASS_VIDEO_TRANSLATE) -----------
 // Where the original URL actually lives
 // -------------------------------------
@@ -470,6 +307,7 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
 #include "gles2.h"
 #include "input_backend.h"
 #include "plugin_api.h"
+#include "input_observer.h"
 #include "shader_cache.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
@@ -889,8 +727,16 @@ namespace il2cpp_patch {
 namespace plugin_host {
     struct JniInitEntry { BogoJniInitCallback cb; void* userdata; };
     struct PresentEntry { BogoPresentCallback cb; void* userdata; };
+    struct AssetSourceEntry { BogoAssetSourceCallback cb; void* userdata; };
+    struct ModuleLoadedEntry {
+        std::string name;
+        BogoModuleLoadedCallback cb;
+        void* userdata;
+    };
     static std::vector<JniInitEntry> g_jni_init_callbacks;
     static std::vector<PresentEntry> g_present_callbacks;
+    static std::vector<AssetSourceEntry> g_asset_source_callbacks;
+    static std::vector<ModuleLoadedEntry> g_module_loaded_callbacks;
     static std::set<std::string> g_loaded_paths;
     static std::vector<void*> g_handles;
     static std::string g_config_path;
@@ -940,6 +786,33 @@ namespace plugin_host {
         return name ? so_symbol((so_module*)mod, name) : 0;
     }
 
+    static uintptr_t api_so_base(BogoSoModule* mod) {
+        return mod ? ((so_module*)mod)->base : 0;
+    }
+
+    static bool module_name_matches(const so_module* mod, const char* name) {
+        if (!mod || !name || !*name) return false;
+        const char* soname = mod->soname;
+        const char* path = mod->path;
+        if (soname && strcmp(soname, name) == 0) return true;
+        if (path && strcmp(path, name) == 0) return true;
+        if (path) {
+            const char* slash = strrchr(path, '/');
+            const char* base = slash ? slash + 1 : path;
+            if (strcmp(base, name) == 0) return true;
+        }
+        return false;
+    }
+
+    static BogoSoModule* api_find_module(const char* name) {
+        if (!name || !*name) return nullptr;
+        for (so_module** p = loaded_modules; p && *p; ++p) {
+            if (module_name_matches(*p, name))
+                return (BogoSoModule*)*p;
+        }
+        return nullptr;
+    }
+
     static void api_hook_address_detour(BogoSoModule* mod, uintptr_t addr, uintptr_t dst, uintptr_t* orig_out) {
         if (!mod || !addr || !dst) {
             if (orig_out) *orig_out = 0;
@@ -958,16 +831,51 @@ namespace plugin_host {
         return 1;
     }
 
+    static int api_register_module_loaded(const char* name,
+                                          BogoModuleLoadedCallback cb,
+                                          void* userdata) {
+        if (!name || !*name || !cb) return 0;
+        g_module_loaded_callbacks.push_back({name, cb, userdata});
+        if (BogoSoModule* mod = api_find_module(name))
+            cb(name, mod, userdata);
+        return 1;
+    }
+
     static int api_register_present_callback(BogoPresentCallback cb, void* userdata) {
         if (!cb) return 0;
         g_present_callbacks.push_back({cb, userdata});
         return 1;
     }
 
+    static int api_register_input_observer(const BogoInputObserver* observer) {
+        return bd_register_input_observer(observer);
+    }
+
+    static int api_register_asset_source_callback(BogoAssetSourceCallback cb,
+                                                   void* userdata) {
+        if (!cb) return 0;
+        g_asset_source_callbacks.push_back({cb, userdata});
+        return 1;
+    }
+
+    static void notify_asset_source(const char* path) {
+        for (const AssetSourceEntry& entry : g_asset_source_callbacks)
+            if (entry.cb) entry.cb(path, entry.userdata);
+    }
+
     static void run_present_callbacks() {
         for (const PresentEntry& e : g_present_callbacks) {
             if (e.cb)
                 e.cb(e.userdata);
+        }
+    }
+
+    static void notify_module_loaded(const char* path, so_module* mod) {
+        if (!mod) return;
+        for (const ModuleLoadedEntry& e : g_module_loaded_callbacks) {
+            if (e.cb && module_name_matches(mod, e.name.c_str()))
+                e.cb(path ? path : e.name.c_str(), (BogoSoModule*)mod,
+                     e.userdata);
         }
     }
 
@@ -1096,10 +1004,15 @@ namespace plugin_host {
         api.config_get_bool = &api_config_get_bool;
         api.config_get_i64 = &api_config_get_i64;
         api.so_symbol = &api_so_symbol;
+        api.so_base = &api_so_base;
+        api.find_module = &api_find_module;
         api.hook_address_detour = &api_hook_address_detour;
         api.register_il2cpp_post_init = &api_register_il2cpp_post_init;
         api.register_jni_init = &api_register_jni_init;
+        api.register_module_loaded = &api_register_module_loaded;
         api.register_present_callback = &api_register_present_callback;
+        api.register_input_observer = &api_register_input_observer;
+        api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;
         api.jni_new_string_utf8 = &api_jni_new_string_utf8;
@@ -1169,6 +1082,10 @@ namespace plugin_host {
         for (const auto& entry : g_jni_init_callbacks)
             entry.cb((void*)vm, entry.userdata);
     }
+}
+
+extern "C" void bd_plugin_notify_asset_source(const char* path) {
+    plugin_host::notify_asset_source(path);
 }
 
 extern "C" void bd_plugin_run_present_callbacks(void) {
@@ -1409,8 +1326,8 @@ int main(int argc, char* argv[])
     // IL2CPP defer this early phase and are loaded again below.
     plugin_host::set_jvm(&vm);
     plugin_host::load(nullptr, config_path_abs.c_str());
-    plugin_host::run_jni_init(&vm);
     // sdl_initialize_gles();
+    plugin_host::run_jni_init(&vm);
     InitJNIBinding(&vm);
 
     JClass* unityClass = vm.findClass("com/unity3d/player/UnityPlayer").get();
@@ -1426,6 +1343,10 @@ int main(int argc, char* argv[])
     auto& backend = InputBackend::instance();
 
     int module_count = 0;
+    auto add_loaded_module = [&](so_module* mod, const char* path) {
+        loaded_modules[module_count++] = mod;
+        plugin_host::notify_module_loaded(path, mod);
+    };
 
     // There is a weird incompatibility with Unity's incremental GC. Luckily there's a commandline parameter to overwrite it.
     putenv("GC_DISABLE_INCREMENTAL=1");
@@ -1437,7 +1358,7 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lcpp, path_lcpp, addr_lcpp)) {
         BOOT_LOG("No libhelp found\n");
     }
-    loaded_modules[module_count++] = &lcpp;
+    add_loaded_module(&lcpp, path_lcpp);
 
     so_module lbootstrap = {};
     uintptr_t addr_lbootstrap = 0x4200000000;
@@ -1451,65 +1372,74 @@ int main(int argc, char* argv[])
         if (!load_so_from_file(&ldobby, path_ldobby, addr_ldobby)) {
             BOOT_LOG("No libdobby found\n");
         }
-        loaded_modules[module_count++] = &ldobby;
+        add_loaded_module(&ldobby, path_ldobby);
 
         if (!load_so_from_file(&lbootstrap, path_lbootstrap, addr_lbootstrap)) {
             BOOT_LOG("No libbootstrap found\n");
         }
-        loaded_modules[module_count++] = &lbootstrap;
+        add_loaded_module(&lbootstrap, path_lbootstrap);
 
         so_module* mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "lib/arm64-v8a/libcrypto.so", 0x4251000000)) {
+        const char* path_lcrypto = "lib/arm64-v8a/libcrypto.so";
+        if (mod && load_so_from_file(mod, path_lcrypto, 0x4251000000)) {
             BOOT_LOG("  Loaded: libcrypto.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lcrypto);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "lib/arm64-v8a/libssl.so", 0x4252000000)) {
+        const char* path_lssl = "lib/arm64-v8a/libssl.so";
+        if (mod && load_so_from_file(mod, path_lssl, 0x4252000000)) {
             BOOT_LOG("  Loaded: libssl.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lssl);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/host/fxr/8.0.6/libhostfxr.so", 0x4253000000)) {
+        const char* path_lhostfxr = "assets/dotnet/host/fxr/8.0.6/libhostfxr.so";
+        if (mod && load_so_from_file(mod, path_lhostfxr, 0x4253000000)) {
             BOOT_LOG("  Loaded: libhostfxr.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lhostfxr);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libhostpolicy.so", 0x4254000000)) {
+        const char* path_lhostpolicy = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libhostpolicy.so";
+        if (mod && load_so_from_file(mod, path_lhostpolicy, 0x4254000000)) {
             BOOT_LOG("  Loaded: libhostpolicy.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lhostpolicy);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libcoreclr.so", 0x4255000000)) {
+        const char* path_lcoreclr = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libcoreclr.so";
+        if (mod && load_so_from_file(mod, path_lcoreclr, 0x4255000000)) {
             BOOT_LOG("  Loaded: libcoreclr.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lcoreclr);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Native.so", 0x4256000000)) {
+        const char* path_lsystem_native = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Native.so";
+        if (mod && load_so_from_file(mod, path_lsystem_native, 0x4256000000)) {
             BOOT_LOG("  Loaded: libSystem.Native.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lsystem_native);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Globalization.Native.so", 0x4257000000)) {
+        const char* path_lglobalization_native = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Globalization.Native.so";
+        if (mod && load_so_from_file(mod, path_lglobalization_native, 0x4257000000)) {
             BOOT_LOG("  Loaded: libSystem.Globalization.Native.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lglobalization_native);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.IO.Compression.Native.so", 0x4258000000)) {
+        const char* path_lcompression_native = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.IO.Compression.Native.so";
+        if (mod && load_so_from_file(mod, path_lcompression_native, 0x4258000000)) {
             BOOT_LOG("  Loaded: libSystem.IO.Compression.Native.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lcompression_native);
         }
 
         mod = (so_module*)calloc(1, sizeof(so_module));
-        if (mod && load_so_from_file(mod, "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Security.Cryptography.Native.OpenSsl.so", 0x4259000000)) {
+        const char* path_lcrypto_native = "assets/dotnet/shared/Microsoft.NETCore.App/8.0.6/libSystem.Security.Cryptography.Native.OpenSsl.so";
+        if (mod && load_so_from_file(mod, path_lcrypto_native, 0x4259000000)) {
             BOOT_LOG("  Loaded: libSystem.Security.Cryptography.Native.OpenSsl.so\n");
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path_lcrypto_native);
         }
 
         auto lemonBootJNI_OnLoad = (jint (*)(JavaVM* vm, void* reserved))(so_symbol(&lbootstrap, "JNI_OnLoad"));
@@ -1527,7 +1457,7 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lmain, path_lmain, addr_lmain)) {
         return 1;
     }
-    loaded_modules[module_count++] = &lmain;
+    add_loaded_module(&lmain, path_lmain);
     BD_TIME("after loading libmain.so");
 
     BD_TIME("before loading libil2cpp.so");
@@ -1537,19 +1467,21 @@ int main(int argc, char* argv[])
     so_module lmnative = {};
     uintptr_t addr_lil2cpp = 0x3600000000;
     const char* path_lil2cpp = "lib/arm64-v8a/libil2cpp.so";
+    const char* loaded_runtime_path = path_lil2cpp;
     if (!load_so_from_file(&lil2cpp, path_lil2cpp, addr_lil2cpp)) {
         BOOT_LOG("il2cpp not found, trying libmono\n");
         const char* path_mono = "lib/arm64-v8a/libmonobdwgc-2.0.so";
         if (!load_so_from_file(&lil2cpp, path_mono, addr_lil2cpp)) {
             return 1;
         }
+        loaded_runtime_path = path_mono;
         BOOT_LOG("Loading libMonoPosixHelper.so\n");
         uintptr_t addr_lposix = 0x3700000000;
         const char* path_lposix = "lib/arm64-v8a/libMonoPosixHelper.so";
         if (!load_so_from_file(&lposix, path_lposix, addr_lposix)) {
             return 1;
         }
-        loaded_modules[module_count++] = &lposix;
+        add_loaded_module(&lposix, path_lposix);
 
         BOOT_LOG("Loading libmono-native.so\n");
         uintptr_t addr_lmnative = 0x3750000000;
@@ -1557,69 +1489,14 @@ int main(int argc, char* argv[])
         if (!load_so_from_file(&lmnative, path_lmnative, addr_lmnative)) {
             return 1;
         }
-        loaded_modules[module_count++] = &lmnative;
+        add_loaded_module(&lmnative, path_lmnative);
 
         so_dynamic_libraries[4] = symtable_monobridge;
         so_dynamic_libraries[5] = NULL;
         monobridge_init(&lil2cpp);
     }
-    loaded_modules[module_count++] = &lil2cpp;
+    add_loaded_module(&lil2cpp, loaded_runtime_path);
     BD_TIME("after loading libil2cpp.so");
-
-    const bool oddmar_menu_gate =
-        config["input"]["oddmar_menu_gate"].value_or<bool>(false);
-    bd_oddmar_input_gate::configure(oddmar_menu_gate);
-    if (oddmar_menu_gate && config["package"]["packageName"].value_or<std::string>("") == "com.mobge.Oddmar") {
-        const uintptr_t pause_toggle = addr_lil2cpp + 0x93047C;
-        const uintptr_t try_quit = addr_lil2cpp + 0x8E53AC;
-        hook_address_detour(&lil2cpp, pause_toggle,
-                            (uintptr_t)&oddmar_pause_toggle_hook,
-                            &g_oddmar_pause_toggle_orig);
-        hook_address_detour(&lil2cpp, try_quit,
-                            (uintptr_t)&oddmar_try_quit_hook,
-                            &g_oddmar_try_quit_orig);
-        // MenuForHud, MenuBack, Mobge selectInput, InControl submit/cancel.
-        const uintptr_t ui_rvas[] = {0x948BF8, 0x948E04, 0x97D5F0, 0xFD4C48, 0xFD4C68};
-        const uintptr_t ui_hooks[] = {
-            (uintptr_t)&oddmar_static_ui_hook<0>, (uintptr_t)&oddmar_static_ui_hook<1>,
-            (uintptr_t)&oddmar_instance_ui_hook<2>, (uintptr_t)&oddmar_instance_ui_hook<3>,
-            (uintptr_t)&oddmar_instance_ui_hook<4>
-        };
-        for (unsigned int i = 0; i < 5; ++i)
-            hook_address_detour(&lil2cpp, addr_lil2cpp + ui_rvas[i], ui_hooks[i], &g_oddmar_ui_orig[i]);
-        oddmar_sdl_buttons = config["input"]["oddmar_sdl_buttons"].value_or<bool>(false);
-        if (oddmar_sdl_buttons) {
-            const uintptr_t jump = addr_lil2cpp + 0x9483A8;
-            const uintptr_t raw_button = addr_lil2cpp + 0x17EB88C;
-            const uintptr_t attack = addr_lil2cpp + 0x9485CC;
-            const uintptr_t attack2 = addr_lil2cpp + 0x9487E8;
-            const uintptr_t walk = addr_lil2cpp + 0x94DD00;
-            hook_address_detour(&lil2cpp, raw_button,
-                                (uintptr_t)&oddmar_raw_button_hook,
-                                &g_oddmar_raw_button_orig);
-            hook_address_detour(&lil2cpp, jump,
-                                (uintptr_t)&oddmar_jump_hook,
-                                &g_oddmar_jump_orig);
-            hook_address_detour(&lil2cpp, attack,
-                                (uintptr_t)&oddmar_attack_hook,
-                                &g_oddmar_attack_orig);
-            hook_address_detour(&lil2cpp, attack2,
-                                (uintptr_t)&oddmar_attack2_hook,
-                                &g_oddmar_attack2_orig);
-            hook_address_detour(&lil2cpp, walk,
-                                (uintptr_t)&oddmar_walk_hook,
-                                &g_oddmar_walk_orig);
-            BD_LOG("INPUT", "Oddmar SDL button bridge v4 raw=%p jump=%p attack=%p attack2=%p orig=%p/%p/%p/%p",
-                   (void*)raw_button, (void*)jump, (void*)attack, (void*)attack2,
-                   (void*)g_oddmar_raw_button_orig, (void*)g_oddmar_jump_orig,
-                   (void*)g_oddmar_attack_orig, (void*)g_oddmar_attack2_orig);
-        }
-        BD_LOG("INPUT", "Oddmar menu gate armed pauseToggle=%p tryQuit=%p orig=%p/%p",
-               (void*)pause_toggle, (void*)try_quit,
-               (void*)g_oddmar_pause_toggle_orig, (void*)g_oddmar_try_quit_orig);
-    } else {
-        bd_oddmar_input_gate::configure(false);
-    }
 
     plugin_host::load(&lil2cpp, config_path_abs.c_str());
 
@@ -1643,18 +1520,9 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lunity, path_lunity, addr_lunity)) {
         return 1;
     }
-    loaded_modules[module_count++] = &lunity;
+    add_loaded_module(&lunity, path_lunity);
     g_lunity_base = addr_lunity;
     BD_TIME("after loading libunity.so");
-
-    if (std::getenv("BD_BYPASS_VIDEO_TRANSLATE")) {
-        const uintptr_t target = addr_lunity + 0x4c124c;
-        hook_address_detour(&lunity, target,
-                            (uintptr_t)&bypass_video_translate,
-                            &g_video_translate_orig);
-        BD_LOG("MEDIA", "video translation bypass armed target=%p orig=%p",
-               (void*)target, (void*)g_video_translate_orig);
-    }
 
     // libAkSoundEngine.so (Wwise). IL2CPP resolves [DllImport("AkSoundEngine")]
     // by dlopen("libAkSoundEngine.so") + dlsym, and dlopen_impl only answers for
@@ -1671,7 +1539,7 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lak, path_lak, addr_lak)) {
         BOOT_LOG("No libAkSoundEngine found\n");
     } else {
-        loaded_modules[module_count++] = &lak;
+        add_loaded_module(&lak, path_lak);
 
         // Wwise caches the JavaVM in exactly one place, and JNI_OnLoad is it: the
         // whole function is `adrp x2,<bss>; mov w1,#0x10006; str x0,[x2,#1088]; ret`
@@ -1701,7 +1569,7 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lburst, path_lburst, addr_lburst)) {
         BOOT_LOG("No libburst found\n");
     } else
-        loaded_modules[module_count++] = &lburst;
+        add_loaded_module(&lburst, path_lburst);
 
     BOOT_LOG("Loading libUnityHelp\n");
     so_module lhelpers = {};
@@ -1710,7 +1578,7 @@ int main(int argc, char* argv[])
     if (!load_so_from_file(&lhelpers, path_lhelpers, addr_lhelpers)) {
         BOOT_LOG("No libhelp found\n");
     }
-    loaded_modules[module_count++] = &lhelpers;
+    add_loaded_module(&lhelpers, path_lhelpers);
 
     const char* directory = "assets/bin/Data/Managed/";
     DIR* d = opendir(directory);
@@ -1733,7 +1601,7 @@ int main(int argc, char* argv[])
         so_module* mod = (so_module*)calloc(1, sizeof(so_module));
         if (mod && load_so_from_file(mod, path, (uintptr_t)NULL)) {
             BOOT_LOG("  Loaded: %s\n", entry->d_name);
-            loaded_modules[module_count++] = mod;
+            add_loaded_module(mod, path);
         } else {
             warning("  Failed to load: %s\n", path);
             free(mod); // It is safe to call free() on a NULL pointer
@@ -1827,7 +1695,7 @@ int main(int argc, char* argv[])
     auto unityNRender = unityClass->getMethod("()Z", "nativeRender");
     BD_TIME("before first nativeRender");
     BOOT_LOG("calling nativeRender from libunity.so\n");
-    bd_oddmar_input_gate::begin_frame();
+    bd_input_observer_begin_frame();
     auto ret3 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
     BD_TIME("after first nativeRender");
 
@@ -1839,7 +1707,7 @@ int main(int argc, char* argv[])
     // or Unity crashes mid-shutdown. OnApplicationQuit has already saved PlayerPrefs;
     // we only flush our own SharedPreferences and fast-exit (skip dtor cascade).
     while (true) {
-        bd_oddmar_input_gate::begin_frame();
+        bd_input_observer_begin_frame();
         auto ret4 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
         if (jnivm::com::unity3d::player::activity_finish_ready()) {
             BD_LOG("EXIT", "Activity.finish requested and input idle - stopping Unity render loop");

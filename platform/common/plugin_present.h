@@ -1,6 +1,6 @@
 #pragma once
 
-// Run present-thread callbacks registered by plugins (Plugin ABI v3+).
+// Run present-thread callbacks registered by plugins.
 // Safe no-op when none registered. Called from eglSwapBuffers paths.
 #ifdef __cplusplus
 extern "C" {

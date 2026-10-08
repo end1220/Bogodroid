@@ -20,9 +20,6 @@
 // full paths. The managed caller re-prefixes the directory itself while
 // recursing, so returning full paths here would double the directory component.
 
-#include "toml++/toml.hpp"
-extern toml::table config;
-
 #include "android.h"
 #include "baron/baron.h"
 #include "javac.h"
@@ -35,24 +32,15 @@ extern toml::table config;
 #include <string>
 #include <vector>
 
-extern "C" void bd_video_note_asset_source(const char* path);
+extern "C" void bd_plugin_notify_asset_source(const char* path);
+#define BD_NOTIFY_ASSET_SOURCE bd_plugin_notify_asset_source
 
 namespace {
 
-// The directory AssetLocator paths are resolved against: "assets" under the
-// process cwd, falling back to <paths.game_files>/assets if this ever runs with
-// a different cwd.
+// init_config() changes cwd to paths.game_files before plugin JNI init runs.
 std::filesystem::path bd_asset_root()
 {
-    std::error_code ec;
-    std::filesystem::path local("assets");
-    if (std::filesystem::is_directory(local, ec))
-        return local;
-
-    std::filesystem::path gameFiles(
-        config["paths"]["game_files"].value_or<std::string>("."));
-    gameFiles /= "assets";
-    return gameFiles;
+    return std::filesystem::current_path() / "assets";
 }
 
 // Asset paths arrive from the managed side as "Bundles", "Bundles/x", sometimes
@@ -151,7 +139,7 @@ jnivm::com::mobge::assetlocator::AssetLocator::GetReaderWrapper(
 
     auto reader = std::make_shared<AssetReader>(file.string());
     BD_LOG("ASSETLOC", "GetReaderWrapper('%s') -> %s", rel.c_str(), file.string().c_str());
-    bd_video_note_asset_source(file.string().c_str());
+    BD_NOTIFY_ASSET_SOURCE(file.string().c_str());
     return reader;
 }
 

@@ -13,26 +13,6 @@
 #define INPUT_ID_XBOX 2
 #define INPUT_ID_MOUSE 3
 
-// Oddmar's IL2CPP input shim uses these edge-triggered pulses for the two
-// menu entry points.  The gate is opt-in and inert for every other port.
-namespace bd_oddmar_input_gate {
-void configure(bool enabled);
-void note_controller_button(int button, bool down);
-void note_controller_axis(int axis, int value);
-void begin_frame();
-uint32_t controller_buttons();
-bool controller_active();
-bool jump_pressed();
-bool attack_pressed();
-bool attack2_pressed();
-uint64_t frame_press_serial();
-bool allow_pause_transition(bool playing);
-bool ui_command_available();
-bool raw_button_state(int index);
-bool consume_menu_button();
-bool consume_menu_back();
-}
-
 class InputBackend {
 private:
     std::unordered_map<int, std::shared_ptr<jnivm::android::view::InputDevice>> devices;

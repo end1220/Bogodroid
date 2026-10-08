@@ -87,6 +87,44 @@
 
 > **执行步骤**：L3–L7 的做法与前置条件见 **§7.0**（按优先级分组）。L1 / L2 已关闭，原因与解法见下一节。
 
+### 0.2a TrimUI 真机自动启动与停止
+
+掌机的正式入口是 `/mnt/SDCARD/Roms/PORTS/奥德玛.sh`，但自动测试不需要模拟菜单操作。
+TrimUI 固件常驻 `/usr/trimui/bin/runtrimui.sh`：当 `MainUI` 退出后，它会在前台执行
+`/tmp/cmd_to_run.sh`，执行完再清理该文件。因此可以把 Oddmar 的启动脚本复制到
+`/tmp/cmd_to_run.sh`，再 `killall -9 MainUI`，由系统 supervisor 接管启动。
+
+当前掌机 `/mnt/SDCARD/Data/ports/Oddmar/cmd_to_run.sh` 的内容是：
+
+```sh
+exec sh /mnt/SDCARD/Data/ports/Oddmar/trimui_run.sh
+```
+
+`trimui_run.sh` 必须前台 `exec` `unityloader`；如果后台运行，`runtrimui.sh` 会认为脚本已经结束并重新拉起
+`MainUI`，造成主界面与游戏争抢画面。该脚本还负责设置 FFmpeg 4.2 的 `LD_LIBRARY_PATH`、视频翻译开关、
+SDL 输入配置，清理旧日志，并将 loader 输出写入 `/mnt/SDCARD/Data/ports/Oddmar/log.txt`。
+
+仓库保留从掌机拉回的脚本原文：[`trimui_run.sh`](trimui_run.sh) 和
+[`launch_remote.sh`](launch_remote.sh)。前者是 supervisor 使用的前台入口，后者适合 Dropbeak
+远程命令场景，会后台启动并立即返回，避免 HTTP 命令超时；需要真机自动测试时，优先使用前者。
+
+远程启动步骤：
+
+```sh
+cp /mnt/SDCARD/Data/ports/Oddmar/cmd_to_run.sh /tmp/cmd_to_run.sh
+chmod +x /tmp/cmd_to_run.sh
+killall -9 MainUI
+```
+
+停止游戏：
+
+```sh
+killall -9 unityloader
+```
+
+停止后不要手动启动 `MainUI`；`runtrimui.sh` 会自动恢复系统界面。大文件部署后还必须核对设备端
+文件大小和 SHA-256，确认没有留下超时造成的残缺文件。
+
 ### 0.3 主要问题：症状 → 根因 → 解法（速查）
 
 > 本节是**唯一的结论汇总**。新会话读完这里 + §⛔ 接手第 0 步，就能直接开工；
@@ -1913,21 +1951,32 @@ type 4 down gesture。v4 因而先隔离 Attack2，而没有绕过 melee/combo �
 
 ### 0.14e 后续架构：将 Oddmar 特例迁移到 plugin
 
-当前修复先以最小风险落在 loader 本体中并完成实机验证；后续应考虑把游戏私有逻辑迁移为
-`unityloader.d/oddmar_compat.so`，避免 `projects/unityloader/main.cpp` 和通用输入后端持续积累
-包名、RVA、字段偏移和游戏状态枚举。建议边界如下。
+当前输入链路已完成第一阶段拆分：Oddmar 私有输入状态、gate 策略和 IL2CPP RVA hooks 已迁入
+`unityloader.d/oddmar_input.so`；loader 本体只保留通用输入事件广播和帧边界通知。剩余 Oddmar
+专属逻辑主要是视频路径翻译与 `com.mobge.assetlocator.*`，后续迁移应避免
+`projects/unityloader/main.cpp` 和通用后端继续积累包名、RVA、字段偏移和游戏状态枚举。
 
-**应迁入 Oddmar plugin 的内容：**
+**已迁入 `oddmar_input` plugin 的内容：**
 
 - `com.mobge.Oddmar` 包名判断、`oddmar_menu_gate` / `oddmar_sdl_buttons` 配置解析；
+- 部署 Oddmar 时必须同时设置 `[game_patches.oddmar_input] enabled = true`。
+  `oddmar_menu_gate` 和 `oddmar_sdl_buttons` 只控制已启用插件的功能；缺少该
+  开关时插件会正常加载但主动跳过安装，表现为 ABXY 再次触发退出确认。
 - 所有 Oddmar 私有 RVA 与 ABI：`MRInput` Jump/Attack/Attack2、`pauseToggle`、`tryQuit`、
   UI submit/cancel、`ReadRawButtonState`、`walkToTarget`；
 - `MRGameHud2::_state + 0x13c`、`UnityInputDevice.JoystickId + 0x1a8`、Xbox360 profile 的
   A/B/X/Y/trigger 索引映射；
 - Start/Guide 菜单脉冲消费、UI 跨界输入隔离，以及本次使用的 type/result/air-jump 诊断；
-- Oddmar/Mobge 全屏视频的 `temporary_video.mp4` 最近源映射及固定 libunity RVA hook。若视频
-  逻辑也同时迁移，plugin 需要获得 libunity 模块加载通知，AssetLocator 侧则应通过通用观察者
-  API 报告成功打开的资产，而不是直接调用 Oddmar 专用符号。
+
+**仍待迁移的 Oddmar plugin 内容：**
+
+- Oddmar/Mobge 全屏视频的 `temporary_video.mp4` 最近源映射及固定 `libunity` RVA hook。迁移前
+  plugin 可通过 ABI v6 的 `find_module("libunity.so")` 或
+  `register_module_loaded("libunity.so", cb, userdata)` 获取 `libunity`，AssetLocator 侧则应通过通用观察者
+  API 报告成功打开的资产，而不是直接调用 Oddmar 专用符号；
+- `com.mobge.assetlocator.*` 的 `AssetLocator` / `AssetReader`，完整迁移还需要 jnivm byte array、
+  string array、plugin-owned object 与构造/实例化回调能力。当前过渡方案是
+  `BD_ENABLE_MOBGE_ASSETLOCATOR` 默认关闭，Oddmar 构建显式开启。
 
 **应保留在 unityloader 本体的通用能力：**
 
@@ -1938,13 +1987,75 @@ type 4 down gesture。v4 因而先隔离 Attack2，而没有绕过 melee/combo �
   render-loop 收尾；
 - plugin ABI、detour、配置读取、日志、IL2CPP post-init/JNI/present callback 等通用宿主能力。
 
-现有 plugin ABI v3 已能取得 `il2cpp` 模块并安装 detour，所以大部分 Oddmar IL2CPP hook
-可以直接迁移；但完整拆分前还缺两类通用接口：一是只读的 controller frame snapshot/edge API
-或 input-frame callback，避免 plugin 反向依赖 `InputBackend` 内部对象；二是模块加载通知或
-`libunity` 模块句柄，供视频 hook 使用。推荐先扩展 ABI 并给 snapshot 写独立测试，再创建
-`projects/unityloader/plugins/oddmar_compat/`，最后用本次成功日志的 29 次 X、B-only type 4、
-菜单单次切换和 exit=0 作为迁移回归基线。当前已验证版本应先冻结，不在同一提交中立即进行
-plugin 重构。
+现有 plugin ABI v6 已提供 `register_input_observer()`、`register_present_callback()`、`so_base()`、
+`find_module()`、`register_module_loaded()` 和 `register_jni_class()`，足够支撑 A1 输入插件并已解锁
+`projects/unityloader/plugins/oddmar_video/` 对 `libunity+0x4c124c` 视频翻译的迁移；最后再扩展
+jnivm 对象/数组 ABI，迁移 `oddmar_assetlocator`。回归基线继续使用本次成功日志的 29 次 X、
+B-only type 4、菜单单次切换和 exit=0；本轮迁移后的容器验证已通过，真机部署/测试需用户
+明确授权后单独进行。
+
+### 0.14f 偶发进关 loading 卡住（2026-10-08，时序问题待闭环）
+
+掌机上选择关卡进入时，loading 画面存在低概率卡住现象；该问题历史上并非必现，
+因此不能按固定资源缺失或必现崩溃处理。本次保持游戏运行并抓取现场日志，得到以下证据：
+
+- loader 没有退出或崩溃：没有 `BD-SEGV`、`SIGSEGV`、`SIGABRT`、`fatal`；主线程仍持续
+  `eglSwapBuffers`，进程有 39 个线程，状态为正常等待/事件循环；
+- 8 个 AssetBundle 均成功打开，`AssetReader` 按 32 KiB 连续执行 `Read()` / `GetBytes()`，
+  未出现 `Unable to read header`、open failure 或 decode worker 卡死；
+- 片头视频已经完成 `826/825` 帧提交，视频 worker 正常停止，loading 停住不是片头视频
+  解码线程没有产出；
+- 现场 RSS 从约 283 MiB 增长到约 407 MiB，仍有约 470 MiB 系统可用内存，暂不能判定为 OOM；
+- Wwise 报告 `Selected Child Not Available`，随后出现一次 Unity `NullReferenceException`，
+  但堆栈只落在 `Firebase.Crashlytics.Crashlytics.LogException`，更像异常上报链自身的
+  缺失对象，不能据此认定为场景加载根因。
+
+当前结论：这是“进入关卡后的异步场景/资源/音频初始化时序竞态”的候选问题，具体卡点
+尚未定位。下一次诊断应增加一次性、有界的场景加载状态观测，至少记录资源加载完成、
+`AsyncOperation.progress/isDone/allowSceneActivation`、场景激活和 Wwise 初始化的先后顺序；
+不能先修改 `AssetReader` 或强行放开场景激活，否则会破坏目前已验证的资源读取链。现场进程
+由用户继续操作或明确要求后再停止，避免把主动 kill 误判为游戏 crash。
+
+### 0.14g 主界面 loading 偶发卡住与掌机热降频（2026-10-08，待容器/真机对照）
+
+第二次现场卡点发生在进入主界面，而不是进入关卡。`game-start.m4v` 的 extractor、H.264/AAC
+decoder 均成功启动，但视频只推进到 `frames=71/70`，之后没有继续出现新的 video swap，
+也没有 `extractor delete` / `decode worker stopped`；loader 仍在运行并持续渲染。8 个 bundle
+仍已成功读取，未见 `Unable to read header`。
+
+本轮还记录了 `Firebase_App_CSharp_FirebaseApp_DefaultName_get` 的
+`EntryPointNotFoundException` 和 `Cannot Prepare a disabled VideoPlayer`。前者发生在
+Crashlytics 上报链，后者与 VideoPlayer 生命周期切换相关，二者目前都是相关信号，尚未证明
+是卡住的唯一根因。
+
+掌机当时温度很高，可能触发 CPU/GPU 降频，使这个低概率时序问题更容易暴露；但当前没有
+温度、频率、throttling counter 的采样，不能把“发热导致卡 loading”写成结论。掌机已下线，
+后续先在 `GlES_Dev` 做 A2/A3 验证，充电后再进行带温度/频率观测的真机复现。
+
+### 0.14h A2/A3 容器验收（2026-10-08）
+
+掌机下线期间仅在 `GlES_Dev` 容器执行回放，未连接、部署或启动真机。
+
+- **A2 通过**：`oddmar_video.so` 成功加载，安装 `libunity+0x4c124c` hook；splash 和
+  `assets/RawAssets/StoryVideos/game-start.m4v` 均命中真实文件并成功创建 extractor/decoder。
+  插件路径解析兼容回放脚本把 TOML 复制到 `/tmp`、随后由 loader `chdir` 到 `gamedata` 的情况。
+- **A3 过渡方案通过**：`build-oddmar` 显式使用 `BD_ENABLE_MOBGE_ASSETLOCATOR=ON`，日志显示
+  `ListAssets('SoundBanks') -> 153 entries`，`GetReaderWrapper()` 对 `bundle1` 到 `bundle8`
+  均返回真实 reader；视频解码 worker 正常停止，未见 `BD-SEGV`。
+- **A3 完整插件化仍未完成**：`AssetLocator/AssetReader` 仍由核心
+  `javastubs/bd_assetlocator.cpp` 提供，默认构建保持 OFF。要搬入插件还需扩展 jnivm 对象、
+  byte array/string array、实例化和插件私有 reader 生命周期 ABI。
+
+本轮还制作了 `oddmar_assetlocator.so` 的跨 DSO 实验实现，并在容器中验证其失败模式：插件
+能够加载，但在 `BEGIN_NATIVE_DESCRIPTOR` 注册 jnivm class 时触发
+`std::system_error` / `pthread_mutex_lock` assertion。原因是当前 loader 使用静态 C++ runtime，
+而插件若复用 jnivm 的 C++ descriptor/VM 状态会形成不兼容的跨 DSO 状态边界。该实验插件已由
+`BD_ENABLE_ODDMAR_ASSETLOCATOR_PLUGIN=OFF` 默认屏蔽，不能部署到掌机；后续应先增加宿主侧 C ABI
+注册接口，再继续 A3。
+
+本轮构建缓存确认 `JNIVM_ENABLE_RETURN_NON_ZERO=OFF`。容器回放里的少量
+`Unable to read header from archive file` 出现在启动期探测阶段，随后 8 个 bundle 均成功取得
+reader，当前不能把这些探测噪声当作 A3 读取失败。
 
 ## 1. 环境与复现
 

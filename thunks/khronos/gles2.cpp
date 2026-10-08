@@ -2381,42 +2381,10 @@ extern "C" void bd_dump_video_rt(int swap_index)
     glad_glBindFramebuffer(0x8D40, (GLuint)previous_fbo);
 }
 
-// Experiment switch (BD_FORCE_VIDEO_TEXTURE=1): bind the loader's backing
-// texture on every unit before every draw while the video is live. Crude on
-// purpose - it answers "if the video quad sampled our texture, would it show
-// the video?" without needing to know which program/unit Unity uses.
-static void bd_force_video_texture()
-{
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char* value = getenv("BD_FORCE_VIDEO_TEXTURE");
-        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
-    }
-    if (!enabled || !bd_video::has_sink())
-        return;
-    const GLuint backing = bd_video::backing_texture();
-    if (backing == 0)
-        return;
-    for (GLint unit = 0; unit < BD_MAX_UNITS; ++unit) {
-        if (glad_glActiveTexture)
-            glad_glActiveTexture((GLenum)(0x84C0 + unit));
-        if (glad_glBindTexture)
-            glad_glBindTexture(BD_GL_TEXTURE_2D, backing);
-        g_unit_2d[unit] = backing;
-    }
-    if (glad_glTexParameteri) {
-        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MIN_FILTER,
-                             BD_GL_LINEAR);
-        glad_glTexParameteri(BD_GL_TEXTURE_2D, BD_GL_TEXTURE_MAG_FILTER,
-                             BD_GL_LINEAR);
-    }
-}
-
 template <typename DrawFn>
 static void video_draw_guard(DrawFn&& draw)
 {
     bd_trace_video_draw();
-    bd_force_video_texture();
     if (g_video_program_active) {
         bd_dump_unit_textures();
         bd_remember_video_rt();
@@ -2912,30 +2880,22 @@ extern "C" void bd_glGetIntegerv(GLenum pname, GLint* params)
 
 // Opt-in (BD_GL_ERROR_TRACE=1): report every error Unity reads, with the read
 // order, to locate the call that left it behind.
-//
-// BD_SWALLOW_GL_ERROR=1 answers the next question: when Unity reads an error
-// right after it builds the video material, does it throw the material away and
-// draw its magenta error shader? With the switch on, glGetError always reports
-// "no error" to the guest - a diagnostic, not a fix.
 extern "C" GLenum bd_glGetError(void)
 {
     const GLenum error = glad_glGetError ? glad_glGetError() : 0;
     static int enabled = -1;
-    static int swallow = -1;
     if (enabled < 0) {
         const char* value = getenv("BD_GL_ERROR_TRACE");
         enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
-        const char* hide = getenv("BD_SWALLOW_GL_ERROR");
-        swallow = (hide && *hide && strcmp(hide, "0") != 0) ? 1 : 0;
     }
-    if (error != 0 && (enabled || swallow)) {
+    if (error != 0 && enabled) {
         static uint64_t reported = 0;
         if (++reported <= 60 || (reported % 300) == 0)
-            BD_LOG("VIDEO", "Unity read GL error 0x%x%s (#%llu)",
-                   (unsigned)error, swallow ? " (swallowed)" : "",
+            BD_LOG("VIDEO", "Unity read GL error 0x%x (#%llu)",
+                   (unsigned)error,
                    (unsigned long long)reported);
     }
-    return swallow ? 0 : error;
+    return error;
 }
 
 void load_gles2_funcs()

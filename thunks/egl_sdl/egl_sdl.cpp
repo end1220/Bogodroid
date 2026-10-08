@@ -656,7 +656,7 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     // Optional CPU framebuffer present + plugin present callbacks. Games can
     // raise BD_EGL_CPU_PRESENT around bootstrap transitions that wedge mali
     // fbdev (sunxi_fb_pan_display). Plugins register via
-    // register_present_callback (ABI v3) to poll AsyncOperations on this thread.
+    // register_present_callback (ABI v4) to poll AsyncOperations on this thread.
     static bool transition_pause_active = false;
     static Uint32 transition_pause_started = 0;
     static Uint32 transition_pause_ms = 0;
