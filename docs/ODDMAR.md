@@ -2032,30 +2032,40 @@ Crashlytics 上报链，后者与 VideoPlayer 生命周期切换相关，二者�
 温度、频率、throttling counter 的采样，不能把“发热导致卡 loading”写成结论。掌机已下线，
 后续先在 `GlES_Dev` 做 A2/A3 验证，充电后再进行带温度/频率观测的真机复现。
 
-### 0.14h A2/A3 容器验收（2026-10-08）
+### 0.14h A2/A3 容器验收（2026-10-08，已完成）
 
 掌机下线期间仅在 `GlES_Dev` 容器执行回放，未连接、部署或启动真机。
 
 - **A2 通过**：`oddmar_video.so` 成功加载，安装 `libunity+0x4c124c` hook；splash 和
   `assets/RawAssets/StoryVideos/game-start.m4v` 均命中真实文件并成功创建 extractor/decoder。
   插件路径解析兼容回放脚本把 TOML 复制到 `/tmp`、随后由 loader `chdir` 到 `gamedata` 的情况。
-- **A3 过渡方案通过**：`build-oddmar` 显式使用 `BD_ENABLE_MOBGE_ASSETLOCATOR=ON`，日志显示
+- **A3 通过**：`build-oddmar` 使用插件化 `oddmar_assetlocator.so`，日志显示
   `ListAssets('SoundBanks') -> 153 entries`，`GetReaderWrapper()` 对 `bundle1` 到 `bundle8`
   均返回真实 reader；视频解码 worker 正常停止，未见 `BD-SEGV`。
-- **A3 完整插件化仍未完成**：`AssetLocator/AssetReader` 仍由核心
-  `javastubs/bd_assetlocator.cpp` 提供，默认构建保持 OFF。要搬入插件还需扩展 jnivm 对象、
-  byte array/string array、实例化和插件私有 reader 生命周期 ABI。
 
-本轮还制作了 `oddmar_assetlocator.so` 的跨 DSO 实验实现，并在容器中验证其失败模式：插件
-能够加载，但在 `BEGIN_NATIVE_DESCRIPTOR` 注册 jnivm class 时触发
-`std::system_error` / `pthread_mutex_lock` assertion。原因是当前 loader 使用静态 C++ runtime，
-而插件若复用 jnivm 的 C++ descriptor/VM 状态会形成不兼容的跨 DSO 状态边界。该实验插件已由
-`BD_ENABLE_ODDMAR_ASSETLOCATOR_PLUGIN=OFF` 默认屏蔽，不能部署到掌机；后续应先增加宿主侧 C ABI
-注册接口，再继续 A3。
+A3 已完成为 ABI v7 插件实现：宿主通过 C ABI 提供对象 userdata、对象创建、byte array
+和 `String[]` 能力，插件不跨 DSO 复用 jnivm 的 C++ descriptor/VM 状态；插件私有的
+`AssetReader` 生命周期也由插件管理。此前跨 DSO C++ descriptor 的失败实验仅作为历史记录，
+不属于当前实现。
 
 本轮构建缓存确认 `JNIVM_ENABLE_RETURN_NON_ZERO=OFF`。容器回放里的少量
 `Unable to read header from archive file` 出现在启动期探测阶段，随后 8 个 bundle 均成功取得
 reader，当前不能把这些探测噪声当作 A3 读取失败。
+
+### 0.14i A3 真机回归与 loading 低概率复现（2026-10-09）
+
+在 TrimUI Smart Pro `172.16.4.188` 上连续启动 Oddmar 两次，A3 相关链路两次均正常：
+`oddmar_assetlocator.so` 成功加载，`bundle1` 至 `bundle8` 均可读取，片头视频正常播放，
+未出现 `BD-SEGV`、bundle header 错误或视频解码失败。
+
+第一次进入关卡时仍卡在 loading；结束本次测试后重新启动，第二次进入同一流程成功。这个结果
+确认问题仍是低概率、时序相关的 loading 卡顿，且与 A3 资源读取重构无直接对应关系；A3 已完成，
+不能把本次卡顿归因于 A3 回归。此前主界面 loading 卡住的记录也保持有效，后续应继续观测
+异步场景加载、资源/音频初始化与场景激活的先后关系。
+
+本次没有采集温度、CPU/GPU 频率或 throttling counter，因此不能确认发热/降频是触发因素。
+后续真机诊断应在不主动 kill 游戏的前提下保留现场，并增加有界的 `AsyncOperation`、场景激活、
+Wwise 初始化和线程状态采样，区分游戏自然卡住与测试中止造成的表象。
 
 ## 1. 环境与复现
 
