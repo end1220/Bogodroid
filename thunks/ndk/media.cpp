@@ -12,6 +12,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include "ffmpeg_optional.h"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -854,6 +856,8 @@ static media_status_t extractor_open_io(
 
 ABI_ATTR AMediaExtractor* AMediaExtractor_new() {
     BD_LOG("MEDIA", "extractor new");
+    if (!bd_ffmpeg::ensure_loaded())
+        return nullptr;
     return new AMediaExtractor;
 }
 ABI_ATTR media_status_t AMediaExtractor_delete(AMediaExtractor* extractor) {
@@ -864,7 +868,8 @@ ABI_ATTR media_status_t AMediaExtractor_delete(AMediaExtractor* extractor) {
 ABI_ATTR media_status_t AMediaExtractor_setDataSource(
     AMediaExtractor* extractor, const char* path) {
     BD_LOG("MEDIA", "extractor path source=%s", path ? path : "(null)");
-    if (!extractor || !path) return AMEDIA_ERROR_UNKNOWN;
+    if (!extractor || !path || !bd_ffmpeg::ensure_loaded())
+        return AMEDIA_ERROR_UNKNOWN;
     const std::string local = bd_local_media_path(path);
     AVFormatContext* format = nullptr;
     if (avformat_open_input(&format, local.c_str(), nullptr, nullptr) < 0 ||
@@ -880,6 +885,8 @@ ABI_ATTR media_status_t AMediaExtractor_setDataSourceFd(
     AMediaExtractor* extractor, int fd, int64_t offset, int64_t length) {
     BD_LOG("MEDIA", "extractor fd source=%d offset=%lld length=%lld", fd,
            static_cast<long long>(offset), static_cast<long long>(length));
+    if (!extractor || !bd_ffmpeg::ensure_loaded())
+        return AMEDIA_ERROR_UNKNOWN;
     auto io = std::make_unique<IoState>();
     io->fd = dup(fd);
     io->base = offset;
@@ -893,7 +900,8 @@ ABI_ATTR media_status_t AMediaExtractor_setDataSourceCustom(
            static_cast<void*>(source), source ? source->userdata : nullptr,
            source ? reinterpret_cast<void*>(source->read_at) : nullptr,
            source ? reinterpret_cast<void*>(source->get_size) : nullptr);
-    if (!source || !source->read_at) return AMEDIA_ERROR_UNKNOWN;
+    if (!extractor || !source || !source->read_at || !bd_ffmpeg::ensure_loaded())
+        return AMEDIA_ERROR_UNKNOWN;
     auto io = std::make_unique<IoState>();
     io->userdata = source->userdata;
     io->read_at = source->read_at;
@@ -1125,6 +1133,8 @@ ABI_ATTR const char* AMediaFormat_toString(AMediaFormat* format) {
 }
 
 ABI_ATTR AMediaCodec* AMediaCodec_createDecoderByType(const char* mime) {
+    if (!bd_ffmpeg::ensure_loaded())
+        return nullptr;
     AVCodecID id = codec_for_mime(mime);
     const AVCodec* decoder = avcodec_find_decoder(id);
     BD_LOG("MEDIA", "create decoder mime=%s codec=%d found=%s",
@@ -1730,7 +1740,7 @@ void bench_report(const char* label, const char* path, int frames, int threads,
 // this table can ever play smoothly.
 extern "C" void bd_media_bench(const char* path, int frames)
 {
-    if (!path)
+    if (!path || !bd_ffmpeg::ensure_loaded())
         return;
     if (frames <= 0)
         frames = 200;

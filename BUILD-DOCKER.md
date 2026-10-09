@@ -123,6 +123,11 @@ docker run --rm --platform linux/arm64 \
 | `IL2CPP_TRACE=ON` | OFF | 在 LOG 之上额外打开 il2cpp 内部 trace（仅 unityloader）。需 `BD_ENABLE_LOG=ON` |
 | `BD_ENABLE_OPENSLES_SHIM=ON` | OFF | 把 `thunks/opensles/` 编进 + 暴露给 FMOD。当前 AudioTrack/fakefmod 路径已经能用，此 flag 保留为后续 A/B |
 
+FFmpeg 是可选运行时依赖：`thunks/ndk/media.cpp` 使用 `dlopen`/`dlsym` 在首次创建
+Android media 对象时加载 FFmpeg 4.2，不再把 `libav*.so.*` 写入 `unityloader` 的
+`DT_NEEDED`。没有视频的 Unity 游戏因此不需要 FFmpeg；需要视频的游戏仍需在启动脚本
+中提供匹配 ABI 的库路径（Oddmar 使用 `System/lib` + `ff58/`）。
+
 **上机约定（2026-09-11）**：发布包用 Release + **保持 `BD_ENABLE_LOG=OFF`**（及 TRACE/VERBOSE OFF）再 `strip`；排障再临时开 LOG。详见根目录 `AGENTS.md` 与 `docs/PORTING_PLAYBOOK.md` §1.1。
 
 ---

@@ -146,6 +146,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     thunks/libc/semaphores.cpp
 
     thunks/ndk/ndk.cpp
+    thunks/ndk/ffmpeg_optional.cpp
     thunks/ndk/alooper.c
     thunks/ndk/asset_manager.c
     thunks/ndk/media.cpp
@@ -201,7 +202,6 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     baron
     jnivm
     ${SDL2_LIBRARIES}
-    ${FFMPEG_LIBRARIES}
     dl
     pthread
     -Wl,-Bstatic

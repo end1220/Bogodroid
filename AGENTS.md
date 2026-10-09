@@ -115,13 +115,15 @@ curl.exe -L --max-time 7200 -o <local-out> $uri
 
 ### 必须自己设 `LD_LIBRARY_PATH`
 
-`runtrimui.sh` 里是 **`export LD_LIBRARY_PATH=${SDCARD_TRIMUI_DIR}/lib`（覆盖式赋值，不追加）**，而 `/etc/ld.so.conf` 不存在、`/etc/ld.so.conf.d/` 是空的、loader 也没有 `RUNPATH`。`/usr/lib` 装的是 FFmpeg 6（`libav*.so.60`），loader 链的却是 FFmpeg 4.2（`libav*.so.58`）。所以启动脚本里必须显式写：
+`runtrimui.sh` 里是 **`export LD_LIBRARY_PATH=${SDCARD_TRIMUI_DIR}/lib`（覆盖式赋值，不追加）**，而 `/etc/ld.so.conf` 不存在、`/etc/ld.so.conf.d/` 是空的。当前 `unityloader` 不再把 FFmpeg 写入 ELF 的 `DT_NEEDED`；FFmpeg 由 Android media bridge 在首次使用视频时按需 `dlopen`。因此没有视频的 Unity 游戏不需要携带或配置 FFmpeg。
+
+Oddmar 的视频仍使用 FFmpeg 4.2（`libav*.so.58`），其启动脚本必须显式把 `System/lib` 和 `Oddmar/ff58` 放入路径：
 
 ```sh
 export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:$GAMEDIR/ff58${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
-漏掉这行，进程连动态链接都过不去（`error while loading shared libraries: libavformat.so.58`），不是"少了点功能"而已。
+漏掉这行，Oddmar 播放视频时会因按需加载不到 FFmpeg 而无法解码；不使用视频的游戏不受影响。
 
 ### 验证画面
 

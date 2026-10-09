@@ -25,6 +25,18 @@
 
 当前状态：**A1、A2、A3 均已完成并通过容器回放**。A3 的早期实验曾直接跨 DSO 共享 jnivm C++ descriptor/VM 状态，已确认会触发 `std::system_error`/`pthread_mutex_lock` 崩溃；现行实现改为宿主 C ABI，已避开该边界。
 
+### FFmpeg 可选运行时加载真机回归（2026-10-09）
+
+本轮把 FFmpeg 从 `unityloader` 的链接期依赖改为 Android media bridge 首次使用时 `dlopen`/`dlsym` 加载，并手工完成三款 TrimUI Smart Pro 真机回归：
+
+| 游戏 | 部署内容 | 结果 |
+|---|---|---|
+| Oddmar | `unityloader` + `oddmar_input.so` + `oddmar_video.so` + `oddmar_assetlocator.so`，启动脚本保留 FFmpeg 4.2 `LD_LIBRARY_PATH` | 通过：片头/菜单视频路径正常，三个 Oddmar 插件均加载，未见 FFmpeg 链接期缺库崩溃 |
+| Maximus2 | 仅 `unityloader`，不随包携带 FFmpeg | 通过：无视频端口可启动运行，证明未使用 Android media 时不需要 `libav*.so` |
+| Samurai2 | `unityloader` + `samurai2_offline.so`，不随包携带 FFmpeg | 通过：插件加载和离线补丁正常，未因缺少 FFmpeg 运行库影响启动 |
+
+结论：FFmpeg 现在是**视频路径的可选运行时依赖**。Oddmar 这类使用视频的游戏仍需在启动脚本里提供匹配的 `libav*.so.58` 搜索路径；Maximus2、Samurai2 这类不走视频链路的端口不再需要复制 FFmpeg 库。
+
 ### A3 容器验收记录（2026-10-08）
 
 - 构建目录：`GlES_Dev:/workspace/Bogodroid/build-a3-plugin-log`。
