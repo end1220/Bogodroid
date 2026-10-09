@@ -35,13 +35,14 @@ BrickGamePro is presented through the generic EGL/SDL present-crop path. The
 enabled=true
 renderScale=2.0
 anchor="top"
-offsetY=-96
+offsetY=-48
 ```
 
 The game framebuffer is kept at its original aspect ratio and uniformly scaled.
 The viewport shows the upper part of the game and pushes the lower virtual-button
-area outside the visible panel; `offsetY=-96` moves the result upward by about
-one fifth of a 480 px reference screen.
+area outside the visible panel; `offsetY=-48` moves the result upward by about
+one tenth of a 480 px reference screen. Increase it toward `-32` for a gentler
+one-fifteenth shift, or use `-64` as an intermediate setting.
 
 ## Controller Model
 

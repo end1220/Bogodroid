@@ -145,7 +145,7 @@ static int init(const BogoPluginApi* api)
         const char* anchor = g_api->config_get_string(
             "game_patches.brickgamepro.viewport.anchor", "top");
         const int64_t offset_y =
-            g_api->config_get_i64("game_patches.brickgamepro.viewport.offsetY", -96);
+            g_api->config_get_i64("game_patches.brickgamepro.viewport.offsetY", -48);
         g_api->set_present_viewport(viewport_enabled, render_scale, anchor,
                                     static_cast<int>(offset_y));
     }
