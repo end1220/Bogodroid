@@ -1405,6 +1405,9 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
         });
     }
 
+    const bool wasActive =
+        g_injected_active_touches.find(pointerId) != g_injected_active_touches.end();
+
     if (down) {
         g_injected_active_touches[pointerId] = {touchX, touchY};
     } else {
@@ -1429,7 +1432,9 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
     int action = down
         ? jnivm::android::view::MotionEvent::ACTION_DOWN
         : jnivm::android::view::MotionEvent::ACTION_UP;
-    if ((down ? before.size() : after.size()) > 0) {
+    if (down && wasActive) {
+        action = jnivm::android::view::MotionEvent::ACTION_MOVE;
+    } else if ((down ? before.size() : after.size()) > 0) {
         int pointerIndex = 0;
         for (size_t i = 0; i < eventPointers.size(); ++i) {
             if (eventPointers[i].id == pointerId) {
@@ -1448,12 +1453,18 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
     motionEvent->buttonState = down
         ? jnivm::android::view::MotionEvent::BUTTON_PRIMARY
         : (after.empty() ? 0 : jnivm::android::view::MotionEvent::BUTTON_PRIMARY);
-    BD_LOG("TOUCH", "%s %s pointer=%d action=%d pointers=%zu x=%.1f y=%.1f design=%.0fx%.0f display=%dx%d",
-           source ? source : "plugin", down ? "DOWN" : "UP",
-           pointerId, action, eventPointers.size(),
-           (double)touchX, (double)touchY,
-           (double)designWidth, (double)designHeight,
-           displayWidth, displayHeight);
+    const char* verb = down ? (wasActive ? "MOVE" : "DOWN") : "UP";
+    static uint64_t move_log_count = 0;
+    const bool log_event = !(down && wasActive) ||
+        (++move_log_count <= 8 || (move_log_count % 120) == 0);
+    if (log_event) {
+        BD_LOG("TOUCH", "%s %s pointer=%d action=%d pointers=%zu x=%.1f y=%.1f design=%.0fx%.0f display=%dx%d",
+               source ? source : "plugin", verb,
+               pointerId, action, eventPointers.size(),
+               (double)touchX, (double)touchY,
+               (double)designWidth, (double)designHeight,
+               displayWidth, displayHeight);
+    }
     onMotion(motionEvent);
     return true;
 }

@@ -11,6 +11,7 @@
 #include "so_util.h"
 #include "thunk_gen.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <errno.h>
 #include <inttypes.h>
@@ -84,28 +85,55 @@ struct BD_PresentViewport {
     float renderScale = 1.0f;
     std::string anchor = "center";
     int offsetY = 0;
+    GLenum filter = GL_LINEAR;
+    std::string filterName = "linear";
 };
 
 static BD_PresentViewport g_present_viewport;
 
+extern "C" int bd_present_viewport_set_filter(int enabled, double renderScale,
+                                              const char* anchor, int offsetY,
+                                              const char* filter);
+
 extern "C" int bd_present_viewport_set(int enabled, double renderScale,
                                         const char* anchor, int offsetY)
+{
+    return bd_present_viewport_set_filter(enabled, renderScale, anchor, offsetY,
+                                          "linear");
+}
+
+extern "C" int bd_present_viewport_set_filter(int enabled, double renderScale,
+                                              const char* anchor, int offsetY,
+                                              const char* filter)
 {
     g_present_viewport.enabled = enabled != 0;
     g_present_viewport.renderScale = static_cast<float>(renderScale);
     g_present_viewport.anchor = anchor && *anchor ? anchor : "center";
     g_present_viewport.offsetY = offsetY;
+    g_present_viewport.filterName = filter && *filter ? filter : "linear";
+    std::string normalizedFilter = g_present_viewport.filterName;
+    std::transform(normalizedFilter.begin(), normalizedFilter.end(),
+                   normalizedFilter.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalizedFilter == "nearest" || normalizedFilter == "point") {
+        g_present_viewport.filter = GL_NEAREST;
+        g_present_viewport.filterName = "nearest";
+    } else {
+        g_present_viewport.filter = GL_LINEAR;
+        g_present_viewport.filterName = "linear";
+    }
     if (!std::isfinite(g_present_viewport.renderScale) ||
         g_present_viewport.renderScale <= 0.0f) {
         BD_LOG("VIEWPORT", "ignore invalid renderScale %.3f; using 1.0",
                (double)g_present_viewport.renderScale);
         g_present_viewport.renderScale = 1.0f;
     }
-    BD_LOG("VIEWPORT", "present crop %s scale=%.3f anchor=%s offsetY=%d",
+    BD_LOG("VIEWPORT", "present crop %s scale=%.3f anchor=%s offsetY=%d filter=%s",
            g_present_viewport.enabled ? "enabled" : "disabled",
            (double)g_present_viewport.renderScale,
            g_present_viewport.anchor.c_str(),
-           g_present_viewport.offsetY);
+           g_present_viewport.offsetY,
+           g_present_viewport.filterName.c_str());
     return 1;
 }
 
@@ -131,7 +159,8 @@ static bool bd_apply_present_viewport_transform()
 {
     const BD_PresentViewport& cfg = g_present_viewport;
     if (!cfg.enabled || cfg.renderScale <= 1.0f || !sdl_win ||
-        !glad_glReadPixels || !glad_glTexImage2D || !glad_glDrawArrays)
+        !glad_glCopyTexSubImage2D || !glad_glTexImage2D ||
+        !glad_glDrawArrays)
         return false;
 
     int width = 0;
@@ -143,6 +172,8 @@ static bool bd_apply_present_viewport_transform()
     static GLuint program = 0;
     static GLuint texture = 0;
     static GLuint vertex_array = 0;
+    static int texture_width = 0;
+    static int texture_height = 0;
     static GLint sampler_loc = -1;
     static GLint src_x0_loc = -1;
     static GLint src_x1_loc = -1;
@@ -240,21 +271,21 @@ static bool bd_apply_present_viewport_transform()
     for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i)
         enabled[i] = glad_glIsEnabled ? glad_glIsEnabled(toggles[i]) : false;
 
-    static std::vector<uint8_t> pixels;
-    pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-    glad_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glad_glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
-                      pixels.data());
-
-    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glad_glActiveTexture(GL_TEXTURE0);
     glad_glBindTexture(GL_TEXTURE_2D, texture);
-    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, cfg.filter);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, cfg.filter);
     glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glad_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                      GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    if (texture_width != width || texture_height != height) {
+        glad_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                          GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        texture_width = width;
+        texture_height = height;
+    }
+    glad_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glad_glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
     for (GLenum toggle : toggles)
         glad_glDisable(toggle);

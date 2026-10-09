@@ -21,7 +21,7 @@
 
 1. **Oddmar 专属代码已从 A1 核心移出**：输入闸门与 Oddmar IL2CPP RVA hooks 已进入 `oddmar_input` 插件；视频路径翻译已进入 `oddmar_video` 插件；`com.mobge.assetlocator.*` 已进入 `oddmar_assetlocator` 插件。
 2. **通用视频链路仍可留核心**：`javastubs/bd_video.cpp` 与 GLES 外部纹理路径没有标题硬编码；问题是 Oddmar 私有资源协议把本地路径喂给它。
-3. **插件 ABI 已扩展到 v8**：在 v6 的模块、输入、present 和 JNI class 注册之上，v7 增加宿主拥有的对象 userdata、对象创建、byte array 与 string array C ABI；v8 增加通用触摸注入与 present viewport 设置。A3 已用 v7 能力完整插件化，BrickGamePro 使用 v8 能力隔离标题专属输入/视口逻辑。
+3. **插件 ABI 保持 v8**：在 v6 的模块、输入、present 和 JNI class 注册之上，v7 增加宿主拥有的对象 userdata、对象创建、byte array 与 string array C ABI；v8 增加通用触摸注入与 present viewport 设置，并以兼容方式补充可选的 present viewport 采样过滤入口。A3 已用 v7 能力完整插件化，BrickGamePro 使用 v8 能力隔离标题专属输入/视口逻辑。
 
 当前状态：**A1、A2、A3 均已完成并通过容器回放**。A3 的早期实验曾直接跨 DSO 共享 jnivm C++ descriptor/VM 状态，已确认会触发 `std::system_error`/`pthread_mutex_lock` 崩溃；现行实现改为宿主 C ABI，已避开该边界。
 

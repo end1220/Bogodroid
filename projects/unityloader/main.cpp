@@ -34,6 +34,9 @@ toml::table config;
 extern "C" void bd_media_bench(const char* path, int frames);
 extern "C" int bd_present_viewport_set(int enabled, double renderScale,
                                         const char* anchor, int offsetY);
+extern "C" int bd_present_viewport_set_filter(int enabled, double renderScale,
+                                               const char* anchor, int offsetY,
+                                               const char* filter);
 
 // Unity 2018's AndroidVideoMedia rejects the unpacked, hostless
 // jar:file://!/assets/... form before it reaches the NDK extractor. The
@@ -887,6 +890,13 @@ namespace plugin_host {
         return bd_present_viewport_set(enabled, render_scale, anchor, offset_y);
     }
 
+    static int api_set_present_viewport_filter(int enabled, double render_scale,
+                                               const char* anchor, int offset_y,
+                                               const char* filter) {
+        return bd_present_viewport_set_filter(enabled, render_scale, anchor,
+                                              offset_y, filter);
+    }
+
     static int api_register_asset_source_callback(BogoAssetSourceCallback cb,
                                                    void* userdata) {
         if (!cb) return 0;
@@ -1125,6 +1135,7 @@ namespace plugin_host {
         api.register_input_observer = &api_register_input_observer;
         api.inject_touch = &api_inject_touch;
         api.set_present_viewport = &api_set_present_viewport;
+        api.set_present_viewport_filter = &api_set_present_viewport_filter;
         api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;

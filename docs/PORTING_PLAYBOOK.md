@@ -122,7 +122,7 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern 'JNIVM_ENABLE|BD_ENABL
 
 ## 4. 插件约定
 
-1. `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **6**）。
+1. `abi_version == BOGODROID_PLUGIN_ABI_VERSION`（当前 **8**）。
 2. 每帧工作用 `register_present_callback`，不要让核心 `dlsym` 游戏名符号。
 3. 非 IL2CPP 模块 hook 先用 `find_module()` 查询；若模块稍后才加载，用 `register_module_loaded()`。
 4. PAD 路径补丁 / IL2CPP hook 留在插件。

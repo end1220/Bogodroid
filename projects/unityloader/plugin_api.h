@@ -101,6 +101,9 @@ typedef struct BogoPluginApi {
                                 void* string_ref);
 
     void (*log)(const char* tag, const char* fmt, ...);
+    int (*set_present_viewport_filter)(int enabled, double render_scale,
+                                       const char* anchor, int offset_y,
+                                       const char* filter);
 } BogoPluginApi;
 
 typedef int (*BogoPluginInit)(const BogoPluginApi* api);

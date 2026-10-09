@@ -47,8 +47,9 @@ MyGame/
 
 Bundled plugins:
 
-- `brickgamepro`: BrickGamePro viewport crop and physical-controller to
-  on-screen-touch mapping.
+- `brickgamepro`: BrickGamePro GPU present viewport, Guide skin switching, and
+  physical-controller to on-screen-touch mapping. Its title constants live in
+  the plugin, not TOML.
 - `hollow_knight_viewport`: title-specific viewport and camera fixes.
 - `oddmar_input`: Oddmar-specific input gate and IL2CPP input hooks.
 - `oddmar_video`: Oddmar `libunity.so+0x4c124c` asset-path translation. It is
@@ -112,6 +113,19 @@ edges, axis values, and render-frame boundaries before the Android compatibility
 path filters or remaps the event. Callbacks must stay bounded and must not throw
 across the C ABI boundary. Plugins that install RVA hooks should use
 `api->so_base(api->il2cpp)` for the opaque module's load base.
+
+## Present viewport (ABI v8)
+
+Plugins can request a generic present-crop pass through
+`api->set_present_viewport(enabled, renderScale, anchor, offsetY)`.
+The host copies the rendered GL frame into a texture with
+`glCopyTexSubImage2D`, applies the crop shader, and swaps the SDL window
+without CPU pixel readback.
+
+Newer v8 headers also expose the backward-compatible optional helper
+`api->set_present_viewport_filter(enabled, renderScale, anchor, offsetY, filter)`.
+`filter` accepts `linear` or `nearest`; use `nearest` for pixel-art or
+grid-heavy ports where linear sampling can erase one-pixel lines during scaling.
 
 ## Plugin logging
 
