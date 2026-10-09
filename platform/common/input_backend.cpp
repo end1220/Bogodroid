@@ -25,28 +25,14 @@ extern "C" void bd_flush_prefs_impl();
 static bool input_enable_controller = false;
 static bool input_mouse_touch_mode = false;
 static bool input_mouse_accurate_mode = false;
-static bool input_controller_touch = false;
 static bool input_controller_key_events = true;
-static float input_controller_touch_scale_x = 1.0f;
-static float input_controller_touch_scale_y = 1.0f;
-static int input_controller_touch_scaled_width = 0;
-static int input_controller_touch_scaled_height = 0;
 static int buttonState;
-
-// BrickGamePro's virtual controls were measured from its 640x480 layout.
-// Scale those design-space points to the actual SDL/Android display.
-static constexpr float kControllerTouchDesignWidth = 640.0f;
-static constexpr float kControllerTouchDesignHeight = 480.0f;
 
 // wsm.toml [input.remap] — SDL controller button → Android KEYCODE.
 static std::map<int, int> g_button_remap;
 
-// wsm.toml [input.controller_touch] — controller button -> Android touch point.
-// BrickGamePro exposes its controls as a row of virtual buttons, so the
-// handheld's physical controls can press those buttons without changing the
-// game's own UI layout.
-static std::map<int, std::pair<float, float>> g_controller_touch_points;
-static std::map<int, std::pair<float, float>> g_controller_active_touches;
+// Plugin-injected touchscreen pointers, keyed by plugin-defined pointer id.
+static std::map<int, std::pair<float, float>> g_injected_active_touches;
 
 // Some handhelds route D-pad / Select / Start through the keyboard scancode
 // path instead of the joystick path; mirror the same remap there.
@@ -112,43 +98,6 @@ static void bd_axis_synth_pair(BD_AxisDir negativeDir, BD_AxisDir positiveDir, f
                                std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)>& onKey);
 static int bd_remap_dpad_button(int button);
 static bool bd_keycode_uses_keyboard_device(int keyCode);
-
-static void update_controller_touch_scale()
-{
-    const int displayWidth = bd_device_display_width();
-    const int displayHeight = bd_device_display_height();
-    if (displayWidth <= 0 || displayHeight <= 0)
-        return;
-    if (displayWidth == input_controller_touch_scaled_width &&
-        displayHeight == input_controller_touch_scaled_height)
-        return;
-
-    input_controller_touch_scale_x =
-        static_cast<float>(displayWidth) / kControllerTouchDesignWidth;
-    input_controller_touch_scale_y =
-        static_cast<float>(displayHeight) / kControllerTouchDesignHeight;
-    input_controller_touch_scaled_width = displayWidth;
-    input_controller_touch_scaled_height = displayHeight;
-    BD_LOG("INPUT-TOUCH",
-           "controller touch scale design=%.0fx%.0f display=%dx%d scale=%.3fx%.3f",
-           (double)kControllerTouchDesignWidth,
-           (double)kControllerTouchDesignHeight,
-           displayWidth, displayHeight,
-           (double)input_controller_touch_scale_x,
-           (double)input_controller_touch_scale_y);
-}
-
-static int parse_controller_button_name(std::string s)
-{
-    if (s.empty()) return SDL_CONTROLLER_BUTTON_INVALID;
-    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
-    if (s == "select" || s == "back") s = "back";
-    if (s == "up") s = "dpup";
-    if (s == "down") s = "dpdown";
-    if (s == "left") s = "dpleft";
-    if (s == "right") s = "dpright";
-    return SDL_GameControllerGetButtonFromString(s.c_str());
-}
 
 // "E" / "TAB" / "DPAD_UP" / "KEYCODE_M" -> KeyEvent::KEYCODE_*; -1 if unknown.
 static int parse_keycode_name(std::string s)
@@ -418,44 +367,9 @@ InputBackend::InputBackend()
     input_enable_controller = config["input"]["controller"].value_or<bool>(false);
     input_mouse_touch_mode = config["input"]["touch_mode"].value_or<bool>(false);
     input_mouse_accurate_mode = config["input"]["accurate_mode"].value_or<bool>(false);
-    auto controllerTouch = config["input"]["controller_touch"];
-    if (auto* touchTable = controllerTouch.as_table()) {
-        input_controller_touch = true;
-        for (auto&& [name, value] : *touchTable) {
-            auto* point = value.as_array();
-            if (!point || point->size() < 2) {
-                BD_LOG("INPUT-TOUCH", "ignore controller_touch.%s (expected [x, y])",
-                       std::string(name).c_str());
-                continue;
-            }
-            auto x = (*point)[0].value<double>();
-            auto y = (*point)[1].value<double>();
-            int button = parse_controller_button_name(std::string(name));
-            if (!x || !y || button == SDL_CONTROLLER_BUTTON_INVALID ||
-                !std::isfinite(*x) || !std::isfinite(*y)) {
-                BD_LOG("INPUT-TOUCH", "ignore controller_touch.%s (expected button and finite [x, y])",
-                       std::string(name).c_str());
-                continue;
-            }
-            g_controller_touch_points[button] = {
-                static_cast<float>(*x), static_cast<float>(*y)
-            };
-            BD_LOG("INPUT-TOUCH", "%s -> (%.1f, %.1f)",
-                   std::string(name).c_str(), *x, *y);
-        }
-    } else {
-        input_controller_touch = controllerTouch.value_or<bool>(false);
-    }
     input_controller_key_events =
-        config["input"]["controller_key_events"].value_or<bool>(
-            !input_controller_touch);
-    if (input_controller_touch && g_controller_touch_points.empty()) {
-        BD_LOG("INPUT-TOUCH", "controller touch enabled but no button coordinates configured");
-    }
-    if (input_controller_touch)
-        update_controller_touch_scale();
-    BD_LOG("INPUT-TOUCH", "controller_touch=%d controller_key_events=%d",
-           input_controller_touch ? 1 : 0,
+        config["input"]["controller_key_events"].value_or<bool>(true);
+    BD_LOG("INPUT-TOUCH", "controller_key_events=%d",
            input_controller_key_events ? 1 : 0);
     input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
     input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
@@ -494,7 +408,7 @@ InputBackend::InputBackend()
     // Add default devices
     addDevice(INPUT_ID_KEYBOARD, "Bogodroid Keyboard", 0x046d, 0xc316, jnivm::android::view::InputDevice::SOURCE_KEYBOARD);
     auto mouse = addDevice(INPUT_ID_MOUSE, "Bogodroid Mouse", 0x046D, 0xC077,
-                           (input_mouse_touch_mode || input_controller_touch)
+                           input_mouse_touch_mode
                                ? jnivm::android::view::InputDevice::SOURCE_TOUCHSCREEN
                                : jnivm::android::view::InputDevice::SOURCE_MOUSE);
     mouse->addMotionRange(jnivm::android::view::MotionEvent::AXIS_X, mouse->source,
@@ -820,82 +734,6 @@ void InputBackend::runEventLoop()
     }
     const Uint32 replay_t0 = SDL_GetTicks();
 
-    auto injectControllerTouch = [&](int button, bool down, const char* source) -> bool {
-        if (!input_controller_touch || !onMotion)
-            return false;
-        int logicalButton = bd_remap_dpad_button(button);
-        auto it = g_controller_touch_points.find(logicalButton);
-        if (it == g_controller_touch_points.end())
-            return false;
-
-        update_controller_touch_scale();
-        const auto& point = it->second;
-        const float touchX = point.first * input_controller_touch_scale_x;
-        const float touchY = point.second * input_controller_touch_scale_y;
-        std::vector<jnivm::android::view::MotionEvent::Pointer> before;
-        for (const auto& active : g_controller_active_touches) {
-            before.push_back({
-                active.first,
-                active.second.first,
-                active.second.second
-            });
-        }
-
-        if (down) {
-            g_controller_active_touches[logicalButton] = {touchX, touchY};
-        } else {
-            auto active = g_controller_active_touches.find(logicalButton);
-            if (active == g_controller_active_touches.end())
-                return false;
-            g_controller_active_touches.erase(active);
-        }
-
-        std::vector<jnivm::android::view::MotionEvent::Pointer> after;
-        for (const auto& active : g_controller_active_touches) {
-            after.push_back({
-                active.first,
-                active.second.first,
-                active.second.second
-            });
-        }
-
-        auto& eventPointers = down ? after : before;
-        if (eventPointers.empty())
-            eventPointers.push_back({logicalButton, touchX, touchY});
-        int action = down
-            ? jnivm::android::view::MotionEvent::ACTION_DOWN
-            : jnivm::android::view::MotionEvent::ACTION_UP;
-        if ((down ? before.size() : after.size()) > 0) {
-            int pointerIndex = 0;
-            for (size_t i = 0; i < eventPointers.size(); ++i) {
-                if (eventPointers[i].id == logicalButton) {
-                    pointerIndex = static_cast<int>(i);
-                    break;
-                }
-            }
-            action = (pointerIndex << 8) |
-                (down ? jnivm::android::view::MotionEvent::ACTION_POINTER_DOWN
-                      : jnivm::android::view::MotionEvent::ACTION_POINTER_UP);
-        }
-
-        auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
-            devices[INPUT_ID_MOUSE],
-            action,
-            touchX, touchY);
-        motionEvent->pointers = eventPointers;
-        motionEvent->buttonState = down
-            ? jnivm::android::view::MotionEvent::BUTTON_PRIMARY
-            : (after.empty() ? 0 : jnivm::android::view::MotionEvent::BUTTON_PRIMARY);
-        const char* bname = SDL_GameControllerGetStringForButton(
-            (SDL_GameControllerButton)logicalButton);
-        BD_LOG("TOUCH", "%s %s btn=%d (%s) action=%d pointers=%zu x=%.1f y=%.1f",
-               source ? source : "controller", down ? "DOWN" : "UP",
-               logicalButton, bname ? bname : "?", action, eventPointers.size(),
-               (double)touchX, (double)touchY);
-        onMotion(motionEvent);
-        return true;
-    };
-
     auto replayInject = [&](int button, bool down) {
         const char* bname = SDL_GameControllerGetStringForButton(
             (SDL_GameControllerButton)button);
@@ -913,7 +751,6 @@ void InputBackend::runEventLoop()
         bd_exit_hotkey_update(button == SDL_CONTROLLER_BUTTON_START,
                               button == SDL_CONTROLLER_BUTTON_BACK,
                               down, "replay");
-        injectControllerTouch(button, down, "replay");
         if (!input_controller_key_events)
             return;
         if (!onKey) {
@@ -1147,7 +984,6 @@ void InputBackend::runEventLoop()
                                       physicalButton == SDL_CONTROLLER_BUTTON_BACK,
                                       action == jnivm::android::view::KeyEvent::ACTION_DOWN,
                                       "controller");
-                injectControllerTouch(physicalButton, down, "controller");
                 if (!input_controller_key_events)
                     break;
                 bool is_dpad = is_dpad_button(physicalButton);
@@ -1542,6 +1378,93 @@ int InputBackend::toAndroidKeycode(SDL_Scancode sdl_scancode)
 void InputBackend::stop()
 {
     running = false;
+}
+
+bool InputBackend::injectTouch(int pointerId, float x, float y,
+                               float designWidth, float designHeight,
+                               bool down, const char* source)
+{
+    if (!onMotion || designWidth <= 0.0f || designHeight <= 0.0f ||
+        !std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(designWidth) || !std::isfinite(designHeight))
+        return false;
+
+    const int displayWidth = bd_device_display_width();
+    const int displayHeight = bd_device_display_height();
+    if (displayWidth <= 0 || displayHeight <= 0)
+        return false;
+
+    const float touchX = x * (static_cast<float>(displayWidth) / designWidth);
+    const float touchY = y * (static_cast<float>(displayHeight) / designHeight);
+    std::vector<jnivm::android::view::MotionEvent::Pointer> before;
+    for (const auto& active : g_injected_active_touches) {
+        before.push_back({
+            active.first,
+            active.second.first,
+            active.second.second
+        });
+    }
+
+    if (down) {
+        g_injected_active_touches[pointerId] = {touchX, touchY};
+    } else {
+        auto active = g_injected_active_touches.find(pointerId);
+        if (active == g_injected_active_touches.end())
+            return false;
+        g_injected_active_touches.erase(active);
+    }
+
+    std::vector<jnivm::android::view::MotionEvent::Pointer> after;
+    for (const auto& active : g_injected_active_touches) {
+        after.push_back({
+            active.first,
+            active.second.first,
+            active.second.second
+        });
+    }
+
+    auto& eventPointers = down ? after : before;
+    if (eventPointers.empty())
+        eventPointers.push_back({pointerId, touchX, touchY});
+    int action = down
+        ? jnivm::android::view::MotionEvent::ACTION_DOWN
+        : jnivm::android::view::MotionEvent::ACTION_UP;
+    if ((down ? before.size() : after.size()) > 0) {
+        int pointerIndex = 0;
+        for (size_t i = 0; i < eventPointers.size(); ++i) {
+            if (eventPointers[i].id == pointerId) {
+                pointerIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        action = (pointerIndex << 8) |
+            (down ? jnivm::android::view::MotionEvent::ACTION_POINTER_DOWN
+                  : jnivm::android::view::MotionEvent::ACTION_POINTER_UP);
+    }
+
+    auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
+        devices[INPUT_ID_MOUSE], action, touchX, touchY);
+    motionEvent->pointers = eventPointers;
+    motionEvent->buttonState = down
+        ? jnivm::android::view::MotionEvent::BUTTON_PRIMARY
+        : (after.empty() ? 0 : jnivm::android::view::MotionEvent::BUTTON_PRIMARY);
+    BD_LOG("TOUCH", "%s %s pointer=%d action=%d pointers=%zu x=%.1f y=%.1f design=%.0fx%.0f display=%dx%d",
+           source ? source : "plugin", down ? "DOWN" : "UP",
+           pointerId, action, eventPointers.size(),
+           (double)touchX, (double)touchY,
+           (double)designWidth, (double)designHeight,
+           displayWidth, displayHeight);
+    onMotion(motionEvent);
+    return true;
+}
+
+extern "C" int bd_input_inject_touch(int pointerId, float x, float y,
+                                      float designWidth, float designHeight,
+                                      int down, const char* source)
+{
+    return InputBackend::instance().injectTouch(pointerId, x, y, designWidth,
+                                                designHeight, down != 0,
+                                                source) ? 1 : 0;
 }
 
 // ---- Callbacks ----

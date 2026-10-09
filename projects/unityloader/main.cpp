@@ -32,6 +32,8 @@ toml::table config;
 #include "ndk.h"
 // Decode benchmark entry point (BD_MEDIA_BENCH); implemented in thunks/ndk/media.cpp.
 extern "C" void bd_media_bench(const char* path, int frames);
+extern "C" int bd_present_viewport_set(int enabled, double renderScale,
+                                        const char* anchor, int offsetY);
 
 // Unity 2018's AndroidVideoMedia rejects the unpacked, hostless
 // jar:file://!/assets/... form before it reaches the NDK extractor. The
@@ -799,6 +801,11 @@ namespace plugin_host {
         return node ? node->value<int64_t>().value_or(fallback) : fallback;
     }
 
+    static double api_config_get_f64(const char* dotted_key, double fallback) {
+        const toml::node* node = config_node(dotted_key);
+        return node ? node->value<double>().value_or(fallback) : fallback;
+    }
+
     static uintptr_t api_so_symbol(BogoSoModule* mod, const char* name) {
         return name ? so_symbol((so_module*)mod, name) : 0;
     }
@@ -866,6 +873,18 @@ namespace plugin_host {
 
     static int api_register_input_observer(const BogoInputObserver* observer) {
         return bd_register_input_observer(observer);
+    }
+
+    static int api_inject_touch(int pointer_id, float x, float y,
+                                float design_width, float design_height,
+                                int down, const char* source) {
+        return bd_input_inject_touch(pointer_id, x, y, design_width,
+                                     design_height, down, source);
+    }
+
+    static int api_set_present_viewport(int enabled, double render_scale,
+                                        const char* anchor, int offset_y) {
+        return bd_present_viewport_set(enabled, render_scale, anchor, offset_y);
     }
 
     static int api_register_asset_source_callback(BogoAssetSourceCallback cb,
@@ -1094,6 +1113,7 @@ namespace plugin_host {
         api.config_get_string = &api_config_get_string;
         api.config_get_bool = &api_config_get_bool;
         api.config_get_i64 = &api_config_get_i64;
+        api.config_get_f64 = &api_config_get_f64;
         api.so_symbol = &api_so_symbol;
         api.so_base = &api_so_base;
         api.find_module = &api_find_module;
@@ -1103,6 +1123,8 @@ namespace plugin_host {
         api.register_module_loaded = &api_register_module_loaded;
         api.register_present_callback = &api_register_present_callback;
         api.register_input_observer = &api_register_input_observer;
+        api.inject_touch = &api_inject_touch;
+        api.set_present_viewport = &api_set_present_viewport;
         api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;

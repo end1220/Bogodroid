@@ -54,8 +54,15 @@ public:
     // ---- Callbacks ----
     void setKeyCallback(std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)> cb);
     void setMotionCallback(std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> cb);
+    bool injectTouch(int pointerId, float x, float y,
+                     float designWidth, float designHeight,
+                     bool down, const char* source);
 
     // Utilities
     static int toAndroidKeycode(SDL_Scancode sdl_scancode);
     static int toAndroidKeycode(SDL_ControllerButtonEvent sdl_button);
 };
+
+extern "C" int bd_input_inject_touch(int pointerId, float x, float y,
+                                      float designWidth, float designHeight,
+                                      int down, const char* source);

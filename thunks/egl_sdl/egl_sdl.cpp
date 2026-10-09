@@ -23,10 +23,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <string>
-#include <toml++/toml.hpp>
 #include <unistd.h>
 #include <vector>
-extern toml::table config;
 
 // Opaque EGL objects must be distinct, aligned, and readable. 0xDEAD collided
 // with dlopen_impl's fake handle and is unmapped (first page), so Unity treating
@@ -88,29 +86,27 @@ struct BD_PresentViewport {
     int offsetY = 0;
 };
 
-static const BD_PresentViewport& bd_present_viewport_config()
+static BD_PresentViewport g_present_viewport;
+
+extern "C" int bd_present_viewport_set(int enabled, double renderScale,
+                                        const char* anchor, int offsetY)
 {
-    static BD_PresentViewport cfg;
-    static bool init = false;
-    if (!init) {
-        cfg.enabled = config["viewport"]["enabled"].value_or<bool>(false);
-        cfg.renderScale =
-            static_cast<float>(config["viewport"]["renderScale"].value_or<double>(1.0));
-        cfg.anchor = config["viewport"]["anchor"].value_or<std::string>("center");
-        cfg.offsetY = config["viewport"]["offsetY"].value_or<int>(0);
-        if (!std::isfinite(cfg.renderScale) || cfg.renderScale <= 0.0f) {
-            BD_LOG("VIEWPORT", "ignore invalid renderScale %.3f; using 1.0",
-                   (double)cfg.renderScale);
-            cfg.renderScale = 1.0f;
-        }
-        if (cfg.enabled) {
-            BD_LOG("VIEWPORT",
-                   "present crop enabled scale=%.3f anchor=%s offsetY=%d",
-                   (double)cfg.renderScale, cfg.anchor.c_str(), cfg.offsetY);
-        }
-        init = true;
+    g_present_viewport.enabled = enabled != 0;
+    g_present_viewport.renderScale = static_cast<float>(renderScale);
+    g_present_viewport.anchor = anchor && *anchor ? anchor : "center";
+    g_present_viewport.offsetY = offsetY;
+    if (!std::isfinite(g_present_viewport.renderScale) ||
+        g_present_viewport.renderScale <= 0.0f) {
+        BD_LOG("VIEWPORT", "ignore invalid renderScale %.3f; using 1.0",
+               (double)g_present_viewport.renderScale);
+        g_present_viewport.renderScale = 1.0f;
     }
-    return cfg;
+    BD_LOG("VIEWPORT", "present crop %s scale=%.3f anchor=%s offsetY=%d",
+           g_present_viewport.enabled ? "enabled" : "disabled",
+           (double)g_present_viewport.renderScale,
+           g_present_viewport.anchor.c_str(),
+           g_present_viewport.offsetY);
+    return 1;
 }
 
 static GLuint bd_compile_present_shader(GLenum type, const char* source)
@@ -133,7 +129,7 @@ static GLuint bd_compile_present_shader(GLenum type, const char* source)
 
 static bool bd_apply_present_viewport_transform()
 {
-    const BD_PresentViewport& cfg = bd_present_viewport_config();
+    const BD_PresentViewport& cfg = g_present_viewport;
     if (!cfg.enabled || cfg.renderScale <= 1.0f || !sdl_win ||
         !glad_glReadPixels || !glad_glTexImage2D || !glad_glDrawArrays)
         return false;

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define BOGODROID_PLUGIN_ABI_VERSION 7u
+#define BOGODROID_PLUGIN_ABI_VERSION 8u
 
 enum BogoPluginInitResult {
     BOGO_PLUGIN_OK = 0,
@@ -62,6 +62,7 @@ typedef struct BogoPluginApi {
     const char* (*config_get_string)(const char* dotted_key, const char* fallback);
     int (*config_get_bool)(const char* dotted_key, int fallback);
     int64_t (*config_get_i64)(const char* dotted_key, int64_t fallback);
+    double (*config_get_f64)(const char* dotted_key, double fallback);
 
     uintptr_t (*so_symbol)(BogoSoModule* mod, const char* name);
     uintptr_t (*so_base)(BogoSoModule* mod);
@@ -77,6 +78,11 @@ typedef struct BogoPluginApi {
     // SDL controller events and render-frame boundaries. Callbacks run on the
     // input/render thread; they must be bounded and must not throw.
     int (*register_input_observer)(const BogoInputObserver* observer);
+    int (*inject_touch)(int pointer_id, float x, float y,
+                        float design_width, float design_height,
+                        int down, const char* source);
+    int (*set_present_viewport)(int enabled, double render_scale,
+                                const char* anchor, int offset_y);
     int (*register_asset_source_callback)(BogoAssetSourceCallback cb,
                                           void* userdata);
     int (*register_jni_class)(const char* class_name,

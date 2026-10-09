@@ -95,9 +95,13 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 message(STATUS "SDL2 ${SDL2_VERSION} libs=${SDL2_LIBRARIES} inc=${SDL2_INCLUDE_DIRS}")
-pkg_check_modules(FFMPEG REQUIRED
+pkg_check_modules(FFMPEG QUIET
     libavformat libavcodec libavutil libswresample libswscale)
-message(STATUS "FFmpeg libs=${FFMPEG_LIBRARIES}")
+if(FFMPEG_FOUND)
+    message(STATUS "FFmpeg headers via pkg-config; runtime is dlopen-only")
+else()
+    message(STATUS "FFmpeg pkg-config not found; building against system headers if available")
+endif()
 
 # Add the libjnivm directory as a subproject
 add_subdirectory(libjnivm ${CMAKE_CURRENT_BINARY_DIR}/libjnivm_build)

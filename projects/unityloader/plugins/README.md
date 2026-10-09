@@ -24,7 +24,7 @@ when the host registers it after `so_load`.
 
 Plugins must verify `abi_version` and `struct_size` before accessing the API.
 Build the loader and deployed plugins from the same Plugin ABI revision. The
-current ABI is v7.
+current ABI is v8.
 
 ## Build and deploy
 
@@ -47,6 +47,8 @@ MyGame/
 
 Bundled plugins:
 
+- `brickgamepro`: BrickGamePro viewport crop and physical-controller to
+  on-screen-touch mapping.
 - `hollow_knight_viewport`: title-specific viewport and camera fixes.
 - `oddmar_input`: Oddmar-specific input gate and IL2CPP input hooks.
 - `oddmar_video`: Oddmar `libunity.so+0x4c124c` asset-path translation. It is
@@ -89,7 +91,7 @@ Do **not** export game-specific symbols for the core to `dlsym`. The host calls
 `bd_plugin_run_present_callbacks()` from `eglSwapBuffers`.
 
 Oddmar's `AssetLocator`/`AssetReader` is provided by `oddmar_assetlocator.so`.
-It uses the v7 host-owned C ABI for object userdata, byte arrays, string arrays,
+It uses the v7+ host-owned C ABI for object userdata, byte arrays, string arrays,
 and object construction. The plugin must be deployed beside `unityloader` in
 `unityloader.d/`; the core `BD_ENABLE_MOBGE_ASSETLOCATOR` implementation remains
 available as an A/B and rollback path. Plugins must not include jnivm C++ headers
