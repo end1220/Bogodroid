@@ -26,6 +26,7 @@ namespace bitter {
                                public jnivm::android::os::Handler::Callback,
                                public jnivm::android::view::Choreographer::FrameCallback,
                                public jnivm::android::graphics::SurfaceTexture::OnFrameAvailableListener,
+                               public jnivm::android::hardware::display::DisplayManager::DisplayListener,
                                public jnivm::android::hardware::input::InputManager::InputDeviceListener,
                                public jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback,
                                public jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback,

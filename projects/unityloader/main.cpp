@@ -369,12 +369,25 @@ extern DynLibFunction symtable_egl_sdl[];
 extern DynLibFunction symtable_zlib[];
 extern DynLibFunction symtable_opensles[];
 
+extern "C" double remainder(double, double);
+
+static double bd_remainder(double x, double y)
+{
+    return remainder(x, y);
+}
+
+static DynLibFunction symtable_libm[] = {
+    {"remainder", (uintptr_t)&bd_remainder},
+    {NULL, (uintptr_t)NULL}
+};
+
 DynLibFunction* so_static_patches[32] = {
     NULL,
 };
 
 DynLibFunction* so_dynamic_libraries[32] = {
     symtable_libc,
+    symtable_libm,
     symtable_ndk,
     symtable_egl_sdl,
     symtable_gles2,
@@ -1762,9 +1775,17 @@ int main(int argc, char* argv[])
         unityNRestartACtivityIndicator.invoke(frame3.getJniEnv(), unityPlayerObj.get());
     }
 
-    auto unityNSendSurfaceChangedEvent = unityClass->getMethod("()V", "nativeSendSurfaceChangedEvent");
-    BOOT_LOG("calling nativeSendSurfaceChangedEvent from libunity.so\n");
-    unityNSendSurfaceChangedEvent.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+    // Unity 2018.2 does not register nativeSendSurfaceChangedEvent, while
+    // newer Unity Android players do. Treat it as an optional lifecycle hook
+    // so older IL2CPP players can reach nativeResume/nativeRender.
+    auto unityNSendSurfaceChangedEvent =
+        unityClass->getMethod("()V", "nativeSendSurfaceChangedEvent");
+    if (unityNSendSurfaceChangedEvent) {
+        BOOT_LOG("calling nativeSendSurfaceChangedEvent from libunity.so\n");
+        unityNSendSurfaceChangedEvent.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+    } else {
+        BOOT_LOG("nativeSendSurfaceChangedEvent unavailable; continuing\n");
+    }
 
     gdb_break_here();
 

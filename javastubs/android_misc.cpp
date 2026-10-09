@@ -54,6 +54,12 @@ jnivm::android::hardware::display::DisplayManager::getDisplay(int disp)
     return std::make_shared<jnivm::android::view::Display>();
 }
 
+void jnivm::android::hardware::display::DisplayManager::registerDisplayListener(
+    std::shared_ptr<DisplayListener> listener,
+    std::shared_ptr<jnivm::android::os::Handler> handler)
+{
+}
+
 ///// InputManager
 
 std::shared_ptr<jnivm::android::view::InputDevice> jnivm::android::hardware::input::InputManager::getInputDevice(int device)
@@ -155,6 +161,10 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::util::DisplayMetrics) { FakeJni::Constru
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::display::DisplayManager) { FakeJni::Constructor<DisplayManager> {} },
     { FakeJni::Function<&DisplayManager::getDisplay> {}, "getDisplay", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&DisplayManager::registerDisplayListener> {}, "registerDisplayListener", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(jnivm::android::hardware::display::DisplayManager::DisplayListener) { FakeJni::Constructor<DisplayListener> {} },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::app::Activity) { FakeJni::Constructor<Activity> {} },

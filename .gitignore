@@ -11,6 +11,7 @@ build_cross/
 build-*/
 build-docker*/
 dist/
+deploy/
 libjnivm/build/
 il2cpp/
 projects/unityloader/monocompat/il2cpp_log_shim.cpp

@@ -367,8 +367,14 @@ int jnivm::android::view::KeyEvent::getScanCode()
 
 int jnivm::android::view::MotionEvent::getPointerCount()
 {
-    // For mouse and joystick, there's always one "pointer".
-    return 1;
+    return static_cast<int>(pointers.empty() ? 1 : pointers.size());
+}
+
+int jnivm::android::view::MotionEvent::getPointerId(int pointerIndex)
+{
+    if (pointerIndex >= 0 && pointerIndex < static_cast<int>(pointers.size()))
+        return pointers[pointerIndex].id;
+    return pointerIndex;
 }
 
 int jnivm::android::view::MotionEvent::getHistorySize()
@@ -390,11 +396,15 @@ int jnivm::android::view::MotionEvent::getToolType(int pointerIndex)
 
 float jnivm::android::view::MotionEvent::getX(int pointerIndex)
 {
+    if (pointerIndex >= 0 && pointerIndex < static_cast<int>(pointers.size()))
+        return pointers[pointerIndex].x;
     return this->x;
 }
 
 float jnivm::android::view::MotionEvent::getY(int pointerIndex)
 {
+    if (pointerIndex >= 0 && pointerIndex < static_cast<int>(pointers.size()))
+        return pointers[pointerIndex].y;
     return this->y;
 }
 
@@ -435,6 +445,7 @@ std::shared_ptr<jnivm::android::view::MotionEvent> jnivm::android::view::MotionE
         return nullptr;
     // Create a new MotionEvent by copying the data from the other one.
     auto newEvent = std::make_shared<MotionEvent>(other->device, other->action, other->x, other->y);
+    newEvent->pointers = other->pointers;
     newEvent->axisValues = other->axisValues;
     newEvent->buttonState = other->buttonState;
     return newEvent;
@@ -759,6 +770,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::MotionEvent) { FakeJni::Constructor<MotionEvent, std::shared_ptr<jnivm::android::view::InputDevice>, int, int, int> {} },
     { FakeJni::Function<&MotionEvent::getEventTime> {}, "getEventTime", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getPointerCount> {}, "getPointerCount", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&MotionEvent::getPointerId> {}, "getPointerId", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getHistorySize> {}, "getHistorySize", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getAxisValue> {}, "getAxisValue", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getToolType> {}, "getToolType", FakeJni::JMethodID::PUBLIC },

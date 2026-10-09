@@ -11,6 +11,7 @@
 #include "so_util.h"
 #include "thunk_gen.h"
 #include <algorithm>
+#include <cmath>
 #include <errno.h>
 #include <inttypes.h>
 #include <memory>
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <string>
 #include <toml++/toml.hpp>
 #include <unistd.h>
 #include <vector>
@@ -78,6 +80,263 @@ SDL_GLContext sdl_ctx;
 EGLDisplay egl_display;
 EGLContext egl_context;
 EGLSurface egl_surface;
+
+struct BD_PresentViewport {
+    bool enabled = false;
+    float renderScale = 1.0f;
+    std::string anchor = "center";
+    int offsetY = 0;
+};
+
+static const BD_PresentViewport& bd_present_viewport_config()
+{
+    static BD_PresentViewport cfg;
+    static bool init = false;
+    if (!init) {
+        cfg.enabled = config["viewport"]["enabled"].value_or<bool>(false);
+        cfg.renderScale =
+            static_cast<float>(config["viewport"]["renderScale"].value_or<double>(1.0));
+        cfg.anchor = config["viewport"]["anchor"].value_or<std::string>("center");
+        cfg.offsetY = config["viewport"]["offsetY"].value_or<int>(0);
+        if (!std::isfinite(cfg.renderScale) || cfg.renderScale <= 0.0f) {
+            BD_LOG("VIEWPORT", "ignore invalid renderScale %.3f; using 1.0",
+                   (double)cfg.renderScale);
+            cfg.renderScale = 1.0f;
+        }
+        if (cfg.enabled) {
+            BD_LOG("VIEWPORT",
+                   "present crop enabled scale=%.3f anchor=%s offsetY=%d",
+                   (double)cfg.renderScale, cfg.anchor.c_str(), cfg.offsetY);
+        }
+        init = true;
+    }
+    return cfg;
+}
+
+static GLuint bd_compile_present_shader(GLenum type, const char* source)
+{
+    GLuint shader = glad_glCreateShader(type);
+    glad_glShaderSource(shader, 1, &source, nullptr);
+    glad_glCompileShader(shader);
+    GLint compiled = 0;
+    glad_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled) {
+        char message[1024]{};
+        GLsizei length = 0;
+        glad_glGetShaderInfoLog(shader, sizeof(message) - 1, &length, message);
+        BD_LOG("VIEWPORT", "present shader compile failed: %s", message);
+        glad_glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static bool bd_apply_present_viewport_transform()
+{
+    const BD_PresentViewport& cfg = bd_present_viewport_config();
+    if (!cfg.enabled || cfg.renderScale <= 1.0f || !sdl_win ||
+        !glad_glReadPixels || !glad_glTexImage2D || !glad_glDrawArrays)
+        return false;
+
+    int width = 0;
+    int height = 0;
+    SDL_GL_GetDrawableSize(sdl_win, &width, &height);
+    if (width <= 0 || height <= 0)
+        return false;
+
+    static GLuint program = 0;
+    static GLuint texture = 0;
+    static GLuint vertex_array = 0;
+    static GLint sampler_loc = -1;
+    static GLint src_x0_loc = -1;
+    static GLint src_x1_loc = -1;
+    static GLint src_y0_loc = -1;
+    static GLint src_y1_loc = -1;
+    static bool failed = false;
+    if (failed)
+        return false;
+
+    if (!program) {
+        static const char* vertex_source =
+            "#version 300 es\n"
+            "out vec2 v_uv;\n"
+            "void main() {\n"
+            "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+            "  v_uv = p;\n"
+            "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+            "}\n";
+        static const char* fragment_source =
+            "#version 300 es\n"
+            "precision mediump float;\n"
+            "in vec2 v_uv;\n"
+            "layout(location=0) out vec4 out_color;\n"
+            "uniform sampler2D source_tex;\n"
+            "uniform float src_x0;\n"
+            "uniform float src_x1;\n"
+            "uniform float src_y0;\n"
+            "uniform float src_y1;\n"
+            "void main() {\n"
+            "  float x = mix(src_x0, src_x1, v_uv.x);\n"
+            "  float y = mix(src_y0, src_y1, v_uv.y);\n"
+            "  out_color = texture(source_tex, vec2(x, y));\n"
+            "}\n";
+        GLuint vertex = bd_compile_present_shader(GL_VERTEX_SHADER, vertex_source);
+        GLuint fragment = bd_compile_present_shader(GL_FRAGMENT_SHADER, fragment_source);
+        if (!vertex || !fragment) {
+            failed = true;
+            return false;
+        }
+        program = glad_glCreateProgram();
+        glad_glAttachShader(program, vertex);
+        glad_glAttachShader(program, fragment);
+        glad_glLinkProgram(program);
+        glad_glDeleteShader(vertex);
+        glad_glDeleteShader(fragment);
+        GLint linked = 0;
+        glad_glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (!linked) {
+            char message[1024]{};
+            GLsizei length = 0;
+            glad_glGetProgramInfoLog(program, sizeof(message) - 1, &length, message);
+            BD_LOG("VIEWPORT", "present program link failed: %s", message);
+            failed = true;
+            return false;
+        }
+        sampler_loc = glad_glGetUniformLocation(program, "source_tex");
+        src_x0_loc = glad_glGetUniformLocation(program, "src_x0");
+        src_x1_loc = glad_glGetUniformLocation(program, "src_x1");
+        src_y0_loc = glad_glGetUniformLocation(program, "src_y0");
+        src_y1_loc = glad_glGetUniformLocation(program, "src_y1");
+        glad_glGenTextures(1, &texture);
+        if (glad_glGenVertexArrays)
+            glad_glGenVertexArrays(1, &vertex_array);
+        BD_LOG("VIEWPORT", "present crop GL path ready program=%u texture=%u",
+               program, texture);
+    }
+
+    GLint previous_program = 0;
+    GLint previous_active = 0;
+    GLint previous_texture = 0;
+    GLint previous_array_buffer = 0;
+    GLint previous_vertex_array = 0;
+    GLint previous_draw_fbo = 0;
+    GLint previous_read_fbo = 0;
+    GLint previous_viewport[4]{};
+    GLboolean previous_color_mask[4]{1, 1, 1, 1};
+    const GLenum toggles[] = {
+        GL_BLEND, GL_DEPTH_TEST, GL_CULL_FACE, GL_SCISSOR_TEST,
+        GL_STENCIL_TEST, GL_DITHER
+    };
+    GLboolean enabled[sizeof(toggles) / sizeof(toggles[0])]{};
+
+    glad_glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
+    glad_glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active);
+    glad_glActiveTexture(GL_TEXTURE0);
+    glad_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+    glad_glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previous_array_buffer);
+    if (glad_glBindVertexArray)
+        glad_glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vertex_array);
+    glad_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+    glad_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+    glad_glGetIntegerv(GL_VIEWPORT, previous_viewport);
+    if (glad_glGetBooleanv)
+        glad_glGetBooleanv(GL_COLOR_WRITEMASK, previous_color_mask);
+    for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i)
+        enabled[i] = glad_glIsEnabled ? glad_glIsEnabled(toggles[i]) : false;
+
+    static std::vector<uint8_t> pixels;
+    pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+    glad_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glad_glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                      pixels.data());
+
+    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glad_glActiveTexture(GL_TEXTURE0);
+    glad_glBindTexture(GL_TEXTURE_2D, texture);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glad_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                      GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    for (GLenum toggle : toggles)
+        glad_glDisable(toggle);
+    glad_glColorMask(true, true, true, true);
+    glad_glViewport(0, 0, width, height);
+    glad_glUseProgram(program);
+    if (glad_glBindVertexArray && vertex_array)
+        glad_glBindVertexArray(vertex_array);
+    if (glad_glBindBuffer)
+        glad_glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (sampler_loc >= 0)
+        glad_glUniform1i(sampler_loc, 0);
+
+    // Use the same source scale on both axes. With renderScale=2, the
+    // 640x240 upper half is sampled from a centered 320x240 source window,
+    // then enlarged uniformly to the 640x480 drawable.
+    const float visible = std::min(1.0f, 1.0f / cfg.renderScale);
+    const float src_x0 = (1.0f - visible) * 0.5f;
+    const float src_x1 = src_x0 + visible;
+    float src_y0 = (1.0f - visible) * 0.5f;
+    float src_y1 = src_y0 + visible;
+    if (cfg.anchor == "top") {
+        src_y0 = 1.0f - visible;
+        src_y1 = 1.0f;
+    } else if (cfg.anchor == "bottom") {
+        src_y0 = 0.0f;
+        src_y1 = visible;
+    }
+    // offsetY is expressed in output pixels. Convert it to source UV space
+    // after uniform scaling; a negative value moves the game image upward.
+    const float source_shift_y =
+        static_cast<float>(cfg.offsetY) /
+        (static_cast<float>(height) * cfg.renderScale);
+    src_y0 += source_shift_y;
+    src_y1 += source_shift_y;
+    if (src_y0 < 0.0f) {
+        src_y1 -= src_y0;
+        src_y0 = 0.0f;
+    }
+    if (src_y1 > 1.0f) {
+        src_y0 -= src_y1 - 1.0f;
+        src_y1 = 1.0f;
+    }
+    if (src_x0_loc >= 0) glad_glUniform1f(src_x0_loc, src_x0);
+    if (src_x1_loc >= 0) glad_glUniform1f(src_x1_loc, src_x1);
+    if (src_y0_loc >= 0) glad_glUniform1f(src_y0_loc, src_y0);
+    if (src_y1_loc >= 0) glad_glUniform1f(src_y1_loc, src_y1);
+    glad_glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    static uint64_t applied = 0;
+    if (++applied <= 5 || (applied % 600) == 0) {
+        BD_LOG("VIEWPORT",
+               "present crop #%llu drawable=%dx%d src_x=%.3f..%.3f src_y=%.3f..%.3f",
+               (unsigned long long)applied, width, height,
+               (double)src_x0, (double)src_x1,
+               (double)src_y0, (double)src_y1);
+    }
+
+    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)previous_draw_fbo);
+    glad_glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous_read_fbo);
+    glad_glViewport(previous_viewport[0], previous_viewport[1],
+                    previous_viewport[2], previous_viewport[3]);
+    glad_glUseProgram((GLuint)previous_program);
+    glad_glColorMask(previous_color_mask[0], previous_color_mask[1],
+                     previous_color_mask[2], previous_color_mask[3]);
+    for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i) {
+        if (enabled[i]) glad_glEnable(toggles[i]);
+        else glad_glDisable(toggles[i]);
+    }
+    glad_glActiveTexture(GL_TEXTURE0);
+    glad_glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture);
+    if (glad_glBindVertexArray)
+        glad_glBindVertexArray((GLuint)previous_vertex_array);
+    if (glad_glBindBuffer)
+        glad_glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous_array_buffer);
+    glad_glActiveTexture((GLenum)previous_active);
+    return true;
+}
 
 static uint32_t bd_fb_channel(uint8_t value, const fb_bitfield& field)
 {
@@ -704,6 +963,8 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
         transition_pause_active = false;
     }
 
+    if (!skip_swap)
+        bd_apply_present_viewport_transform();
     if (!skip_swap)
         SDL_GL_SwapWindow(sdl_win);
 

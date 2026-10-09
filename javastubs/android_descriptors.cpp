@@ -45,6 +45,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
 
     // Hardware
     vm->registerClass<jnivm::android::hardware::display::DisplayManager>();
+    vm->registerClass<jnivm::android::hardware::display::DisplayManager::DisplayListener>();
     vm->registerClass<jnivm::android::hardware::input::InputManager>();
     vm->registerClass<jnivm::android::hardware::input::InputManager::InputDeviceListener>();
 

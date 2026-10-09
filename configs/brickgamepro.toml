@@ -1,0 +1,86 @@
+[paths]
+
+# BrickGamePro (Unity 2018.2 IL2CPP) - container / handheld port layout.
+game_files="./game/"
+support_files="./game/"
+
+android_package_code="./game/"
+android_external_files="./conf/"
+android_files="./conf/"
+android_cache="./cache/"
+android_obb_dirs=["./game/"]
+android_source_dirs=["./game/"]
+
+
+[package]
+
+packageName="com.perseusgames.brickgamepro"
+versionName="0.1"
+mainIntentBundle = { unity = "-force-gles20" }
+
+
+[device]
+
+displayWidth=0
+displayHeight=0
+displayRefreshRate=60
+displayRotation=0
+displayTouchscreen=1
+language="en"
+country="US"
+
+
+[input]
+
+controller=true
+controller_name="Microsoft X-Box 360 pad"
+touch_mode=true
+dpad_synthesize_hat=false
+controller_key_events=false
+
+[input.controller_touch]
+dpleft=[222, 375]
+dpright=[300, 375]
+dpup=[260, 335]
+dpdown=[260, 414]
+a=[393, 377]
+b=[334, 307]
+x=[367, 307]
+y=[400, 307]
+start=[433, 307]
+
+
+[viewport]
+
+enabled=true
+renderScale=2.0
+anchor="top"
+offsetY=-96
+
+
+[unity]
+
+version = "il2cpp"
+block_analytics = true
+
+
+[google_play]
+
+offline = true
+
+
+[audio]
+
+backend = "dummy"
+
+
+[video]
+
+path = "yuv_gpu"
+color_matrix = "auto"
+color_range = "auto"
+
+
+[gpu]
+
+textureMaxDim = 0

@@ -467,6 +467,8 @@ namespace android {
             static inline int ACTION_DOWN = 0;
             static inline int ACTION_UP = 1;
             static inline int ACTION_MOVE = 2;
+            static inline int ACTION_POINTER_DOWN = 5;
+            static inline int ACTION_POINTER_UP = 6;
             static inline int ACTION_HOVER_MOVE = 7;
             static inline int ACTION_HOVER_ENTER = 9;
             static inline int ACTION_HOVER_EXIT = 10;
@@ -481,6 +483,12 @@ namespace android {
             int action;
             float x, y;
             int buttonState = 0;
+            struct Pointer {
+                int id;
+                float x;
+                float y;
+            };
+            std::vector<Pointer> pointers;
 
             std::unordered_map<int, float> axisValues;
 
@@ -491,9 +499,11 @@ namespace android {
                 , x(pX)
                 , y(pY)
             {
+                pointers.push_back({0, pX, pY});
             }
             long getEventTime();
             int getPointerCount();
+            int getPointerId(int pointerIndex);
             int getHistorySize();
             int getButtonState();
             int getToolType(int pointerIndex);
@@ -515,12 +525,22 @@ namespace android {
             int get(int keyCode, int metaState);
         };
     }
+    namespace os {
+        class Handler;
+    }
     namespace hardware {
         namespace display {
             class DisplayManager : public FakeJni::JObject {
             public:
                 DEFINE_CLASS_NAME("android/hardware/display/DisplayManager")
+                class DisplayListener : public virtual FakeJni::JObject {
+                public:
+                    DEFINE_CLASS_NAME("android/hardware/display/DisplayManager$DisplayListener")
+                    virtual ~DisplayListener() = default;
+                };
                 std::shared_ptr<jnivm::android::view::Display> getDisplay(int disp);
+                void registerDisplayListener(std::shared_ptr<DisplayListener> listener,
+                                             std::shared_ptr<jnivm::android::os::Handler> handler);
             };
         }
     }
