@@ -38,7 +38,7 @@ static constexpr const char* kPackageName = "com.perseusgames.brickgamepro";
 static float g_design_width = kDesignWidth;
 static float g_design_height = kDesignHeight;
 static bool g_skin_switch_enabled = true;
-static int g_skin_switch_button = SDL_CONTROLLER_BUTTON_GUIDE;
+static int g_skin_switch_button = SDL_CONTROLLER_BUTTON_BACK;
 static bool g_probe_auto_start = false;
 static int g_probe_auto_start_stage = 0;
 static std::atomic<int> g_pending_skin{-1};
@@ -499,7 +499,7 @@ struct DirectButtonState {
     uint64_t down_frame = 0;
 };
 
-static std::array<TouchPoint, 8> g_points = {{
+static std::array<TouchPoint, 9> g_points = {{
     {SDL_CONTROLLER_BUTTON_DPAD_LEFT,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,  222.0f, 375.0f},
     {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 300.0f, 375.0f},
     {SDL_CONTROLLER_BUTTON_DPAD_UP,    SDL_CONTROLLER_BUTTON_DPAD_UP,    260.0f, 335.0f},
@@ -508,6 +508,7 @@ static std::array<TouchPoint, 8> g_points = {{
     {SDL_CONTROLLER_BUTTON_Y,          SDL_CONTROLLER_BUTTON_Y,          393.0f, 377.0f},
     {SDL_CONTROLLER_BUTTON_START,      SDL_CONTROLLER_BUTTON_START,      334.0f, 307.0f},
     {SDL_CONTROLLER_BUTTON_X,          SDL_CONTROLLER_BUTTON_X,          367.0f, 307.0f},
+    {SDL_CONTROLLER_BUTTON_GUIDE,      SDL_CONTROLLER_BUTTON_GUIDE,      433.0f, 307.0f},
 }};
 static std::array<DirectButtonState, 6> g_direct_buttons = {{
     {SDL_CONTROLLER_BUTTON_DPAD_LEFT},
@@ -568,7 +569,7 @@ static void invoke_skin(int index)
     if (resolve_unity_send_message()) {
         unity_send_message(g_skin_object.c_str(), g_skin_methods[index].name, "");
         if (g_api) {
-            g_api->log("BRICKGAME", "guide skin message %s.%s",
+            g_api->log("BRICKGAME", "skin message %s.%s",
                        g_skin_object.c_str(), g_skin_methods[index].name);
         }
         return;

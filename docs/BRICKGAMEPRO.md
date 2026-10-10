@@ -149,11 +149,11 @@ Mapped original touch buttons:
 | Y | Fire / A fallback | `(393, 377)` |
 | Start | Start / Pause | `(334, 307)` |
 | X | Sound | `(367, 307)` |
+| Guide/Menu | Exit Game | `(433, 307)` |
 
 The original top-right buttons are Settings `(400, 307)` and Exit Game
-`(433, 307)`. They are deliberately not mapped to physical controller buttons,
-so normal handheld input cannot open Settings or trigger the in-game exit
-button.
+`(433, 307)`. Settings remains unbound. Guide/Menu simulates a click on the
+Exit Game button through the same touch path as the original UI.
 The original game has no separate Y touch button; Y therefore aliases the
 Fire/A touch target.
 
@@ -165,26 +165,26 @@ and labels are hidden, while the Unity UI hit regions remain at the original
 and multi-pointer `ACTION_POINTER_DOWN/UP` sequence. Real-device testing now
 confirms the mapped controls work, except for the Tetris Down feel tracked below.
 
-Guide/Menu is reserved for skin switching. It does not inject a Settings touch:
+Select is reserved for skin switching. It does not inject a Settings touch:
 the `brickgamepro` plugin calls Unity's exported `UnitySendMessage` entry point
 against the `Canvas` GameObject, where the `GUIManager` component is attached.
-The first Guide press chooses Black because the default skin is already Blue.
+The first Select press chooses Black because the default skin is already Blue.
 The built-in cycle is Blue, Black, Pink, Green, Yellow, Red, Purple, Orange,
-Blue2, Green2, Silver. These names and the Guide mapping are plugin constants,
+Blue2, Green2, Silver. These names and the Select mapping are plugin constants,
 not TOML settings.
 
 Implementation:
 
 1. Keep gameplay touch mapping limited to D-pad, A/Y, Start/Pause, and Sound.
-2. Leave Settings and Exit Game unbound from ordinary controller buttons.
-3. On Guide/Menu down, schedule one skin-change request for the next render
+2. Leave Settings unbound; map Guide/Menu to the original Exit Game touch point.
+3. On Select down, schedule one skin-change request for the next render
    frame.
 4. Resolve `UnitySendMessage` from `libunity.so` and call the next
    `Canvas.ChangeTo*Skin()` message.
 5. Direct managed input is currently disabled after real-device testing showed
    it broke menu/gameplay routing for D-pad/A and made B exit the process.
-   D-pad, A/Y, Start, and X therefore use the plugin touch path again. B is
-   deliberately unmapped.
+   D-pad, A/Y, Start, X, and Guide therefore use the plugin touch path again.
+   B is deliberately unmapped.
 6. After every injected touch event and every held-touch refresh, the plugin
    reapplies hidden button graphics. This suppresses Unity UI pressed-state
    visuals such as the Pause or Audio button reappearing while held.
@@ -254,8 +254,8 @@ This is BrickGamePro-specific and stays in the plugin.
 
 The current real-device status is:
 
-- D-pad, A/Y, Start/Pause, X/Sound, and Guide/Menu skin switching are routed
-  through the BrickGamePro plugin.
+- D-pad, A/Y, Start/Pause, X/Sound, Guide/Menu Exit Game, and Select skin
+  switching are routed through the BrickGamePro plugin.
 - B is intentionally unmapped because testing showed the previous B pause path
   could exit the process on device.
 - The Canvas/camera layout is visually correct on the tested 4:3 TrimUI panel
@@ -312,8 +312,9 @@ docker exec GlES_Dev bash -lc "grep -E 'plugin armed|Canvas target|camera base|h
 ```
 
 Expected log signs: `directInput=0`, `canvasScale=2.2 canvasY=-1190`,
-`start -> touch 334.0,307.0`, no `b -> touch 334.0,307.0`, and feedback popup
-hooks still installed.
+`skin switch button=back`, `start -> touch 334.0,307.0`, and
+`guide -> touch 433.0,307.0`; there must be no `b -> touch 334.0,307.0`.
+Feedback popup hooks should still be installed.
 
 Useful container replay for the sticky-fire scenario:
 
@@ -322,6 +323,18 @@ BD_PAD_REPLAY="2500:a,2700:dpright" \
 BD_PAD_REPLAY_HOLD=1000 \
 timeout -s INT 12 ./unityloader unity.toml
 ```
+
+For the Select/Guide mapping replay, use SDL's `back` name for the physical
+Select key:
+
+```sh
+BD_PAD_REPLAY="2500:back,5000:guide" \
+BD_PAD_REPLAY_HOLD=140 \
+timeout -s INT 12 ./unityloader unity.toml
+```
+
+Expected plugin logs include `skin message Canvas.ChangeToBlackSkin`,
+`guide down touch=(433.0,307.0)`, and a matching Guide touch-up event.
 
 Expected touch sequence:
 
