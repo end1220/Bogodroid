@@ -29,7 +29,7 @@ hard-coding the resolution.
 
 BrickGamePro uses a plugin-driven GPU present viewport. The `brickgamepro`
 plugin enables the generic viewport pass with title-owned constants:
-`renderScale=2.0`, `anchor=top`, `offsetY=-48`, and nearest-neighbor sampling.
+`renderScale=2.0`, `anchor=top`, `offsetY=-60`, and nearest-neighbor sampling.
 The game image is kept at its original aspect ratio, uniformly enlarged, and
 cropped so the lower virtual-button area falls outside the 4:3 handheld panel.
 
