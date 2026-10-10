@@ -223,6 +223,7 @@ namespace android {
             DEFINE_CLASS_NAME("android/view/InputEvent")
             std::shared_ptr<jnivm::android::view::InputDevice> device;
             long timestamp = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            long downTime = timestamp;
             InputEvent(std::shared_ptr<jnivm::android::view::InputDevice> dev)
                 : device(dev)
             {
@@ -230,6 +231,7 @@ namespace android {
             int getDeviceId();
             int getSource();
             long getEventTime();
+            long getDownTime();
             std::shared_ptr<jnivm::android::view::InputDevice> getDevice();
         };
 
@@ -502,6 +504,7 @@ namespace android {
                 pointers.push_back({0, pX, pY});
             }
             long getEventTime();
+            long getDownTime();
             int getPointerCount();
             int getPointerId(int pointerIndex);
             int getHistorySize();

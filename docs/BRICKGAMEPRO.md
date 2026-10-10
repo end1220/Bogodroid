@@ -27,25 +27,48 @@ Bogodroid resolves the actual display size from SDL/fb0 at runtime, so the same
 TOML can run on 640x480, 1024x768, or another 4:3 handheld panel without
 hard-coding the resolution.
 
-BrickGamePro uses a plugin-driven GPU present viewport. The `brickgamepro`
-plugin enables the generic viewport pass with title-owned constants:
-`renderScale=2.0`, `anchor=top`, `offsetY=-60`, and nearest-neighbor sampling.
-The game image is kept at its original aspect ratio, uniformly enlarged, and
-cropped so the lower virtual-button area falls outside the 4:3 handheld panel.
+BrickGamePro now uses the plugin-driven UGUI Canvas path only. The
+`brickgamepro` plugin keeps the original Unity present path intact and does not
+enable the generic GPU present viewport. This avoids the real-device black
+screen seen with the default-framebuffer GPU copy/crop path.
 
-This replaces the old CPU readback implementation:
+The old root-Canvas-only experiment was misleading: the asset's root Canvas is
+a world-space camera calibration object with serialized local scale around
+`0.004297`, while the visible layout is under `AppContent` and `Pad`. Assigning
+`(2,2,1)` to the root does not change the composition. The current branch-scale
+Canvas path:
 
-- no per-frame `glReadPixels`;
-- no CPU framebuffer staging or texture re-upload;
-- the source framebuffer is copied to a GL texture with `glCopyTexSubImage2D`;
-- the crop shader samples that GPU texture directly.
+1. Hooks `GUIManager.Start()`.
+2. Enumerates the root Canvas children with `Transform.GetChild`,
+   `Component.get_gameObject`, and `Object.get_name`.
+3. Resolves `AppContent` and `Pad` by their serialized names.
+4. Captures each branch's initial local scale once, then applies a relative
+   2x scale and a calibrated vertical anchored position.
 
-The attempted native UGUI Canvas/RectTransform path is kept disabled in the
-plugin for now. In container testing, hooks for `GUIManager.Start()` and
-`CanvasScaler.HandleScaleWithScreenSize()` resolved, but changing the root
-Canvas transform and CanvasScaler scale factor did not change the visible
-composition. The shipped path therefore uses the reliable pure-GPU viewport
-copy/crop.
+Real-device testing found that this Canvas branch changes the outer UGUI layout
+but not the game's dynamic black block content. The `Grid` RectTransform is only
+the pale background grid image; changing it does not move the active game
+objects. Container probes then confirmed the active blocks are ordinary
+world-space Unity objects under the scene camera. For example, forcing Tank mode
+with `BRICKGAME_PROBE_START=1` logs `TankPlayer(Clone)` as a root Transform with
+grid-like `localPosition=(4,9,0)`, not as a child of the UGUI `Grid`.
+
+The current layout fix therefore remains Canvas-first, but it also adjusts the
+world camera in the plugin. `Camera.main` is kept on the normal Unity render
+path, its orthographic size is divided by `kCanvasScale`, and its local position
+is offset so the world-space blocks line up with the enlarged UGUI board. This
+is not GPU present crop: the framebuffer is not copied or cropped at present
+time.
+
+Latest real-device feedback: after matching the dynamic block size to the pale
+Grid background cells, the dynamic playfield was still offset toward the upper
+left. Because this content is world-space and seen through an orthographic
+camera, the visible motion is opposite the camera movement. The plugin now uses
+`kCanvasScale=2.2`, `kCanvasPositionY=-1190`,
+`kWorldCameraOffsetX=0.0`, and `kWorldCameraOffsetY=10.60`. The camera offset
+was derived from the previous `(+2.5, -4.0)` value plus a requested visible
+correction of about `+2.5` cells right and `-13.75` cells down, followed by
+the latest real-device request to move the game area down another `0.25` cell.
 
 ### UGUI Canvas方案交接说明
 
@@ -55,56 +78,39 @@ copy/crop.
 
 当前实验代码在
 `projects/unityloader/plugins/brickgamepro/brickgamepro.cpp`，由
-`kUseCanvasLayout` 控制，当前值为 `false`。已经在 plugin 中实现或解析过：
+`kUseCanvasLayout` 控制，当前值为 `true`。离线解析和运行时验证已经确认：
 
+- `level0` 中 root `Canvas` 的两个实际内容分支是 `AppContent` 和 `Pad`；
 - `GUIManager.Start()` hook：以 `this` 调用 `Component.get_transform()`；
-- `RectTransform.set_anchorMin/Max()`、`set_pivot()`；
-- `RectTransform.set_sizeDelta()`、`set_anchoredPosition()`；
+- 运行时 `Transform.GetChild()` 枚举得到 `Pad`、`AppContent`，与资源层级一致；
+- `RectTransform.get/set_anchoredPosition()`；
 - `Transform.set_localScale()`；
-- `Screen.get_width/height()`；
-- `Canvas.ForceUpdateCanvases()`；
-- `CanvasScaler.set_scaleFactor()`；
-- `CanvasScaler.HandleScaleWithScreenSize()`（实际签名为 0 个显式参数）；
-- IL2CPP 的 `il2cpp_class_get_methods()`、`il2cpp_method_get_name()`、
-  `il2cpp_method_get_param_count()`，用于跨 managed image 查找类和方法。
+- `Screen.get_height()`，用于容器尺寸诊断。
 
-容器中曾成功看到：
+容器中已看到：
 
 ```text
 hooked GUIManager.Start(0)
-hooked CanvasScaler.HandleScaleWithScreenSize(0)
 Canvas RectTransform layout armed
-Canvas RectTransform active screen=640x480 size=1280x960 pos=(0,-192) scale=2.0
+Canvas child[0] Pad=...
+Canvas child[1] AppContent=...
+Canvas target AppContent=... scale=(2.000,2.000,2.000)
+Canvas target Pad=... scale=(2.000,2.000,2.000)
+Grid RectTransform found rt=...
+Grid adjusted extraScale=1.0 anchored=(0.0,0.0) scale=(1.000,1.000,1.000)
+camera base reason=frame pos=(7.61,-1.00,-10.00) size=25.000
 ```
 
-但截图仍然是完整的原始游戏画面和虚拟按钮，没有发生 Canvas 放大/裁切。
-因此当前结论是：调用链可以 hook，但被修改的对象不一定是最终控制显示的
-root Canvas，或者后续 Canvas/CanvasScaler/layout 驱动覆盖了这些属性。不要
-仅凭上述日志重新打开方案，必须先完成下面的对象确认。
+Canvas 方案的关键不是修改 root Canvas 的绝对尺寸，而是修改两个可见
+内容分支的相对 Transform。`kCanvasPositionY` 是游戏逻辑坐标，不按物理
+屏幕像素缩放。`Grid` 节点现在只记录和保持原 scale，因为它是真机已验证的
+背景图，不是真正动态棋盘。
 
-给后续会话的建议顺序：
-
-1. 在 `GUIManager.Start()` 中确认 `this` 的真实类型、GameObject 名称、
-   `Component.get_transform()` 对应对象名称，以及是否确实存在 `Canvas`
-   组件；不要假设 `GUIManager` 一定直接挂在 root Canvas。
-2. 从 GUIManager 的 GameObject 取得真正的 `Canvas` 和 `RectTransform`，
-   优先使用 `Canvas.get_rootCanvas()`；同时记录 `Canvas.renderMode`、
-   `Canvas.scaleFactor`、RectTransform 的实际尺寸和 world corners。
-3. 在 CanvasScaler hook 中记录 `self` 对应的 GameObject/Canvas，确认它
-   与目标 Canvas 是同一个对象。当前只 hook 了方法，没有确认实例归属。
-4. 先只改一个变量做 A/B：先改真正 root Canvas 的 `CanvasScaler.scaleFactor`
-   或 `referenceResolution`，不要同时改 localScale、sizeDelta、anchors 和
-   position。每次改动都用截图验证。
-5. 若 CanvasScaler 是最终驱动者，优先在
-   `HandleScaleWithScreenSize()` 原调用之后设置目标值；需要时 hook
-   `CanvasScaler.OnEnable/OnCanvasHierarchyChanged` 或游戏自己的布局更新，
-   防止下一次 layout 把值写回。
-6. 目标尺寸应按实际屏幕计算，而不是写死物理分辨率：4:3 面板
-   `screenW x screenH` 下，2 倍显示对应约 `screenW/2 x screenH/2` 的
-   逻辑可见区域；顶部对齐后再施加等效 `offsetY=-60` 的上移。
-7. 只有确认 Canvas 路径的截图已经与 GPU viewport 完全一致后，才在 plugin
-   中把 `kUseCanvasLayout` 改为 `true`，并关闭
-   `set_present_viewport_filter()`。失败时保留当前 GPU 路径作为回退。
+动态黑块的修正点是 `Camera.main`：容器中对比确认，单独 Canvas 放大后，
+动态块仍偏右上；应用相机正交缩放后，Tank 模式的 world-space 方块进入放大
+后的棋盘格。调试入口 `BRICKGAME_PROBE_START=1` 会强制调用
+`GameManager.PlayTank()` 以便容器截图验证；默认真机路径不会自动进游戏，也
+不会安装这些玩法探针 hook。
 
 注意：Canvas 方案的所有标题常量、hook 和对象探测都应继续留在
 `brickgamepro` plugin；只有 IL2CPP 通用解析、GPU viewport、触摸注入等
@@ -140,13 +146,24 @@ Mapped original touch buttons:
 | D-pad Up | Up | `(260, 335)` |
 | D-pad Down | Down | `(260, 414)` |
 | A | Fire / A | `(393, 377)` |
-| B | Start / Pause | `(334, 307)` |
+| Y | Fire / A fallback | `(393, 377)` |
+| Start | Start / Pause | `(334, 307)` |
 | X | Sound | `(367, 307)` |
 
 The original top-right buttons are Settings `(400, 307)` and Exit Game
 `(433, 307)`. They are deliberately not mapped to physical controller buttons,
 so normal handheld input cannot open Settings or trigger the in-game exit
 button.
+The original game has no separate Y touch button; Y therefore aliases the
+Fire/A touch target.
+
+The touch-coordinate table remains unchanged by the Canvas layout. The plugin
+now compensates the nine button RectTransforms for the Canvas scale/translation
+and sets their `CanvasRenderer` color alpha to zero. The visible button artwork
+and labels are hidden, while the Unity UI hit regions remain at the original
+640x480 touch coordinates. Container replay confirms the original coordinates
+and multi-pointer `ACTION_POINTER_DOWN/UP` sequence. Real-device testing now
+confirms the mapped controls work, except for the Tetris Down feel tracked below.
 
 Guide/Menu is reserved for skin switching. It does not inject a Settings touch:
 the `brickgamepro` plugin calls Unity's exported `UnitySendMessage` entry point
@@ -158,17 +175,29 @@ not TOML settings.
 
 Implementation:
 
-1. Keep gameplay touch mapping limited to D-pad, A, Start/Pause, and Sound.
+1. Keep gameplay touch mapping limited to D-pad, A/Y, Start/Pause, and Sound.
 2. Leave Settings and Exit Game unbound from ordinary controller buttons.
 3. On Guide/Menu down, schedule one skin-change request for the next render
    frame.
 4. Resolve `UnitySendMessage` from `libunity.so` and call the next
    `Canvas.ChangeTo*Skin()` message.
-5. For held gameplay buttons, refresh active plugin touches every render frame.
-   The generic touch injector converts repeated down events for an already-held
-   pointer into `ACTION_MOVE`, so Unity sees a continuous touch stream instead
-   of a single down edge followed by silence.
-6. Keep the loader's normal Start+Select exit hotkey policy unchanged. BrickGamePro
+5. Direct managed input is currently disabled after real-device testing showed
+   it broke menu/gameplay routing for D-pad/A and made B exit the process.
+   D-pad, A/Y, Start, and X therefore use the plugin touch path again. B is
+   deliberately unmapped.
+6. After every injected touch event and every held-touch refresh, the plugin
+   reapplies hidden button graphics. This suppresses Unity UI pressed-state
+   visuals such as the Pause or Audio button reappearing while held.
+7. For held gameplay buttons, refresh active plugin touches every render frame.
+   The generic touch injector converts
+   repeated down events for an already-held pointer into `ACTION_MOVE`, so Unity
+   sees a continuous touch stream instead of a single down edge followed by
+   silence.
+8. On physical button release, defer the injected touch `ACTION_UP` until the
+   touch has lived for at least 35 ms and at least 1 render frame. This keeps
+   quick physical taps from collapsing into a down/up pair that Unity samples
+   inside one frame.
+9. Keep the loader's normal Start+Select exit hotkey policy unchanged. BrickGamePro
    does not disable it in TOML; accidental exits should be handled separately
    only if real-device testing proves they are a problem.
 
@@ -195,15 +224,48 @@ that the pointer is already down and emits `ACTION_MOVE` rather than another
 holding a direction or Fire felt delayed and less continuous than the Android
 APK's native touch behavior.
 
-## SDL Key Events
+Quick taps get one additional title-specific guard: a physical release only
+schedules the touch release. The plugin sends the real `ACTION_UP` after the
+touch has crossed both the minimum time and frame thresholds. The common
+MotionEvent stub also exposes `getDownTime()` and the plugin injector preserves
+one down-time across a multi-touch sequence, matching Android's input contract
+more closely for click/hold calculations.
 
-Direct SDL/controller key events are still available behind
-`controller_key_events=true`, but BrickGamePro listens to its on-screen Unity UI
-buttons for gameplay. The default remains `controller_key_events=false` to avoid
-double input while the plugin touch path is active.
+## Android Key Events
 
-Use the SDL key path only as an A/B diagnostic if plugin multi-touch still fails
-on device.
+The generic `controller_key_events=true` path converts SDL controller input
+into Android `KeyEvent` objects and passes them to Unity's
+`nativeInjectEvent`; it is not native SDL game input. BrickGamePro's inspected
+controls are Unity UI touch buttons, so the default remains
+`controller_key_events=false` while the plugin touch path is active.
+
+Do not treat Android key injection as a gameplay fix without confirming that
+this title handles those key events.
+
+## Feedback Popup
+
+The original game can randomly show a `FeedBackMenu` / "do you like this game?"
+rating prompt. The plugin blocks this at two levels: it hooks
+`GUIManager.ShowFeedBackMenu()` and `GUIManager.LeaveFeedBack()` as no-ops, and
+it keeps the runtime `FeedBackMenu` and `LeaveFeedBackBtn` GameObjects inactive.
+This is BrickGamePro-specific and stays in the plugin.
+
+## Remaining Issues
+
+The current real-device status is:
+
+- D-pad, A/Y, Start/Pause, X/Sound, and Guide/Menu skin switching are routed
+  through the BrickGamePro plugin.
+- B is intentionally unmapped because testing showed the previous B pause path
+  could exit the process on device.
+- The Canvas/camera layout is visually correct on the tested 4:3 TrimUI panel
+  after `kCanvasPositionY=-1190` and `kWorldCameraOffsetY=10.60`.
+- The Tetris Down feel is still not equivalent to the Android APK. Short Down
+  taps mostly work but can still occasionally be missed, and held Down still
+  drops too aggressively, making it hard to stop fast descent in mid-air. This
+  is deferred for a later pass; do not re-enable the current direct managed
+  input experiment as a quick fix because it caused real-device input routing
+  regressions.
 
 ## Build And Test Notes
 
@@ -213,14 +275,45 @@ Device builds should be made in the `GlES_Dev` container and must keep:
 -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
 ```
 
+Configure the cached device build explicitly before compiling:
+
+```sh
+cmake -S . -B build-device-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+  -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
+```
+
 Build both the loader and the BrickGamePro plugin:
 
 ```text
-cmake --build build-device-release --target unityloader plugin_brickgamepro
+cmake --build build-device-release --target unityloader brickgamepro.so
 ```
 
 Deploy `unityloader`, `unity.toml`, and `unityloader.d/brickgamepro.so`.
 No FFmpeg runtime libraries or `LD_LIBRARY_PATH` override are required.
+
+For the current Windows-hosted container workflow, copy the edited plugin into
+the `GlES_Dev` container, build only the plugin when the loader/core did not
+change, run the container replay, then pull the plugin artifact back to the
+local staging directory:
+
+```powershell
+docker cp projects\unityloader\plugins\brickgamepro\brickgamepro.cpp GlES_Dev:/workspace/Bogodroid/projects/unityloader/plugins/brickgamepro/brickgamepro.cpp
+docker exec GlES_Dev bash -lc "cd /workspace/Bogodroid && cmake --build build-device-release --target brickgamepro.so -j2"
+docker exec GlES_Dev bash -lc "cp /workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so /game/BrickGamePro/unityloader.d/brickgamepro.so && rm -rf /game/BrickGamePro/seq-startpause-1190 && BRICKGAME_PROBE_START=1 GAME_DIR=/game/BrickGamePro W=640 H=480 SECS=45 DUMP_AT=500 CAP_MS=1000 SEQ_DIR=/game/BrickGamePro/seq-startpause-1190 bash /workspace/Bogodroid/scripts/container-run-game-seq.sh"
+docker cp GlES_Dev:/workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so deploy\BrickGamePro\unityloader.d\brickgamepro.so
+```
+
+Useful log check after replay:
+
+```powershell
+docker exec GlES_Dev bash -lc "grep -E 'plugin armed|Canvas target|camera base|hooked GUIManager\.(ShowFeedBackMenu|LeaveFeedBack)|feedback menu|leave feedback|OpenGL Renderer|probe auto-start|start -> touch|b -> touch' -n /game/BrickGamePro/log-seq.txt | tail -n 140"
+```
+
+Expected log signs: `directInput=0`, `canvasScale=2.2 canvasY=-1190`,
+`start -> touch 334.0,307.0`, no `b -> touch 334.0,307.0`, and feedback popup
+hooks still installed.
 
 Useful container replay for the sticky-fire scenario:
 

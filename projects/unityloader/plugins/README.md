@@ -47,9 +47,9 @@ MyGame/
 
 Bundled plugins:
 
-- `brickgamepro`: BrickGamePro GPU present viewport, Guide skin switching, and
-  physical-controller to on-screen-touch mapping. Its title constants live in
-  the plugin, not TOML.
+- `brickgamepro`: BrickGamePro UGUI Canvas layout hooks, Guide skin switching,
+  and physical-controller to on-screen-touch mapping. Its title constants live
+  in the plugin, not TOML.
 - `hollow_knight_viewport`: title-specific viewport and camera fixes.
 - `oddmar_input`: Oddmar-specific input gate and IL2CPP input hooks.
 - `oddmar_video`: Oddmar `libunity.so+0x4c124c` asset-path translation. It is

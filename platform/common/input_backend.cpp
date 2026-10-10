@@ -32,7 +32,12 @@ static int buttonState;
 static std::map<int, int> g_button_remap;
 
 // Plugin-injected touchscreen pointers, keyed by plugin-defined pointer id.
-static std::map<int, std::pair<float, float>> g_injected_active_touches;
+struct InjectedTouchState {
+    float x;
+    float y;
+    long downTime;
+};
+static std::map<int, InjectedTouchState> g_injected_active_touches;
 
 // Some handhelds route D-pad / Select / Start through the keyboard scancode
 // path instead of the joystick path; mirror the same remap there.
@@ -88,6 +93,19 @@ static long bd_stamp_keyevent_downtime(int deviceId, int keyCode, int action, lo
     }
     auto it = g_key_down_time.find(key);
     return (it != g_key_down_time.end()) ? it->second : eventTime;
+}
+
+static long bd_active_touch_downtime_or(long fallback)
+{
+    long downTime = fallback;
+    bool have = false;
+    for (const auto& active : g_injected_active_touches) {
+        if (!have || active.second.downTime < downTime) {
+            downTime = active.second.downTime;
+            have = true;
+        }
+    }
+    return have ? downTime : fallback;
 }
 
 static void bd_axis_synth(BD_AxisDir dir, float value, int sign,
@@ -1400,20 +1418,37 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
     for (const auto& active : g_injected_active_touches) {
         before.push_back({
             active.first,
-            active.second.first,
-            active.second.second
+            active.second.x,
+            active.second.y
         });
     }
 
     const bool wasActive =
         g_injected_active_touches.find(pointerId) != g_injected_active_touches.end();
 
+    long eventDownTime = 0;
     if (down) {
-        g_injected_active_touches[pointerId] = {touchX, touchY};
+        if (wasActive) {
+            auto& active = g_injected_active_touches[pointerId];
+            active.x = touchX;
+            active.y = touchY;
+            eventDownTime = bd_active_touch_downtime_or(active.downTime);
+        } else {
+            auto motionTimeProbe = std::make_shared<jnivm::android::view::MotionEvent>(
+                devices[INPUT_ID_MOUSE], jnivm::android::view::MotionEvent::ACTION_MOVE,
+                touchX, touchY);
+            eventDownTime = bd_active_touch_downtime_or(motionTimeProbe->timestamp);
+            g_injected_active_touches[pointerId] = {
+                touchX,
+                touchY,
+                eventDownTime
+            };
+        }
     } else {
         auto active = g_injected_active_touches.find(pointerId);
         if (active == g_injected_active_touches.end())
             return false;
+        eventDownTime = bd_active_touch_downtime_or(active->second.downTime);
         g_injected_active_touches.erase(active);
     }
 
@@ -1421,8 +1456,8 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
     for (const auto& active : g_injected_active_touches) {
         after.push_back({
             active.first,
-            active.second.first,
-            active.second.second
+            active.second.x,
+            active.second.y
         });
     }
 
@@ -1449,6 +1484,8 @@ bool InputBackend::injectTouch(int pointerId, float x, float y,
 
     auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
         devices[INPUT_ID_MOUSE], action, touchX, touchY);
+    if (eventDownTime > 0)
+        motionEvent->downTime = eventDownTime;
     motionEvent->pointers = eventPointers;
     motionEvent->buttonState = down
         ? jnivm::android::view::MotionEvent::BUTTON_PRIMARY

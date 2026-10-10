@@ -302,6 +302,11 @@ long jnivm::android::view::InputEvent::getEventTime()
     return this->timestamp;
 }
 
+long jnivm::android::view::InputEvent::getDownTime()
+{
+    return this->downTime;
+}
+
 std::shared_ptr<jnivm::android::view::InputDevice> jnivm::android::view::InputEvent::getDevice()
 {
     return this->device;
@@ -417,6 +422,11 @@ float jnivm::android::view::MotionEvent::getPressure(int pointerIndex)
 long jnivm::android::view::MotionEvent::getEventTime()
 {
     return this->timestamp;
+}
+
+long jnivm::android::view::MotionEvent::getDownTime()
+{
+    return this->downTime;
 }
 
 int jnivm::android::view::MotionEvent::getButtonState()
@@ -714,6 +724,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::InputEvent) { FakeJni::Constructor<InputEvent, std::shared_ptr<jnivm::android::view::InputDevice>> {} },
     { FakeJni::Function<&InputEvent::getEventTime> {}, "getEventTime", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&InputEvent::getDownTime> {}, "getDownTime", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputEvent::getDevice> {}, "getDevice", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputEvent::getDeviceId> {}, "getDeviceId", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputEvent::getSource> {}, "getSource", FakeJni::JMethodID::PUBLIC },
@@ -769,6 +780,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::MotionEvent) { FakeJni::Constructor<MotionEvent, std::shared_ptr<jnivm::android::view::InputDevice>, int, int, int> {} },
     { FakeJni::Function<&MotionEvent::getEventTime> {}, "getEventTime", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&MotionEvent::getDownTime> {}, "getDownTime", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getPointerCount> {}, "getPointerCount", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getPointerId> {}, "getPointerId", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&MotionEvent::getHistorySize> {}, "getHistorySize", FakeJni::JMethodID::PUBLIC },
