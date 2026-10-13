@@ -104,6 +104,10 @@ typedef struct BogoPluginApi {
     int (*set_present_viewport_filter)(int enabled, double render_scale,
                                        const char* anchor, int offset_y,
                                        const char* filter);
+    // Optional v8 tail. Copy a BMP path during early init, then dismiss at the
+    // first scene-ready swap. Check struct_size before using these entries.
+    int (*set_startup_image)(const char* path);
+    void (*startup_scene_ready)(void);
 } BogoPluginApi;
 
 typedef int (*BogoPluginInit)(const BogoPluginApi* api);

@@ -328,6 +328,8 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
 #include <memory>
 #include <mutex>
 #include <set>
+#include "startup_trace.h"
+#include "startup_splash.h"
 
 static struct timespec g_bd_start_ts;
 static int g_bd_start_inited = 0;
@@ -674,7 +676,11 @@ namespace il2cpp_patch {
     }
 
     static void* il2cpp_init_hook(const char* name) {
-        void* dom = g_orig_init(name);          // runtime now initialized
+        BD_TIME("before il2cpp runtime init");
+        void* dom;
+        { bd_startup::Scope elapsed("il2cpp runtime init"); dom = g_orig_init(name); }
+        BD_TIME("after il2cpp runtime init");
+        bd_startup::Scope post_init("il2cpp post-init hooks");
         install_once();
         probe_app_paths("post-init");           // L2: early snapshot (may be too early)
         for (int i = 0; i < g_post_init_n; i++) {
@@ -1136,6 +1142,8 @@ namespace plugin_host {
         api.inject_touch = &api_inject_touch;
         api.set_present_viewport = &api_set_present_viewport;
         api.set_present_viewport_filter = &api_set_present_viewport_filter;
+        api.set_startup_image = &bd_startup_set_image;
+        api.startup_scene_ready = &bd_startup_scene_ready;
         api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;
@@ -1426,6 +1434,7 @@ int main(int argc, char* argv[])
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     bd_time_init();
+    bd_startup::init();
     BD_TIME("main() start");
     print_backtrace_on_segfault(); // Registers a signal handler to print backtrace on segfaults
     exit_on_signals(); // Exits when CTRL-C is presset (or SIGINT or SIGTERM is received)
@@ -1446,19 +1455,20 @@ int main(int argc, char* argv[])
     std::string config_path_abs = std::filesystem::absolute(argv[1]).lexically_normal().string();
 
     // Init config, GLES pointers, JNI VN and bindings
-    init_config(config_path_abs.c_str());
+    { bd_startup::Scope elapsed("config parse/chdir"); init_config(config_path_abs.c_str()); }
     // The video blit shader is rewritten at glShaderSource time, so a program
     // cached by an earlier (or pre-rewrite) build would silently skip the
     // rewrite and play the clip to an empty texture. Stamp the cache and drop it
     // when the stamp does not match. See platform/common/shader_cache.h.
-    bd_shader_cache::prepare();
+    { bd_startup::Scope elapsed("shader cache scan"); bd_shader_cache::prepare(); }
     // Load JNI-aware plugins before class registration. Plugins that need
     // IL2CPP defer this early phase and are loaded again below.
     plugin_host::set_jvm(&vm);
     plugin_host::load(nullptr, config_path_abs.c_str());
+    bd_startup_show();
     // sdl_initialize_gles();
-    plugin_host::run_jni_init(&vm);
-    InitJNIBinding(&vm);
+    { bd_startup::Scope elapsed("plugin JNI init"); plugin_host::run_jni_init(&vm); }
+    { bd_startup::Scope elapsed("JNI class registration"); InitJNIBinding(&vm); }
 
     JClass* unityClass = vm.findClass("com/unity3d/player/UnityPlayer").get();
 
@@ -1786,7 +1796,8 @@ int main(int argc, char* argv[])
     BOOT_LOG("calling initJni from libunity.so\n");
     auto activity = std::make_shared<jnivm::android::app::Activity>();
     LocalFrame frame2(vm);
-    unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity);
+    { bd_startup::Scope elapsed("Unity initJni");
+      unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity); }
 
     // In another thread, start the event loop
     std::thread([&backend]() {
@@ -1800,7 +1811,8 @@ int main(int argc, char* argv[])
     BOOT_LOG("calling nativeRecreateGfxState from libunity.so\n");
     auto surface = std::make_shared<jnivm::android::view::Surface>();
     LocalFrame frame3(vm);
-    auto ret2 = unityNRecreateGfxState.invoke(frame3.getJniEnv(), unityPlayerObj.get(), 0, surface);
+    { bd_startup::Scope elapsed("Unity nativeRecreateGfxState");
+      unityNRecreateGfxState.invoke(frame3.getJniEnv(), unityPlayerObj.get(), 0, surface); }
 
     auto unityNRestartACtivityIndicator = unityClass->getMethod("()V", "nativeRestartActivityIndicator");
     if (unityNRestartACtivityIndicator) {
@@ -1824,29 +1836,49 @@ int main(int argc, char* argv[])
 
     auto unityNResume = unityClass->getMethod("()V", "nativeResume");
     BOOT_LOG("calling nativeResume from libunity.so\n");
-    unityNResume.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+    { bd_startup::Scope elapsed("Unity nativeResume");
+      unityNResume.invoke(frame3.getJniEnv(), unityPlayerObj.get()); }
 
     auto unityNFocusChanged = unityClass->getMethod("(Z)V", "nativeFocusChanged");
     BOOT_LOG("calling nativeFocusChanged from libunity.so\n");
-    unityNFocusChanged.invoke(frame3.getJniEnv(), unityPlayerObj.get(), true);
+    { bd_startup::Scope elapsed("Unity nativeFocusChanged");
+      unityNFocusChanged.invoke(frame3.getJniEnv(), unityPlayerObj.get(), true); }
 
     auto unityNRender = unityClass->getMethod("()Z", "nativeRender");
     BD_TIME("before first nativeRender");
     BOOT_LOG("calling nativeRender from libunity.so\n");
     bd_input_observer_begin_frame();
-    auto ret3 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+    { bd_startup::Scope elapsed("first nativeRender");
+      unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get()); }
     BD_TIME("after first nativeRender");
 
-    BOOT_LOG("NativeRender returned %d, Entering loop...\n", ret3.z);
+    BOOT_LOG("Entering nativeRender loop...\n");
     fflush(stdout);
     fflush(stderr);
 
     // nativeRender() returns false after Application.Quit() — must stop rendering
     // or Unity crashes mid-shutdown. OnApplicationQuit has already saved PlayerPrefs;
     // we only flush our own SharedPreferences and fast-exit (skip dtor cascade).
+#ifdef BD_ENABLE_LOG
+    unsigned startup_frames = 0, startup_slow_reports = 0;
+#endif
     while (true) {
         bd_input_observer_begin_frame();
+#ifdef BD_ENABLE_LOG
+        const double render_begin = bd_startup::ms();
+#endif
         auto ret4 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+#ifdef BD_ENABLE_LOG
+        if (render_begin < 20000 && startup_slow_reports < 12) {
+            const double duration = bd_startup::ms() - render_begin;
+            if (duration > 100) {
+                ++startup_slow_reports;
+                BD_LOG("STARTUP", "+%.3fms nativeRender frame=%u duration=%.3fms",
+                       bd_startup::ms(), startup_frames + 2, duration);
+            }
+        }
+        ++startup_frames;
+#endif
         if (jnivm::com::unity3d::player::activity_finish_ready()) {
             BD_LOG("EXIT", "Activity.finish requested and input idle - stopping Unity render loop");
             bd_flush_prefs_impl();

@@ -1,6 +1,7 @@
 #include "plugin_il2cpp.h"
 
 #include <SDL2/SDL.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -25,6 +26,9 @@ static constexpr Uint32 kMinTouchHoldMs = 35;
 static constexpr uint64_t kMinTouchHoldFrames = 1;
 static constexpr const char* kCanvasObject = "Canvas";
 static constexpr const char* kPackageName = "com.perseusgames.brickgamepro";
+static constexpr const char* kStartupImage = "res/drawable/unity_static_splash.bmp";
+static bool g_startup_scene_reported = false;
+static int g_startup_menu = -1;
 static float g_design_width = kDesignWidth;
 static float g_design_height = kDesignHeight;
 static bool g_probe_auto_start = false;
@@ -871,6 +875,7 @@ static uintptr_t gui_start_hook(uintptr_t x0, uintptr_t x1, uintptr_t x2,
                                 uintptr_t x3, uintptr_t x4, uintptr_t x5,
                                 uintptr_t x6, uintptr_t x7)
 {
+    const Uint32 started = SDL_GetTicks();
     uintptr_t ret = 0;
     if (g_gui_start_orig) {
         ret = reinterpret_cast<orig8_t>(g_gui_start_orig)(
@@ -924,6 +929,8 @@ static uintptr_t gui_start_hook(uintptr_t x0, uintptr_t x1, uintptr_t x2,
             apply_canvas_layout();
         }
     }
+    g_api->log("BRICKGAME-STARTUP", "GUIManager.Start completed ticks=%u duration=%ums",
+               SDL_GetTicks(), SDL_GetTicks() - started);
     return ret;
 }
 
@@ -947,6 +954,18 @@ static uintptr_t gui_update_hook(uintptr_t self, uintptr_t mi,
 {
     const uintptr_t ret = reinterpret_cast<orig8_t>(g_gui_update_orig)(
         self, mi, x2, x3, x4, x5, x6, x7);
+    if (!g_startup_scene_reported && g_canvas_rt) {
+        g_startup_scene_reported = true;
+        g_api->log("BRICKGAME-STARTUP", "first GUI Update ticks=%u", SDL_GetTicks());
+        if (g_api->startup_scene_ready) g_api->startup_scene_ready();
+    }
+    if (g_gui_menu_offset && g_startup_menu != 2) {
+        const int menu = *reinterpret_cast<int*>(self + g_gui_menu_offset);
+        if (menu != g_startup_menu) {
+            g_startup_menu = menu;
+            g_api->log("BRICKGAME-STARTUP", "menu=%d ticks=%u", menu, SDL_GetTicks());
+        }
+    }
     bool exit_visible = g_exit_menu_go && m_gameobject_active &&
         m_gameobject_active(g_exit_menu_go, mi_gameobject_active);
     const int exit_action = g_pending_exit_action.exchange(0);
@@ -1792,7 +1811,8 @@ static void on_frame(void*)
 
 static int init(const BogoPluginApi* api)
 {
-    g_api_storage = *api;
+    std::memcpy(&g_api_storage, api,
+        std::min<size_t>(api->struct_size, sizeof(g_api_storage)));
     g_api = &g_api_storage;
     if (g_api->config_get_string) {
         const char* package = g_api->config_get_string("package.packageName", "");
@@ -1860,10 +1880,21 @@ static int init(const BogoPluginApi* api)
 extern "C" int bogodroid_plugin_init(const BogoPluginApi* api)
 {
     if (!api || api->abi_version < 8 ||
-        api->struct_size < sizeof(BogoPluginApi) || !api->log ||
+        api->struct_size < offsetof(BogoPluginApi, set_present_viewport_filter) +
+            sizeof(api->set_present_viewport_filter) || !api->log ||
         !api->so_symbol)
         return -1;
-    if (!api->il2cpp)
+    if (!api->il2cpp) {
+        // The loader invokes plugins once before IL2CPP is loaded.  Register
+        // the static Android splash here so it can cover the native library
+        // loading phase; the full plugin is initialized on the second pass.
+        const char* package = api->config_get_string
+            ? api->config_get_string("package.packageName", "") : "";
+        if (package && std::strcmp(package, brickgamepro::kPackageName) == 0 &&
+            api->struct_size >= offsetof(BogoPluginApi, set_startup_image) +
+                sizeof(api->set_startup_image) && api->set_startup_image)
+            api->set_startup_image(brickgamepro::kStartupImage);
         return BOGO_PLUGIN_DEFERRED;
+    }
     return brickgamepro::init(api);
 }

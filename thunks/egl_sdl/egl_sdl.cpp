@@ -7,6 +7,8 @@
 #include "glad_egl.h"
 #include "gles2.h"
 #include "logging.h"
+#include "startup_trace.h"
+#include "../../projects/unityloader/startup_splash.h"
 #include "platform.h"
 #include "so_util.h"
 #include "thunk_gen.h"
@@ -821,6 +823,7 @@ static int egl_ext_blocked(const char* sym)
 
 static SDL_Window* bd_create_sdl_window(int w, int h)
 {
+    bd_startup::Scope elapsed("SDL window create");
     struct Attempt {
         Uint32 flags;
         const char* label;
@@ -871,6 +874,7 @@ static int bd_sdl_gl_make_current(SDL_GLContext ctx)
 
 static SDL_GLContext bd_create_gles_context(SDL_Window* win)
 {
+    bd_startup::Scope elapsed("SDL GLES context create");
     // Anbernic Mali-G31 已验证 GLES 3.2。只允许 3.2 / 3.1，禁止落到 GLES2，
     // 否则 Unity 会按 ES2 选 renderer，和真机能力、包体设定都不一致。
     static const int versions[][2] = { { 3, 2 }, { 3, 1 } };
@@ -992,8 +996,15 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
 
     if (!skip_swap)
         bd_apply_present_viewport_transform();
-    if (!skip_swap)
+    if (!skip_swap) {
+        const bool splash = bd_startup_draw();
         SDL_GL_SwapWindow(sdl_win);
+        static bool first_game_swap = true;
+        if (!splash && first_game_swap) {
+            first_game_swap = false;
+            bd_startup::mark("first game SDL swap complete");
+        }
+    }
 
 #ifdef BD_ENABLE_LOG
     // Per-frame RSS sample for OOM diagnosis (gameBase load etc.).
@@ -1015,6 +1026,7 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
 {
     if (egl_display)
         return egl_display;
+    bd_startup::Scope elapsed("EGL display/graphics setup");
 
     // The size configured in the TOML (or fb0 when it is left at 0) is what the
     // guest will be told the screen is. Make the framebuffer agree with it
@@ -1025,10 +1037,12 @@ EGLDisplay eglGetDisplay_impl(NativeDisplayType native_display)
     bd_fb_mode_align(bd_device_display_width(), bd_device_display_height());
 
     // Initialize SDL with video (GLEScene: then SDL_GetCurrentDisplayMode).
+    bd_startup::mark("before SDL video init");
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fatal_error("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         // return -1;
     }
+    bd_startup::mark("after SDL video init");
     // Match GLEScene: if TOML width/height <=0, use current display mode.
     bd_device_display_probe();
     int requested_w = bd_device_display_width();
