@@ -4,21 +4,47 @@
 
 - Branch: `BrickGame`.
 - Base: this branch has been advanced to `origin/oddmar` through `a091250`.
+- Current workspace: `D:\Locke\gitee\Bogodroid-brickgame`.
+- The BrickGame linked worktree was moved here on October 12, 2026. Use this
+  directory for builds, container staging, commits, and pushes.
 - BrickGamePro-specific behavior is isolated in `projects/unityloader/plugins/brickgamepro/`.
-- Shared work stays in `unityloader`: multi-pointer `MotionEvent`, plugin touch injection, optional generic present viewport support, and display-size probing.
+- Shared work stays in `unityloader`: multi-pointer `MotionEvent`, plugin touch injection, optional generic present viewport support, display-size probing, and the `plugin_il2cpp.h` metadata/hook helpers.
 - Staging directory: `deploy/BrickGamePro/` is local-only and ignored by git.
 
 ## Runtime Layout
 
-- Port directory on TrimUI Smart Pro: `/mnt/SDCARD/Data/ports/BrickGamePro`.
-- Ports launcher: `/mnt/SDCARD/Roms/PORTS/BrickGamePro.sh`.
+- Current Anbernic deployment (2026-10-12, `172.16.5.40`):
+  `/mnt/mmc/Roms/PORTS/BrickGamePro`, launcher
+  `/mnt/mmc/Roms/PORTS/BrickGamePro.sh`.
+- Previous TrimUI Smart Pro layout: `/mnt/SDCARD/Data/ports/BrickGamePro`,
+  launcher `/mnt/SDCARD/Roms/PORTS/BrickGamePro.sh`.
 - Runtime config: `configs/brickgamepro.toml`, deployed as `unity.toml`.
+- Anbernic launcher source: `scripts/brickgamepro_launch.sh`, based on the
+  device's existing Maximus2/Samurai2 scripts. It creates `conf/shared_prefs`
+  and `cache`, loads the controller database, selects Pulse/ALSA, and runs the
+  loader in the foreground with output in `BrickGamePro/log.txt`.
 - Game package: `com.perseusgames.brickgamepro`, Unity 2018.2 IL2CPP.
 - Required plugin: `unityloader.d/brickgamepro.so`.
 
 Do not deploy Oddmar plugins for BrickGamePro. Do not add Oddmar/FFmpeg
 `LD_LIBRARY_PATH` entries to `BrickGamePro.sh`; this port does not need Android
 video playback or FFmpeg runtime libraries.
+
+The complete Anbernic install has 144 runtime files verified against
+`SHA256SUMS`; launcher, loader, config, and Down-fix plugin hashes also match
+local staging. The user confirmed that the original Down fix improved device
+feel. The subsequent 100 ms / 60 ms timing and font correction passed container
+checks and were deployed together. The current plugin uses 100 ms / 30 ms
+with the font correction retained, per-piece Down hold ownership, A dismissal
+of Game Over, persistent hiding of touch-button graphics, A/B Yes/No handling
+in ExitMenu, and Select skin switching disabled. This build was
+deployed on 2026-10-13; all 144 runtime files passed SHA-256 verification.
+Its validation and deployment status are recorded in
+[UI analysis](BRICKGAMEPRO_UI_ANALYSIS.md). Prior plugins are backed up outside
+unityloader.d. No remote game launch was performed during deployment.
+`init_config` changes cwd to `game/`, so Android file/cache paths are
+`../conf/` and `../cache/`; source/package/OBB paths are `./`. The corrected
+deployment config passed a container replay and PlayerPrefs save.
 
 ## Display And Viewport
 
@@ -33,7 +59,7 @@ enable the generic GPU present viewport. This avoids the real-device black
 screen seen with the default-framebuffer GPU copy/crop path.
 
 The old root-Canvas-only experiment was misleading: the asset's root Canvas is
-a world-space camera calibration object with serialized local scale around
+a camera calibration object with serialized local scale around
 `0.004297`, while the visible layout is under `AppContent` and `Pad`. Assigning
 `(2,2,1)` to the root does not change the composition. The current branch-scale
 Canvas path:
@@ -44,6 +70,14 @@ Canvas path:
 3. Resolves `AppContent` and `Pad` by their serialized names.
 4. Captures each branch's initial local scale once, then applies a relative
    2x scale and a calibrated vertical anchored position.
+
+Runtime font inspection confirms the root Canvas uses Screen Space Camera
+(renderMode=1). At 640x480, its scaleFactor is 0.1875; AppContent's additional
+2.2x transform was magnifying low-resolution dynamic glyphs. The plugin now
+adjusts Text.pixelsPerUnit for the HUD and finish scores by the same 2.2 factor,
+so Unity generates glyphs at their displayed size while preserving layout.
+Container A/B screenshots show clearer text. See
+[font analysis and validation](BRICKGAMEPRO_FONT_ANALYSIS.md).
 
 Real-device testing found that this Canvas branch changes the outer UGUI layout
 but not the game's dynamic black block content. The `Grid` RectTransform is only
@@ -76,9 +110,9 @@ the latest real-device request to move the game area down another `0.25` cell.
 效果仍是保持 4:3 比例、放大约 2 倍、显示游戏上半部分，并把下半部分
 虚拟按钮推出视口。
 
-当前实验代码在
-`projects/unityloader/plugins/brickgamepro/brickgamepro.cpp`，由
-`kUseCanvasLayout` 控制，当前值为 `true`。离线解析和运行时验证已经确认：
+当前布局代码在
+`projects/unityloader/plugins/brickgamepro/brickgamepro.cpp`，固定使用 Canvas
+分支缩放与世界相机调整。离线解析和运行时验证已经确认：
 
 - `level0` 中 root `Canvas` 的两个实际内容分支是 `AppContent` 和 `Pad`；
 - `GUIManager.Start()` hook：以 `this` 调用 `Component.get_transform()`；
@@ -97,7 +131,6 @@ Canvas child[1] AppContent=...
 Canvas target AppContent=... scale=(2.000,2.000,2.000)
 Canvas target Pad=... scale=(2.000,2.000,2.000)
 Grid RectTransform found rt=...
-Grid adjusted extraScale=1.0 anchored=(0.0,0.0) scale=(1.000,1.000,1.000)
 camera base reason=frame pos=(7.61,-1.00,-10.00) size=25.000
 ```
 
@@ -108,9 +141,10 @@ Canvas 方案的关键不是修改 root Canvas 的绝对尺寸，而是修改两
 
 动态黑块的修正点是 `Camera.main`：容器中对比确认，单独 Canvas 放大后，
 动态块仍偏右上；应用相机正交缩放后，Tank 模式的 world-space 方块进入放大
-后的棋盘格。调试入口 `BRICKGAME_PROBE_START=1` 会强制调用
-`GameManager.PlayTank()` 以便容器截图验证；默认真机路径不会自动进游戏，也
-不会安装这些玩法探针 hook。
+后的棋盘格。调试入口 `BRICKGAME_PROBE_START=1` 默认经原 GUI 流程进入 Tank，
+`BRICKGAME_PROBE_GAME=Tetris|TetrisFive` 可选择测试玩法；GUI 不可用时才回退
+到直接调用 `GameManager.Play*()`。暂停验证必须确认日志 `viaGUI=1`。
+默认真机路径不会自动进游戏，也不会安装这些玩法探针 hook。
 
 注意：Canvas 方案的所有标题常量、hook 和对象探测都应继续留在
 `brickgamepro` plugin；只有 IL2CPP 通用解析、GPU viewport、触摸注入等
@@ -129,6 +163,21 @@ touch_mode=true
 dpad_synthesize_hat=false
 controller_key_events=false
 ```
+
+Tetris Down is now a title-specific exception. After resolving and checking
+the original IL2CPP field layout, the plugin queues physical Down edges for
+the active mino's `CheckUserInput`: one original `MoveDown` on the next Update,
+then a 100 ms initial delay and 30 ms repeat interval. Spawning the next mino
+cancels repeat while retaining physical-key ownership: the next piece falls
+naturally until Down is released and pressed again. Release cancels repeat;
+a tap released before Update retains its first step. Menus and non-Tetris
+games keep the touch mapping below. `BRICKGAME_DOWN_FIX=0` restores the original
+Down touch route for comparison. See [Down analysis and container validation](BRICKGAMEPRO_DOWN_ANALYSIS.md).
+
+These timing constants apply only to the TetrisMino variants (game IDs
+1, 10, 11, 12, 14, 19) and TetrisFiveMino (13). Other BrickGamePro games
+and menus retain the original Down touch route; other ports do not load
+this title-specific plugin.
 
 The plugin owns its fixed BrickGamePro layout constants. Coordinates are measured
 in the original 640x480 game layout and are scaled by the generic touch injector
@@ -163,31 +212,33 @@ and sets their `CanvasRenderer` color alpha to zero. The visible button artwork
 and labels are hidden, while the Unity UI hit regions remain at the original
 640x480 touch coordinates. Container replay confirms the original coordinates
 and multi-pointer `ACTION_POINTER_DOWN/UP` sequence. Real-device testing now
-confirms the mapped controls work, except for the Tetris Down feel tracked below.
+confirms the mapped controls work; the new Tetris Down fix still needs device validation.
 
-Select is reserved for skin switching. It does not inject a Settings touch:
-the `brickgamepro` plugin calls Unity's exported `UnitySendMessage` entry point
-against the `Canvas` GameObject, where the `GUIManager` component is attached.
-The first Select press chooses Black because the default skin is already Blue.
-The built-in cycle is Blue, Black, Pink, Green, Yellow, Red, Purple, Orange,
-Blue2, Green2, Silver. These names and the Select mapping are plugin constants,
-not TOML settings.
+Select skin switching is disabled. A single Select press neither changes the
+skin nor injects a Settings touch; Start+Select retains the loader exit hotkey.
+The existing skin preference and original skin resources are preserved.
+
+While ExitMenu is visible, A invokes the original Yes button's
+`GUIManager.ExitGame()` (Unity `Application.Quit()`), and B invokes the original
+No button's `BackSelectGameMenu()`. SDL only queues the request; GUIManager.Update
+executes it on the Unity thread. The plugin consumes the matching release even
+after B closes the popup. Game Over retains its separate A-to-menu behavior.
 
 Implementation:
 
 1. Keep gameplay touch mapping limited to D-pad, A/Y, Start/Pause, and Sound.
 2. Leave Settings unbound; map Guide/Menu to the original Exit Game touch point.
-3. On Select down, schedule one skin-change request for the next render
-   frame.
-4. Resolve `UnitySendMessage` from `libunity.so` and call the next
-   `Canvas.ChangeTo*Skin()` message.
-5. Direct managed input is currently disabled after real-device testing showed
+3. Remove the Select skin-change route; Select alone has no plugin action.
+4. Bind ExitMenu and resolve its original Yes/No methods for A/B.
+5. The old direct managed input experiment was removed after real-device testing showed
    it broke menu/gameplay routing for D-pad/A and made B exit the process.
-   D-pad, A/Y, Start, X, and Guide therefore use the plugin touch path again.
-   B is deliberately unmapped.
-6. After every injected touch event and every held-touch refresh, the plugin
-   reapplies hidden button graphics. This suppresses Unity UI pressed-state
-   visuals such as the Pause or Audio button reappearing while held.
+   D-pad other than the Tetris Down exception, A/Y, Start, X, and Guide use the
+   plugin touch path.
+   B is unmapped outside ExitMenu.
+6. Hook CanvasRenderer.SetColor_Injected and force alpha to zero for discovered
+   control graphics and their descendants. This blocks pressed-state tweens
+   before they can show Pause, Audio, or other original touch buttons. Layout
+   and raycasts remain active; Unity UI changes run on the game thread.
 7. For held gameplay buttons, refresh active plugin touches every render frame.
    The generic touch injector converts
    repeated down events for an already-held pointer into `ACTION_MOVE`, so Unity
@@ -250,22 +301,53 @@ rating prompt. The plugin blocks this at two levels: it hooks
 it keeps the runtime `FeedBackMenu` and `LeaveFeedBackBtn` GameObjects inactive.
 This is BrickGamePro-specific and stays in the plugin.
 
+## Game Over
+
+A press while FinishMenu is visible schedules GUIManager.BackSelectGameMenu
+on the Unity thread. This runs the original Menu-button cleanup and returns
+to SelectingGame; the corresponding A release is consumed. FinishMenu's
+Share, Best, Menu, Replay, Gift, and rating buttons remain inactive, while its
+title and scores remain visible. See [UI analysis and replay evidence](BRICKGAMEPRO_UI_ANALYSIS.md).
+
 ## Remaining Issues
 
 The current real-device status is:
 
-- D-pad, A/Y, Start/Pause, X/Sound, Guide/Menu Exit Game, and Select skin
-  switching are routed through the BrickGamePro plugin.
-- B is intentionally unmapped because testing showed the previous B pause path
-  could exit the process on device.
+- The pre-game Perseus Games splash is an Android Java View displaying
+  `res/drawable/unity_static_splash.png`, not a video. The resource is deployed,
+  but the loader does not implement that View; engine startup time remains
+  visible as blank output. See [splash analysis](BRICKGAMEPRO_SPLASH_ANALYSIS.md).
+- D-pad, A/Y, Start/Pause, X/Sound, and Guide/Menu Exit Game are routed through
+  the BrickGamePro plugin. Select skin switching is disabled.
+- In ExitMenu, A confirms quitting and B cancels; elsewhere B is unmapped.
+  The previous B pause experiment has been removed.
 - The Canvas/camera layout is visually correct on the tested 4:3 TrimUI panel
   after `kCanvasPositionY=-1190` and `kWorldCameraOffsetY=10.60`.
-- The Tetris Down feel is still not equivalent to the Android APK. Short Down
-  taps mostly work but can still occasionally be missed, and held Down still
-  drops too aggressively, making it hard to stop fast descent in mid-air. This
-  is deferred for a later pass; do not re-enable the current direct managed
-  input experiment as a quick fix because it caused real-device input routing
-  regressions.
+- The Tetris Down fix is built and verified in the ARM64 container. IL2CPP
+  disassembly identified shared vertical timers and a held-Down branch that
+  bypasses the repeat timer. The plugin now preserves short taps and schedules
+  original single-step moves at 100 ms / 30 ms. Container checks cover release,
+  pause/resume, movement/rotation combinations, held-key spawn gating, game over, TetrisFive,
+  and Tank fallback. Device feedback confirmed the original 200 ms / 90 ms fix
+  improved Down feel; the user subsequently requested 100 ms / 30 ms to match
+  the original Tetris repeat interval.
+  The new timing still needs device feedback; single-brick,
+  bomb, and line-clear scenarios still need dedicated testing. See
+  [the evidence and reproduction commands](BRICKGAMEPRO_DOWN_ANALYSIS.md).
+  The old direct managed input experiment has been removed.
+
+## Code Ownership And Cleanup (2026-10-13)
+
+`projects/unityloader/plugin_il2cpp.h` provides reusable IL2CPP export binding,
+image/type/method/field lookup, method detours, and bounded metadata diagnostics.
+It uses the existing v8 C plugin API without sharing C++ state across DSOs.
+Game class names, field-layout checks, timing, coordinates, UI policy, and hooks
+remain in `plugins/brickgamepro/brickgamepro.cpp`.
+
+Removed retired Select/UnitySendMessage skin routing, direct-input pulse queues,
+world-object scaling, Grid extra scaling, unused layout switches, and uninstalled
+gameplay probe hooks. The active Canvas/camera path and replay probes remain.
+Cleanup validation is recorded in [UI analysis](BRICKGAMEPRO_UI_ANALYSIS.md).
 
 ## Build And Test Notes
 
@@ -281,6 +363,7 @@ Configure the cached device build explicitly before compiling:
 cmake -S . -B build-device-release \
   -DCMAKE_BUILD_TYPE=Release \
   -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+  -DIL2CPP_TRACE=OFF \
   -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
 ```
 
@@ -300,6 +383,7 @@ local staging directory:
 
 ```powershell
 docker cp projects\unityloader\plugins\brickgamepro\brickgamepro.cpp GlES_Dev:/workspace/Bogodroid/projects/unityloader/plugins/brickgamepro/brickgamepro.cpp
+docker cp projects\unityloader\plugin_il2cpp.h GlES_Dev:/workspace/Bogodroid/projects/unityloader/plugin_il2cpp.h
 docker exec GlES_Dev bash -lc "cd /workspace/Bogodroid && cmake --build build-device-release --target brickgamepro.so -j2"
 docker exec GlES_Dev bash -lc "cp /workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so /game/BrickGamePro/unityloader.d/brickgamepro.so && rm -rf /game/BrickGamePro/seq-startpause-1190 && BRICKGAME_PROBE_START=1 GAME_DIR=/game/BrickGamePro W=640 H=480 SECS=45 DUMP_AT=500 CAP_MS=1000 SEQ_DIR=/game/BrickGamePro/seq-startpause-1190 bash /workspace/Bogodroid/scripts/container-run-game-seq.sh"
 docker cp GlES_Dev:/workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so deploy\BrickGamePro\unityloader.d\brickgamepro.so
@@ -311,8 +395,8 @@ Useful log check after replay:
 docker exec GlES_Dev bash -lc "grep -E 'plugin armed|Canvas target|camera base|hooked GUIManager\.(ShowFeedBackMenu|LeaveFeedBack)|feedback menu|leave feedback|OpenGL Renderer|probe auto-start|start -> touch|b -> touch' -n /game/BrickGamePro/log-seq.txt | tail -n 140"
 ```
 
-Expected log signs: `directInput=0`, `canvasScale=2.2 canvasY=-1190`,
-`skin switch button=back`, `start -> touch 334.0,307.0`, and
+Expected log signs: `touch=1 refresh=1`, `canvasScale=2.2 canvasY=-1190`,
+`start -> touch 334.0,307.0`, and
 `guide -> touch 433.0,307.0`; there must be no `b -> touch 334.0,307.0`.
 Feedback popup hooks should still be installed.
 
@@ -333,8 +417,8 @@ BD_PAD_REPLAY_HOLD=140 \
 timeout -s INT 12 ./unityloader unity.toml
 ```
 
-Expected plugin logs include `skin message Canvas.ChangeToBlackSkin`,
-`guide down touch=(433.0,307.0)`, and a matching Guide touch-up event.
+Expected plugin logs include `guide down touch=(433.0,307.0)` and a matching
+Guide touch-up event. There must be no `skin message` entry.
 
 Expected touch sequence:
 

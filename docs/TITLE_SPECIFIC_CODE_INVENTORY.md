@@ -25,6 +25,15 @@
 
 当前状态：**A1、A2、A3 均已完成并通过容器回放**。A3 的早期实验曾直接跨 DSO 共享 jnivm C++ descriptor/VM 状态，已确认会触发 `std::system_error`/`pthread_mutex_lock` 崩溃；现行实现改为宿主 C ABI，已避开该边界。
 
+### BrickGamePro 代码归属复核（2026-10-13）
+
+`projects/unityloader/plugins/brickgamepro/brickgamepro.cpp` 保存 Canvas/相机布局、
+触摸映射、Tetris Down 节奏与换块限制、字体密度、弹窗和按钮隐藏等专属逻辑。
+不含标题信息的 IL2CPP 导出绑定、元数据查询与方法 detour 辅助代码移至
+`projects/unityloader/plugin_il2cpp.h`，复用现有 v8 C ABI。
+废弃的 Select 换肤、整套 direct-input、世界对象/Grid 缩放和未安装探针已删除。
+多点触摸注入和 present viewport 等通用宿主能力继续留在 unityloader。
+
 ### FFmpeg 可选运行时加载真机回归（2026-10-09）
 
 本轮把 FFmpeg 从 `unityloader` 的链接期依赖改为 Android media bridge 首次使用时 `dlopen`/`dlsym` 加载，并手工完成三款 TrimUI Smart Pro 真机回归：

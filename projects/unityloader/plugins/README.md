@@ -47,9 +47,9 @@ MyGame/
 
 Bundled plugins:
 
-- `brickgamepro`: BrickGamePro UGUI Canvas layout hooks, Guide skin switching,
-  and physical-controller to on-screen-touch mapping. Its title constants live
-  in the plugin, not TOML.
+- `brickgamepro`: BrickGamePro Canvas/camera layout, controller touch mapping,
+  per-piece Tetris Down timing, HUD font density, and popup handling. Select
+  skin switching is removed. Its title constants live in the plugin, not TOML.
 - `hollow_knight_viewport`: title-specific viewport and camera fixes.
 - `oddmar_input`: Oddmar-specific input gate and IL2CPP input hooks.
 - `oddmar_video`: Oddmar `libunity.so+0x4c124c` asset-path translation. It is
@@ -64,6 +64,16 @@ Bundled plugins:
 JNI callbacks must not allow C++ exceptions to cross the C ABI boundary.
 Passing null as the module to `so_symbol` searches all loaded Android modules;
 passing `api->il2cpp` restricts the lookup to that module.
+
+## Shared IL2CPP helpers
+
+C++ plugins can include `plugin_il2cpp.h` and call
+`bogodroid::Il2cppRuntime::bind(api, log_tag)` after IL2CPP initialization.
+The header provides export binding, image/type/method/field lookup, method
+detours, and bounded class diagnostics through the existing v8 C API.
+Run managed lookups and calls on the Unity thread. Keep title names, offsets,
+layout checks, and input/UI policies in each plugin. No C++ state crosses the
+loader/plugin shared-library boundary.
 
 ## Module lookup (ABI v6)
 

@@ -4,12 +4,13 @@
 game_files="./game/"
 support_files="./game/"
 
-android_package_code="./game/"
-android_external_files="./conf/"
-android_files="./conf/"
-android_cache="./cache/"
-android_obb_dirs=["./game/"]
-android_source_dirs=["./game/"]
+# init_config changes cwd to game_files; Android paths below are relative to game/.
+android_package_code="./"
+android_external_files="../conf/"
+android_files="../conf/"
+android_cache="../cache/"
+android_obb_dirs=["./"]
+android_source_dirs=["./"]
 
 
 [package]
@@ -23,7 +24,7 @@ mainIntentBundle = { unity = "-force-gles20" }
 
 displayWidth=0
 displayHeight=0
-displayRefreshRate=60
+displayRefreshRate=0
 displayRotation=0
 displayTouchscreen=1
 language="en"
@@ -51,7 +52,7 @@ offline = true
 
 [audio]
 
-backend = "dummy"
+backend = "auto"
 
 
 [video]
