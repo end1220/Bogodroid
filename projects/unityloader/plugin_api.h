@@ -108,6 +108,12 @@ typedef struct BogoPluginApi {
     // first scene-ready swap. Check struct_size before using these entries.
     int (*set_startup_image)(const char* path);
     void (*startup_scene_ready)(void);
+    // Horizontal BMP strip; loop at frame_ms without extending startup.
+    // Optional tail: older v8 field offsets must remain unchanged.
+    int (*set_startup_animation)(const char* path, int frame_count, int frame_ms);
+    // Silent video, loop until scene ready; fit centered with the requested
+    // maximum height as a fraction of the game window (0 < fraction <= 1).
+    int (*set_startup_video)(const char* path, float height_fraction);
 } BogoPluginApi;
 
 typedef int (*BogoPluginInit)(const BogoPluginApi* api);

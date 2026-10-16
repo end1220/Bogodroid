@@ -1144,6 +1144,8 @@ namespace plugin_host {
         api.set_present_viewport_filter = &api_set_present_viewport_filter;
         api.set_startup_image = &bd_startup_set_image;
         api.startup_scene_ready = &bd_startup_scene_ready;
+        api.set_startup_animation = &bd_startup_set_animation;
+        api.set_startup_video = &bd_startup_set_video;
         api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;

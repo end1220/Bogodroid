@@ -857,6 +857,8 @@ static int bd_sdl_gl_make_current(SDL_GLContext ctx)
 {
     if (!sdl_win)
         return -1;
+    const int startup = bd_startup_make_current(ctx);
+    if (startup != -2) return startup;
     if (SDL_GL_MakeCurrent(sdl_win, ctx) == 0)
         return 0;
     BD_LOG("EGL_SDL", "SDL_GL_MakeCurrent failed: %s (tid=%lu) — unbind+retry",
@@ -954,7 +956,8 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     const char* pause_requested = getenv("BD_EGL_SWAP_PAUSE");
     const bool pause_enabled = pause_requested && *pause_requested &&
         strcmp(pause_requested, "0") != 0;
-    bool skip_swap = cpu_present;
+    const bool startup_present = bd_startup_background_present();
+    bool skip_swap = cpu_present || startup_present;
     if (cpu_present) {
         bd_cpu_present_frame();
         bd_plugin_run_present_callbacks();

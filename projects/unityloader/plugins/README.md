@@ -49,7 +49,9 @@ Bundled plugins:
 
 - `brickgamepro`: BrickGamePro Canvas/camera layout, controller touch mapping,
   per-piece Tetris Down timing, HUD font density, and popup handling. Select
-  skin switching is removed. Its title constants live in the plugin, not TOML.
+  skin switching is removed. Its startup video path and height fraction live
+  in the plugin, while the host performs silent video playback.
+  Its title constants live in the plugin, not TOML.
 - `hollow_knight_viewport`: title-specific viewport and camera fixes.
 - `oddmar_input`: Oddmar-specific input gate and IL2CPP input hooks.
 - `oddmar_video`: Oddmar `libunity.so+0x4c124c` asset-path translation. It is
@@ -64,6 +66,19 @@ Bundled plugins:
 JNI callbacks must not allow C++ exceptions to cross the C ABI boundary.
 Passing null as the module to `so_symbol` searches all loaded Android modules;
 passing `api->il2cpp` restricts the lookup to that module.
+
+## Startup presentation (optional ABI v8 tail)
+
+During early initialization, check `struct_size` before calling
+`set_startup_image(path)`, `set_startup_animation(path, count, frame_ms)`, or
+`set_startup_video(path, height_fraction)`. Paths are relative to the game cwd
+and copied by the host before the temporary plugin handle closes.
+Video is silent, uses optional FFmpeg libraries and preserves its aspect ratio;
+`height_fraction` must be greater than zero and at most one. Images and video
+are centered against black. The host loops animations without a fixed delay.
+Call `startup_scene_ready()` on the first ready scene so the next normal game
+frame takes over the window. Keep game-specific readiness and size choices in
+the plugin; decoding, timestamp scheduling and graphics ownership stay in the host.
 
 ## Shared IL2CPP helpers
 
