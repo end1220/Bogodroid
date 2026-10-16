@@ -1,5 +1,36 @@
 # BrickGamePro Down：IL2CPP 分析与容器修复验证
 
+## 横移与旋转组合输入修复（2026-10-16）
+
+原 APK `TetrisManager.StartMoveRight/StartMoveLeft` 在 `0x6B4290` /
+`0x6B4344` 写 `tetrisMinoStatus=2/1`；`Rotate` 在 `0x6B4614` 将同一字段写为 4。
+`TetrisMino.CheckUserInput` 的 `0x6B6B64–0x6B6B78` 在检测 4 后先清为 0，
+再调用原 Rotate。因而 A 与横移会互相覆盖，旋转后丢失持续横移，无法表示组合输入。
+此前 Down 独立调度只解决了 Down，没有解耦 A/Y 与横移。
+
+插件现在接管正在活动的 TetrisMino / TetrisFiveMino 的 A/Y 按下边沿，
+在原 CheckUserInput 游戏线程调用该对象原版 `Rotate`。它不改横移状态、横移
+计时器、旋转方向、碰撞和贴墙调整规则；原横移、自然重力与 Down 调度照常运行。
+一次按下只旋转一次，短按保留；暂停按下不排队，换块/结束清队列，真实松开前
+保持路由所有权，避免同一边沿又进入触摸路径。菜单、Game Over、退出确认和
+其他小游戏沿用既有按键处理。诊断对照 `BRICKGAME_ROTATE_FIX=0` 可禁用本修复。
+
+容器回放 `scripts/container-brickgamepro-rotate-matrix.sh` 和校验器
+`scripts/verify-brickgamepro-rotate.py` 已通过：普通/Five 各 4 次旋转均实际改变
+子格子的世界坐标形状，左右长按中的旋转各自保留后续横移，Down 重复不中断；
+暂停 1 次 A 不排动作，恢复后的 4 次动作正常（该轮生成方块为不可旋转方块，
+保留原规则）；1 ms 请求的 6 次 A/Y 短按均只产生一次动作。四轮预定超时均为
+exit=124，无崩溃标记。另用最终 LOG=OFF loader/plugin 验证启动与 A/B 退出确认，
+正常 exit=0，零 `[BD-*]` 日志。
+
+证据：`deploy/BrickGamePro/rotate-combo-validation/`，含原版反汇编、前后回放、
+截图、构建日志及 `validation-summary.json`。修复仅在 BrickGamePro 插件。
+已部署至 `172.16.7.34:/mnt/mmc/Roms/PORTS/FatFishBrick`，全部 145 个运行文件
+校验通过，存档未变；LOG 继续关闭。插件 SHA-256：
+`d6d09bd7b764ed85ada2053363cb891f39cc07a05363e44161e581a226e7cc57`。
+
+## Down 修复历史
+
 2026-10-12。修复位于 `projects/unityloader/plugins/brickgamepro/brickgamepro.cpp`，
 已在 `GlES_Dev` ARM64/QEMU 容器构建并验证，早期各版已部署到 `172.16.5.40`。
 最新单块长按/UI 版已于 2026-10-13 掌机恢复联网后部署，详见文末。

@@ -1,22 +1,17 @@
 #!/bin/bash
 
-GAMEDIR="/mnt/mmc/Roms/PORTS/BrickGamePro"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+GAMEDIR="$SCRIPT_DIR/FatFishBrick"
 PROGRAM="$GAMEDIR/unityloader"
 CONFIG="$GAMEDIR/unity.toml"
-LOG="$GAMEDIR/log.txt"
 
 cd "$GAMEDIR" || exit 1
 
 mkdir -p "$GAMEDIR/conf/shared_prefs" "$GAMEDIR/cache" "$GAMEDIR/unityloader.d"
-: > "$LOG"
-
-timestamp() {
-  date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S"
-}
 
 require_file() {
   if [ ! -f "$1" ]; then
-    echo "[$(timestamp)] ERROR: missing $1" >> "$LOG"
+    echo "FatFishBrick: missing $1" >&2
     exit 1
   fi
 }
@@ -50,8 +45,4 @@ else
   fi
 fi
 
-echo "[$(timestamp)] starting BrickGamePro" >> "$LOG"
-echo "[$(timestamp)] program=$PROGRAM" >> "$LOG"
-echo "[$(timestamp)] config=$CONFIG" >> "$LOG"
-
-exec "$PROGRAM" "$CONFIG" >> "$LOG" 2>&1
+exec "$PROGRAM" "$CONFIG" >/dev/null 2>&1

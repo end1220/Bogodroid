@@ -1,4 +1,6 @@
 #include "plugin_il2cpp.h"
+#include "gameover_icons.h"
+#include "exit_icons.h"
 
 #include <SDL2/SDL.h>
 #include <algorithm>
@@ -21,12 +23,13 @@ static constexpr float kDesignHeight = 480.0f;
 static constexpr float kCanvasScale = 2.2f;
 static constexpr float kCanvasPositionY = -1190.0f;
 static constexpr float kWorldCameraOffsetX = 0.0f;
-static constexpr float kWorldCameraOffsetY = 10.60f;
+// One world unit is one cell. Lowering the camera moves dynamic blocks up.
+static constexpr float kWorldCameraOffsetY = 10.55f;
 static constexpr Uint32 kMinTouchHoldMs = 35;
 static constexpr uint64_t kMinTouchHoldFrames = 1;
 static constexpr const char* kCanvasObject = "Canvas";
 static constexpr const char* kPackageName = "com.perseusgames.brickgamepro";
-static constexpr const char* kStartupImage = "res/drawable/unity_static_splash.bmp";
+static constexpr const char* kStartupVideo = "res/drawable/splashvideo.mp4";
 static bool g_startup_scene_reported = false;
 static int g_startup_menu = -1;
 static float g_design_width = kDesignWidth;
@@ -34,6 +37,7 @@ static float g_design_height = kDesignHeight;
 static bool g_probe_auto_start = false;
 static const char* g_probe_game = "Tank";
 static bool g_down_fix_enabled = true;
+static bool g_rotate_fix_enabled = true;
 static bool g_down_trace = false;
 static bool g_font_trace = false;
 static bool g_font_fix_enabled = true;
@@ -59,6 +63,10 @@ static bool g_down_held = false;
 static unsigned g_down_taps = 0;
 static bool g_down_repeat_armed = false;
 static float g_down_next_repeat = 0;
+static std::atomic<bool> g_rotate_gameplay_ready{false};
+static bool g_rotate_a_owned = false;
+static bool g_rotate_y_owned = false;
+static unsigned g_rotate_taps = 0; // Protected by g_down_mutex, bound to this mino.
 
 static int g_probe_auto_start_stage = 0;
 static bool g_probe_logo_dismissed = false;
@@ -76,6 +84,8 @@ struct Vector3 {
     float z;
 };
 
+struct Rect { float x, y, width, height; };
+
 struct Color {
     float r;
     float g;
@@ -91,6 +101,8 @@ struct DownMinoBinding {
     int status = 0, immediate = 0, hold_timer = 0, repeat_timer = 0;
     int single = 0;
     void_method_t move = nullptr, move_single = nullptr;
+    void_method_t rotate = nullptr;
+    void* rotate_mi = nullptr;
     void* move_mi = nullptr;
     void* single_mi = nullptr;
     uintptr_t check_orig = 0;
@@ -157,12 +169,20 @@ static get_v3_t m_tf_get_local_scale = nullptr;
 static void* mi_tf_get_local_scale = nullptr;
 static get_v3_t m_tf_get_local_position = nullptr;
 static void* mi_tf_get_local_position = nullptr;
+static get_v3_t m_tf_get_position = nullptr;
+static void* mi_tf_get_position = nullptr;
 static set_v3_t m_tf_set_local_position = nullptr;
 static void* mi_tf_set_local_position = nullptr;
 static set_v2_t m_rt_set_anchored_position = nullptr;
 static void* mi_rt_set_anchored_position = nullptr;
 static get_v2_t m_rt_get_anchored_position = nullptr;
 static void* mi_rt_get_anchored_position = nullptr;
+static Rect (*m_rt_get_rect)(void*, void*) = nullptr;
+static void* mi_rt_get_rect = nullptr;
+static get_v2_t m_rt_get_size_delta = nullptr;
+static void* mi_rt_get_size_delta = nullptr;
+static set_v2_t m_rt_set_size_delta = nullptr;
+static void* mi_rt_set_size_delta = nullptr;
 static canvas_renderer_set_color_t m_canvas_renderer_set_color = nullptr;
 static void* mi_canvas_renderer_set_color = nullptr;
 static uintptr_t g_renderer_set_color_orig = 0;
@@ -213,7 +233,17 @@ static void* g_canvas_rt = nullptr;
 static void* g_app_content_rt = nullptr;
 static void* g_pad_rt = nullptr;
 static void* g_grid_rt = nullptr;
+struct CasingSide {
+    void* rt = nullptr;
+    Vector2 position = {}, size = {};
+    bool ready = false;
+};
+static CasingSide g_casing_left, g_casing_right;
 static void* g_feedback_menu_go = nullptr;
+// ShowFeedBackMenu can replace IntroductionMenu.Start at playCounts 5/10.
+// Dismiss via the original No action on the next Unity Update; hiding the
+// GameObject alone leaves menuStatus=None and makes the controls inert.
+static bool g_pending_feedback_dismiss = false;
 static void* g_leave_feedback_go = nullptr;
 static void* g_finish_menu_go = nullptr;
 static void* g_exit_menu_go = nullptr;
@@ -248,6 +278,7 @@ static int g_runtime_probe_logged = 0;
 static int g_transform_scan_requests = 0;
 static bool g_tetris_classes_logged = false;
 static int g_component_log_count = 0;
+static std::set<void*> g_exit_shifted_rects;
 static int g_current_game_log_count = 0;
 static std::set<void*> g_runtime_seen_nodes;
 
@@ -606,6 +637,10 @@ static void discover_control_rects(void* transform, int depth,
             ? m_object_get_name(child_go, mi_object_get_name)
             : nullptr;
         const std::string name = managed_string_utf8(child_name);
+        if (transform == g_app_content_rt) {
+            if (name == "Casing_Left") g_casing_left.rt = child;
+            if (name == "Casing_Right") g_casing_right.rt = child;
+        }
         bind_control_rect(child, name);
         bind_feedback_node(child, child_go, name);
         const bool hidden_control = hidden_control_tree || find_control_rect(name);
@@ -615,6 +650,22 @@ static void discover_control_rects(void* transform, int depth,
             g_finish_menu_go = child_go;
         if (name == "ExitMenu")
             g_exit_menu_go = child_go;
+        if (g_exit_menu_go && transform == m_gameobject_get_transform(
+                g_exit_menu_go, mi_gameobject_get_transform)) {
+            // Move all original children together, including FrameButton's
+            // dashed Yes/No border. The panel background is on ExitMenu itself.
+            // Keep the decoration fixed; apply once per node, even on a rescan.
+            if (name != "ExitGameIcon" &&
+                m_rt_get_anchored_position && m_rt_set_anchored_position &&
+                g_exit_shifted_rects.insert(child).second) {
+                Vector2 position = m_rt_get_anchored_position(
+                    child, mi_rt_get_anchored_position);
+                position.y -= 260.0f;
+                m_rt_set_anchored_position(child, position,
+                                            mi_rt_set_anchored_position);
+            }
+            add_exit_icon(transform);
+        }
         if (g_finish_menu_go && transform == m_gameobject_get_transform(
                 g_finish_menu_go, mi_gameobject_get_transform) &&
             (name == "ShareBtn" || name == "LeaderBoardBtn" ||
@@ -624,6 +675,7 @@ static void discover_control_rects(void* transform, int depth,
             m_gameobject_set_active(child_go, false, mi_gameobject_set_active);
             g_api->log("BRICKGAME", "Finish action hidden %s go=%p",
                        name.c_str(), child_go);
+            add_gameover_icon(child, transform, name.c_str());
         }
         if (child_go && g_text_type && m_gameobject_get_component &&
             m_text_ppu && m_text_size) {
@@ -782,6 +834,41 @@ static void refresh_hidden_ui()
     suppress_feedback_ui();
 }
 
+static void fit_casing_sides()
+{
+    if (!g_canvas_rt || !g_app_content_rt || !m_rt_get_rect ||
+        !m_rt_get_size_delta || !m_rt_set_size_delta)
+        return;
+    const Rect canvas = m_rt_get_rect(g_canvas_rt, mi_rt_get_rect);
+    const Rect app = m_rt_get_rect(g_app_content_rt, mi_rt_get_rect);
+    const Vector3 scale = m_tf_get_local_scale(g_app_content_rt, mi_tf_get_local_scale);
+    if (canvas.width <= 0 || scale.x <= 0) return;
+    const float half_width = canvas.width / (2.0f * scale.x);
+    const float center_x = m_rt_get_anchored_position(
+        g_app_content_rt, mi_rt_get_anchored_position).x / scale.x;
+    // Expand the two decorative sprites outwards, retaining their inner edges.
+    // One physical pixel of overscan avoids a subpixel seam at the screen edge.
+    const float overscan = canvas.width / (m_screen_width(mi_screen_width) * scale.x);
+    const auto fit = [&](CasingSide& side, bool left) {
+        if (!side.rt) return;
+        if (!side.ready) {
+            side.position = m_rt_get_anchored_position(side.rt, mi_rt_get_anchored_position);
+            side.size = m_rt_get_size_delta(side.rt, mi_rt_get_size_delta);
+            side.ready = true;
+        }
+        const float extension = std::max(0.0f, left
+            ? half_width + center_x + app.x + side.position.x + overscan
+            : half_width - center_x - (app.x + app.width + side.position.x) + overscan);
+        Vector2 position = side.position, size = side.size;
+        position.x += left ? -extension : extension;
+        size.x += extension;
+        m_rt_set_anchored_position(side.rt, position, mi_rt_set_anchored_position);
+        m_rt_set_size_delta(side.rt, size, mi_rt_set_size_delta);
+    };
+    fit(g_casing_left, true);
+    fit(g_casing_right, false);
+}
+
 static void apply_canvas_layout()
 {
     if (!g_canvas_layout_ready)
@@ -849,6 +936,7 @@ static void apply_canvas_layout()
     };
     apply_target(g_app_content_rt, "AppContent");
     apply_target(g_pad_rt, "Pad");
+    fit_casing_sides();
     apply_control_rects();
     suppress_feedback_ui();
     g_canvas_targets_logged = true;
@@ -954,6 +1042,17 @@ static uintptr_t gui_update_hook(uintptr_t self, uintptr_t mi,
 {
     const uintptr_t ret = reinterpret_cast<orig8_t>(g_gui_update_orig)(
         self, mi, x2, x3, x4, x5, x6, x7);
+    if (g_pending_feedback_dismiss && m_gui_back_select_game) {
+        g_pending_feedback_dismiss = false;
+        const int before = g_gui_menu_offset
+            ? *reinterpret_cast<int*>(self + g_gui_menu_offset) : -1;
+        reinterpret_cast<void_method_t>(m_gui_back_select_game)(
+            reinterpret_cast<void*>(self), mi_gui_back_select_game);
+        suppress_feedback_ui();
+        const int after = g_gui_menu_offset
+            ? *reinterpret_cast<int*>(self + g_gui_menu_offset) : -1;
+        g_api->log("BRICKGAME", "feedback skipped via original No action menu=%d->%d", before, after);
+    }
     if (!g_startup_scene_reported && g_canvas_rt) {
         g_startup_scene_reported = true;
         g_api->log("BRICKGAME-STARTUP", "first GUI Update ticks=%u", SDL_GetTicks());
@@ -1096,6 +1195,26 @@ BRICKGAME_COMPONENT_HOOK(tank_player_start_hook, g_tank_player_start_orig,
 BRICKGAME_COMPONENT_HOOK(tank_enemy_start_hook, g_tank_enemy_start_orig,
                          "TankEnemy.Start")
 
+static std::string mino_shape(void* object)
+{
+    if (!m_component_get_transform || !m_tf_get_child_count ||
+        !m_tf_get_child || !m_tf_get_position)
+        return "?";
+    void* transform = m_component_get_transform(object, mi_component_get_transform);
+    if (!transform)
+        return "?";
+    const Vector3 origin = m_tf_get_position(transform, mi_tf_get_position);
+    std::string shape;
+    const int count = std::min(16, m_tf_get_child_count(transform, mi_tf_get_child_count));
+    for (int i = 0; i < count; ++i) {
+        void* child = m_tf_get_child(transform, i, mi_tf_get_child);
+        const Vector3 p = m_tf_get_position(child, mi_tf_get_position);
+        shape += std::to_string(std::lround((p.x - origin.x) * 10)) + "," +
+                 std::to_string(std::lround((p.y - origin.y) * 10)) + ";";
+    }
+    return shape;
+}
+
 static uintptr_t down_check(DownMinoBinding& binding, uintptr_t self,
                             uintptr_t mi)
 {
@@ -1115,6 +1234,8 @@ static uintptr_t down_check(DownMinoBinding& binding, uintptr_t self,
     const bool playing = ready && m_time_scale(nullptr, mi_time_scale) > 0;
     g_down_gameplay_ready.store(ready, std::memory_order_release);
     g_down_gameplay_running.store(playing, std::memory_order_release);
+    g_rotate_gameplay_ready.store(ready && binding.rotate,
+                                  std::memory_order_release);
     if (ready)
         g_down_update_ticks.store(SDL_GetTicks(), std::memory_order_release);
 
@@ -1123,6 +1244,24 @@ static uintptr_t down_check(DownMinoBinding& binding, uintptr_t self,
     if (playing) {
         const float now = m_time(nullptr, mi_time);
         std::lock_guard<std::recursive_mutex> lock(g_down_mutex);
+        if (g_rotate_taps) {
+            --g_rotate_taps;
+            // Original UI Rotate overwrites the horizontal status with 4;
+            // CheckUserInput then clears it to Idle. Call the original rotation
+            // directly, leaving horizontal hold/timers untouched. Rotate owns
+            // all collision checks, wall adjustment and rotation restrictions.
+            const std::string before = g_down_trace ? mino_shape(object) : "";
+            binding.rotate(object, binding.rotate_mi);
+            if (g_down_trace) {
+                const std::string after = mino_shape(object);
+                g_api->log("BRICKGAME",
+                    "ROTATE step %s self=%p time=%.3f status=%d shape=%s->%s queued=%u",
+                    binding.name, object, static_cast<double>(now),
+                    *reinterpret_cast<int*>(object + binding.status),
+                    before.c_str(), after.c_str(),
+                    g_rotate_taps);
+            }
+        }
         bool step = g_down_taps != 0;
         const bool tap = step;
         if (step) {
@@ -1176,6 +1315,7 @@ static uintptr_t down_check(DownMinoBinding& binding, uintptr_t self,
         std::lock_guard<std::recursive_mutex> lock(g_down_mutex);
         g_down_taps = 0;
         g_down_repeat_armed = false;
+        g_rotate_taps = 0;
     }
     void* transform = g_down_trace && m_component_get_transform &&
         m_tf_get_local_position ? m_component_get_transform(
@@ -1207,6 +1347,7 @@ static uintptr_t down_start(DownMinoBinding& binding, uintptr_t self, uintptr_t 
     std::lock_guard<std::recursive_mutex> lock(g_down_mutex);
     g_down_repeat_armed = false;
     g_down_taps = 0;
+    g_rotate_taps = 0;
     if (g_down_trace)
         g_api->log("BRICKGAME", "DOWN spawn %s self=%p repeatReset=1 held=%d",
                    binding.name, reinterpret_cast<void*>(self), g_down_held ? 1 : 0);
@@ -1232,10 +1373,12 @@ static uintptr_t down_finish_hook(uintptr_t self, uintptr_t mi,
         g_api->log("BRICKGAME", "DOWN finish");
     g_down_gameplay_ready.store(false, std::memory_order_release);
     g_down_gameplay_running.store(false, std::memory_order_release);
+    g_rotate_gameplay_ready.store(false, std::memory_order_release);
     {
         std::lock_guard<std::recursive_mutex> lock(g_down_mutex);
         g_down_taps = 0;
         g_down_repeat_armed = false;
+        g_rotate_taps = 0;
         // Keep ownership until UP so an edge is never sent to both routes.
     }
     g_down_mino.active_self = 0;
@@ -1287,6 +1430,34 @@ static bool handle_tetris_down(bool down)
     return true;
 }
 
+static bool handle_tetris_rotate(int button, bool down)
+{
+    if (button != SDL_CONTROLLER_BUTTON_A && button != SDL_CONTROLLER_BUTTON_Y)
+        return false;
+    std::lock_guard<std::recursive_mutex> lock(g_down_mutex);
+    bool& owned = button == SDL_CONTROLLER_BUTTON_A
+        ? g_rotate_a_owned : g_rotate_y_owned;
+    if (owned) {
+        if (!down)
+            owned = false;
+        return true;
+    }
+    if (!down || !g_rotate_fix_enabled ||
+        !g_rotate_gameplay_ready.load(std::memory_order_acquire) ||
+        SDL_GetTicks() - g_down_update_ticks.load(std::memory_order_acquire) > 250)
+        return false;
+    owned = true;
+    // Preserve short taps, never repeat on hold, and swallow paused presses.
+    // Start/FinishGame clear the queue so it cannot rotate a successor piece.
+    if (g_down_gameplay_running.load(std::memory_order_acquire))
+        ++g_rotate_taps;
+    if (g_down_trace)
+        g_api->log("BRICKGAME", "ROTATE edge %s ticks=%u queued=%u",
+            button == SDL_CONTROLLER_BUTTON_A ? "a" : "y",
+            SDL_GetTicks(), g_rotate_taps);
+    return true;
+}
+
 static void install_down_binding(void* image, DownMinoBinding& binding,
                                  uintptr_t hook)
 {
@@ -1315,6 +1486,9 @@ static void install_down_binding(void* image, DownMinoBinding& binding,
     if (valid)
         binding.ready = g_il2cpp.hook_method(image, "", binding.name, "CheckUserInput", 0,
                                     hook, &binding.check_orig);
+    if (binding.ready && g_rotate_fix_enabled)
+        g_il2cpp.resolve_call(image, "", binding.name, "Rotate", 0,
+            reinterpret_cast<void**>(&binding.rotate), &binding.rotate_mi);
     g_api->log("BRICKGAME", "Down fix %s %s enabled=%d initial=%.0fms repeat=%.0fms",
                binding.name, binding.ready ? "armed" : "unavailable",
                g_down_fix_enabled ? 1 : 0,
@@ -1338,8 +1512,9 @@ static uintptr_t gui_show_feedback_hook(uintptr_t, uintptr_t, uintptr_t,
                                         uintptr_t, uintptr_t)
 {
     suppress_feedback_ui();
+    g_pending_feedback_dismiss = true;
     if (g_api)
-        g_api->log("BRICKGAME", "blocked GUIManager.ShowFeedBackMenu");
+        g_api->log("BRICKGAME", "blocked GUIManager.ShowFeedBackMenu; queued No action");
     return 0;
 }
 
@@ -1373,6 +1548,8 @@ static void post_il2cpp_init(void*)
         return;
     }
 
+    bind_gameover_icons(g_il2cpp, g_api);
+    bind_exit_icon(g_il2cpp, g_api);
     bool ok = true;
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Component", "get_transform", 0,
                        reinterpret_cast<void**>(&m_component_get_transform),
@@ -1412,6 +1589,9 @@ static void post_il2cpp_init(void*)
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Transform", "get_localPosition",
                        0, reinterpret_cast<void**>(&m_tf_get_local_position),
                        &mi_tf_get_local_position);
+    if (g_down_trace)
+        g_il2cpp.resolve_call(core, "UnityEngine", "Transform", "get_position", 0,
+            reinterpret_cast<void**>(&m_tf_get_position), &mi_tf_get_position);
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Transform", "set_localPosition",
                        1, reinterpret_cast<void**>(&m_tf_set_local_position),
                        &mi_tf_set_local_position);
@@ -1426,6 +1606,12 @@ static void post_il2cpp_init(void*)
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Screen", "get_width", 0,
                        reinterpret_cast<void**>(&m_screen_width),
                        &mi_screen_width);
+    g_il2cpp.resolve_call(core, "UnityEngine", "RectTransform", "get_rect", 0,
+        reinterpret_cast<void**>(&m_rt_get_rect), &mi_rt_get_rect);
+    g_il2cpp.resolve_call(core, "UnityEngine", "RectTransform", "get_sizeDelta", 0,
+        reinterpret_cast<void**>(&m_rt_get_size_delta), &mi_rt_get_size_delta);
+    g_il2cpp.resolve_call(core, "UnityEngine", "RectTransform", "set_sizeDelta", 1,
+        reinterpret_cast<void**>(&m_rt_set_size_delta), &mi_rt_set_size_delta);
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Screen", "get_height", 0,
                        reinterpret_cast<void**>(&m_screen_height),
                        &mi_screen_height);
@@ -1453,7 +1639,8 @@ static void post_il2cpp_init(void*)
     g_game_manager_current_obj_offset = g_il2cpp.field_offset_for(
         asm_image, "GameManager", "currentGameManagerObj");
     g_game_status_offset = g_il2cpp.field_offset_for(asm_image, "GameManager", "playGameStatus");
-    if ((g_down_fix_enabled || g_down_trace) && g_game_status_offset == 0x90) {
+    if ((g_down_fix_enabled || g_rotate_fix_enabled || g_down_trace) &&
+        g_game_status_offset == 0x90) {
         bool down_ok = g_il2cpp.resolve_call(core, "UnityEngine", "Time", "get_time", 0,
             reinterpret_cast<void**>(&m_time), &mi_time);
         down_ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Time", "get_timeScale", 0,
@@ -1659,6 +1846,8 @@ static void on_button(int button, int down, void*)
     if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN &&
         handle_tetris_down(down != 0))
         return;
+    if (handle_tetris_rotate(button, down != 0))
+        return;
     if (!g_api || !g_api->inject_touch)
         return;
     for (auto& point : g_points) {
@@ -1834,6 +2023,8 @@ static int init(const BogoPluginApi* api)
         g_down_trace = down_trace && std::strcmp(down_trace, "1") == 0;
         const char* down_fix = g_api->getenv("BRICKGAME_DOWN_FIX");
         g_down_fix_enabled = !down_fix || std::strcmp(down_fix, "0") != 0;
+        const char* rotate_fix = g_api->getenv("BRICKGAME_ROTATE_FIX");
+        g_rotate_fix_enabled = !rotate_fix || std::strcmp(rotate_fix, "0") != 0;
         const char* font_trace = g_api->getenv("BRICKGAME_FONT_TRACE");
         g_font_trace = font_trace && std::strcmp(font_trace, "1") == 0;
         const char* font_fix = g_api->getenv("BRICKGAME_FONT_FIX");
@@ -1891,9 +2082,9 @@ extern "C" int bogodroid_plugin_init(const BogoPluginApi* api)
         const char* package = api->config_get_string
             ? api->config_get_string("package.packageName", "") : "";
         if (package && std::strcmp(package, brickgamepro::kPackageName) == 0 &&
-            api->struct_size >= offsetof(BogoPluginApi, set_startup_image) +
-                sizeof(api->set_startup_image) && api->set_startup_image)
-            api->set_startup_image(brickgamepro::kStartupImage);
+            api->struct_size >= offsetof(BogoPluginApi, set_startup_video) +
+                sizeof(api->set_startup_video) && api->set_startup_video)
+            api->set_startup_video(brickgamepro::kStartupVideo, 3.0f / 4.0f);
         return BOGO_PLUGIN_DEFERRED;
     }
     return brickgamepro::init(api);

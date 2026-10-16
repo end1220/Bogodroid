@@ -6,23 +6,30 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('root', type=Path)
+parser.add_argument('--case', choices=('finish', 'buttons', 'exit'))
 args = parser.parse_args()
 summary = {}
-for name in ('finish', 'buttons', 'exit'):
+for name in (args.case,) if args.case else ('finish', 'buttons', 'exit'):
     directory = args.root / name
     if not directory.is_dir():
         directory = args.root / f'seq-ui-{name}'
     text = (directory / 'log.txt').read_text(encoding='utf-8', errors='replace')
     if name != 'exit':
         assert 'viaGUI=1' in text, name
-    assert not re.search(r'\[BD-SEGV\]|terminate called|Invalid Reference|fatal error', text, re.I), name
+    assert not re.search(r'\[BD-SEGV\]|\[BD-ANDROID\] CRASH: signal|terminate called|Invalid Reference|fatal error', text, re.I), name
+    assert 'Finish icons bindings ready=1' in text, (name, 'icon bindings unavailable')
+    icons = re.findall(r'Finish icon (\w+) installed=(\d)', text)
+    assert icons == [('GameOver', '1')], (name, icons)
+    assert re.search(r'Finish icon GameOver installed=1 center=\(0\.0,136\.0\) size=\(310\.6,183\.2\)', text), name
+    assert 'Finish icons managed call failed' not in text
+    assert 'Finish icons PNG load failed' not in text
     snapshots = re.findall(r'UI hidden renderers=(\d+) badAlpha=(\d+) actions=(\d+) activeActions=(\d+)', text)
     assert len(snapshots) >= 4, (name, 'missing visibility checks')
     assert all(int(renderers) >= 19 and bad == '0' and actions == '6' and active == '0'
                for renderers, bad, actions, active in snapshots), (name, snapshots)
     assert 'hooked CanvasRenderer.SetColor_Injected(1)' in text
     summary[name] = dict(visibility_checks=len(snapshots), hidden_renderers=int(snapshots[-1][0]),
-                         hidden_finish_actions=6, bad_alpha=0, active_actions=0)
+                         hidden_finish_actions=6, decorative_icons=1, bad_alpha=0, active_actions=0)
     if name == 'finish':
         assert 'DOWN finish' in text and 'Finish visible=1' in text
         assert text.count('Finish A close visible=0 menu=2') == 1

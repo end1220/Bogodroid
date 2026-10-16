@@ -1,50 +1,103 @@
 # BrickGamePro Port Notes
 
+## Current release (2026-10-16)
+
+The handheld menu entry is **FatFishBrick (肥鱼方块)**. The Android package
+`com.perseusgames.brickgamepro`, plugin name and save keys retain their original
+identity. Both handhelds have the release with the corrected ExitMenu dashed
+border; the user confirmed the final layout works.
+
+| Device | Host | Game directory | Launcher |
+| --- | --- | --- | --- |
+| Trimui, 1024×768 | `172.16.7.18` | `/mnt/SDCARD/Data/ports/FatFishBrick` | `/mnt/SDCARD/Roms/PORTS/FatFishBrick.sh` |
+| Anbernic, 640×480 | `172.16.7.34` | `/mnt/mmc/Roms/PORTS/FatFishBrick` | `/mnt/mmc/Roms/PORTS/FatFishBrick.sh` |
+
+- Tetris and TetrisFive Down: immediate step, 100 ms initial repeat delay,
+  then 30 ms repeats. Holding Down applies only to the current piece.
+- A/Y rotation calls the original Rotate on the Unity thread independently of
+  horizontal movement and Down. Other games keep their original touch route.
+- Game Over: original actions hidden, one transparent decoration, A returns
+  through the original menu action. ExitMenu: A quits and B cancels; artwork
+  keeps its 571:464 aspect, and all original children including the dashed
+  Yes/No frame move down together by 260 logical units.
+- Touch controls remain invisible; Select skin switching is disabled. Skipping
+  the rating popup completes its original No action so game selection is ready.
+- HUD font density is corrected. Camera Y offset is 10.55; only the outer casing
+  expands to the screen edges, preserving square gameplay cells.
+- Splash is silent, centered, and fitted within 3/4 of window height, retaining
+  its aspect ratio. The latest 8-second source is already sped up. Runtime media
+  is 856×480 / 24 fps H.264 baseline, about 400 kbps. Video loops during startup
+  and releases its decoder, buffers and GL context at scene handoff.
+
+Release builds keep LOG/TRACE/VERBOSE/IL2CPP_TRACE OFF and explicitly set
+`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`; `JNIVM_ENABLE_DEBUG` stays ON for JNI class
+registration. The validated handheld plugin hash is
+`fecb2099c79a26cf9af30a08f20cfae35e22e195aa940c9facfc74feb0638022`;
+loader hash is `2f8fe184b1b1c531d66cb54bbda1bdd887934a92c802eeb36899df5e2aec8402`;
+runtime video hash is `b472c50e6d2554917ab9b0c4698b61bd80578236af5c1d5a9d09b54c08478bf5`.
+These identify the user-tested deployment before source cleanup; future rebuilds
+may differ. Both devices passed all 145 runtime hashes. Trimui framebuffer
+capture and Guide → B → Guide → A replay confirmed the border, layout and
+normal exit; logs had no `[BD-*]` lines. Temporary test files were removed.
+
+Current runtime staging is ignored `deploy/BrickGamePro/`. The final layout
+proof is in `exit-border-validation/`; older desktop snapshots and deployment
+TARs are historical copies and are not automatically refreshed by a source build.
+See [startup/video analysis](BRICKGAMEPRO_SPLASH_ANALYSIS.md),
+[UI and artwork](BRICKGAMEPRO_UI_ANALYSIS.md), and
+[Down/rotation evidence](BRICKGAMEPRO_DOWN_ANALYSIS.md) for validation history.
+
+## Source cleanup verification (2026-10-16)
+
+The cleanup removes unused ExitMenu getter bindings and its unused read helper,
+as well as the redundant startup frame-upload flag. The retired BrickGame BMP
+preparation script is deleted. Generic image/animation/video APIs remain reusable
+loader capabilities; all BrickGame constants, artwork and IL2CPP rules stay in
+its plugin. Asset tooling and processed UI PNGs are tracked with that plugin;
+game resource packages, saves and local deployment captures remain ignored.
+
+A fresh stripped Release loader/plugin build with every log switch OFF passed
+Guide → B → Guide → A in ARM64/QEMU, exiting normally after 35.8 seconds.
+The final screenshot retains the corrected image aspect and Yes/No border;
+no crash markers or `[BD-*]` lines were present. Existing rotation and Game Over
+diagnostic evidence passed their validators again; Python and shell syntax and
+`git diff --check` passed. Evidence and source-cleanup binaries are kept in
+`deploy/BrickGamePro/source-cleanup-validation/`, separately from deployed files.
+This source-cleanup rebuild was not deployed to the handhelds.
+
 ## Branch Status
 
 - Branch: `BrickGame`.
-- Base: this branch has been advanced to `origin/oddmar` through `a091250`.
+- Shared history includes `484072d` on `oddmar`. The later Oddmar commit
+  `68d0abc` is not merged here; this cleanup does not merge other branches.
 - Current workspace: `D:\Locke\gitee\Bogodroid-brickgame`.
 - The BrickGame linked worktree was moved here on October 12, 2026. Use this
   directory for builds, container staging, commits, and pushes.
 - BrickGamePro-specific behavior is isolated in `projects/unityloader/plugins/brickgamepro/`.
-- Shared work stays in `unityloader`: multi-pointer `MotionEvent`, plugin touch injection, optional generic present viewport support, display-size probing, and the `plugin_il2cpp.h` metadata/hook helpers.
+- Shared loader work includes startup video decoding/presentation and context
+  handoff, plugin touch injection, viewport/display support, and IL2CPP helpers.
+  Android input compatibility remains in its existing common bridge.
 - Staging directory: `deploy/BrickGamePro/` is local-only and ignored by git.
 
 ## Runtime Layout
 
-- Current Anbernic deployment (2026-10-12, `172.16.5.40`):
-  `/mnt/mmc/Roms/PORTS/BrickGamePro`, launcher
-  `/mnt/mmc/Roms/PORTS/BrickGamePro.sh`.
-- Previous TrimUI Smart Pro layout: `/mnt/SDCARD/Data/ports/BrickGamePro`,
-  launcher `/mnt/SDCARD/Roms/PORTS/BrickGamePro.sh`.
-- Runtime config: `configs/brickgamepro.toml`, deployed as `unity.toml`.
-- Anbernic launcher source: `scripts/brickgamepro_launch.sh`, based on the
-  device's existing Maximus2/Samurai2 scripts. It creates `conf/shared_prefs`
-  and `cache`, loads the controller database, selects Pulse/ALSA, and runs the
-  loader in the foreground with output in `BrickGamePro/log.txt`.
-- Game package: `com.perseusgames.brickgamepro`, Unity 2018.2 IL2CPP.
-- Required plugin: `unityloader.d/brickgamepro.so`.
+Runtime config is `configs/brickgamepro.toml`, deployed as `unity.toml`.
+Required files include `unityloader`, `unityloader.d/brickgamepro.so`, the game
+resources, controller database and `game/res/drawable/splashvideo.mp4`.
+`init_config` changes cwd to `game/`; Android external/files paths are
+`../conf/`, cache is `../cache/`, and source/package/OBB paths are `./`.
 
-Do not deploy Oddmar plugins for BrickGamePro. Do not add Oddmar/FFmpeg
-`LD_LIBRARY_PATH` entries to `BrickGamePro.sh`; this port does not need Android
-video playback or FFmpeg runtime libraries.
+The Anbernic launcher source is `scripts/brickgamepro_launch.sh`, deployed beside
+its `FatFishBrick/` directory as `FatFishBrick.sh`. It resolves that directory
+relative to itself, creates config/cache folders, selects Pulse/ALSA, and runs
+in the foreground with output discarded. Trimui uses the installed PortMaster
+launcher and its separate `Data/ports` layout. Logging is a compile-time choice;
+launcher redirection does not enable or disable loader logs.
 
-The complete Anbernic install has 144 runtime files verified against
-`SHA256SUMS`; launcher, loader, config, and Down-fix plugin hashes also match
-local staging. The user confirmed that the original Down fix improved device
-feel. The subsequent 100 ms / 60 ms timing and font correction passed container
-checks and were deployed together. The current plugin uses 100 ms / 30 ms
-with the font correction retained, per-piece Down hold ownership, A dismissal
-of Game Over, persistent hiding of touch-button graphics, A/B Yes/No handling
-in ExitMenu, and Select skin switching disabled. This build was
-deployed on 2026-10-13; all 144 runtime files passed SHA-256 verification.
-Its validation and deployment status are recorded in
-[UI analysis](BRICKGAMEPRO_UI_ANALYSIS.md). Prior plugins are backed up outside
-unityloader.d. No remote game launch was performed during deployment.
-`init_config` changes cwd to `game/`, so Android file/cache paths are
-`../conf/` and `../cache/`; source/package/OBB paths are `./`. The corrected
-deployment config passed a container replay and PlayerPrefs save.
+Do not deploy Oddmar plugins for this game. Startup video uses the loader's
+optional FFmpeg runtime; current Anbernic and Trimui provide compatible system
+libraries. Other installations must configure their own compatible FFmpeg path,
+as described in AGENTS.md, without depending on another port directory.
 
 ## Display And Viewport
 
@@ -69,7 +122,7 @@ Canvas path:
    `Component.get_gameObject`, and `Object.get_name`.
 3. Resolves `AppContent` and `Pad` by their serialized names.
 4. Captures each branch's initial local scale once, then applies a relative
-   2x scale and a calibrated vertical anchored position.
+   2.2x scale and a calibrated vertical anchored position.
 
 Runtime font inspection confirms the root Canvas uses Screen Space Camera
 (renderMode=1). At 640x480, its scaleFactor is 0.1875; AppContent's additional
@@ -99,10 +152,33 @@ Grid background cells, the dynamic playfield was still offset toward the upper
 left. Because this content is world-space and seen through an orthographic
 camera, the visible motion is opposite the camera movement. The plugin now uses
 `kCanvasScale=2.2`, `kCanvasPositionY=-1190`,
-`kWorldCameraOffsetX=0.0`, and `kWorldCameraOffsetY=10.60`. The camera offset
+`kWorldCameraOffsetX=0.0`, and `kWorldCameraOffsetY=10.55`. The camera offset
 was derived from the previous `(+2.5, -4.0)` value plus a requested visible
 correction of about `+2.5` cells right and `-13.75` cells down, followed by
-the latest real-device request to move the game area down another `0.25` cell.
+the real-device request to move the game area down another `0.25` cell.
+The initial fine adjustment lowered the camera offset from `10.60` to `10.50`,
+moving the entire dynamic playfield up `0.10` cell. The latest adjustment raises
+it to `10.55`, moving the dynamic playfield down `0.05` cell from that version.
+The background UI remains fixed throughout these adjustments.
+
+The original casing consists of `CasingCenter`, `Casing_Left`, and
+`Casing_Right` under AppContent. In the 640×480 container, its outer extent was
+pixels 23 through 616, leaving a black strip at each side. The plugin extends
+only the two decorative side RectTransforms outwards to the current Canvas
+width (plus one physical pixel of overscan). Their inner edges remain fixed;
+the center casing, Grid, HUD, AppContent scale and camera zoom are unchanged.
+This fills the sides without stretching the square gameplay cells. Side artwork
+can widen slightly; labels remain at their original size and centered on each side.
+
+Container validation (2026-10-14): Blue casing now covers x=0 through 639
+at y=0,40,240,470. The checked HUD and background-grid patches are pixel-identical
+to the previous version; matching static bottom blocks gives a +1px vertical
+shift (requested +0.05 cell is 1.056px). Guide → B cancel → Guide → A quit exits
+with code 0 and saves preferences. Evidence is in ignored staging
+`deploy/BrickGamePro/casing-validation/`. The plugin is deployed to Anbernic
+`172.16.6.250`; all 145 runtime file hashes pass. Previous plugin and manifest
+are saved in `backup-casing-20261014-2040/`. Actual hardware appearance and the
+other skins still require visual confirmation; no remote game launch was used.
 
 ### UGUI Canvas方案交接说明
 
@@ -313,16 +389,19 @@ title and scores remain visible. See [UI analysis and replay evidence](BRICKGAME
 
 The current real-device status is:
 
-- The pre-game Perseus Games splash is an Android Java View displaying
-  `res/drawable/unity_static_splash.png`, not a video. The resource is deployed,
-  but the loader does not implement that View; engine startup time remains
-  visible as blank output. See [splash analysis](BRICKGAMEPRO_SPLASH_ANALYSIS.md).
+- The original Perseus Games splash is an Android Java View displaying
+  `res/drawable/unity_static_splash.png`. The port now uses the user-supplied
+  silent video at two-thirds window height during initialization, then releases
+  its decoder, frame buffers, file, GL objects and independent context at scene
+  handoff. Shared FFmpeg runtime libraries remain mapped for the process lifetime.
+  See [splash analysis](BRICKGAMEPRO_SPLASH_ANALYSIS.md).
 - D-pad, A/Y, Start/Pause, X/Sound, and Guide/Menu Exit Game are routed through
   the BrickGamePro plugin. Select skin switching is disabled.
 - In ExitMenu, A confirms quitting and B cancels; elsewhere B is unmapped.
   The previous B pause experiment has been removed.
 - The Canvas/camera layout is visually correct on the tested 4:3 TrimUI panel
-  after `kCanvasPositionY=-1190` and `kWorldCameraOffsetY=10.60`.
+  with `kCanvasPositionY=-1190` and current `kWorldCameraOffsetY=10.55`,
+  following the requested `0.10` cell upward then `0.05` cell downward adjustments.
 - The Tetris Down fix is built and verified in the ARM64 container. IL2CPP
   disassembly identified shared vertical timers and a held-Down branch that
   bypasses the repeat timer. The plugin now preserves short taps and schedules
@@ -331,8 +410,7 @@ The current real-device status is:
   and Tank fallback. Device feedback confirmed the original 200 ms / 90 ms fix
   improved Down feel; the user subsequently requested 100 ms / 30 ms to match
   the original Tetris repeat interval.
-  The new timing still needs device feedback; single-brick,
-  bomb, and line-clear scenarios still need dedicated testing. See
+  Single-brick, bomb, and line-clear scenarios still need dedicated testing. See
   [the evidence and reproduction commands](BRICKGAMEPRO_DOWN_ANALYSIS.md).
   The old direct managed input experiment has been removed.
 
@@ -351,91 +429,56 @@ Cleanup validation is recorded in [UI analysis](BRICKGAMEPRO_UI_ANALYSIS.md).
 
 ## Build And Test Notes
 
-Device builds should be made in the `GlES_Dev` container and must keep:
+Build in `GlES_Dev`. Its checkout is a separate copy, so sync changed sources,
+helper headers and assets before building. For example, from the host:
 
-```text
--DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
+```powershell
+docker cp projects/unityloader/. GlES_Dev:/workspace/Bogodroid/projects/unityloader/
+docker cp thunks/egl_sdl/egl_sdl.cpp GlES_Dev:/workspace/Bogodroid/thunks/egl_sdl/egl_sdl.cpp
 ```
 
-Configure the cached device build explicitly before compiling:
+Inside `/workspace/Bogodroid`, explicitly configure the cached release build:
 
 ```sh
 cmake -S . -B build-device-release \
   -DCMAKE_BUILD_TYPE=Release \
-  -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
-  -DIL2CPP_TRACE=OFF \
-  -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
+  -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+  -DIL2CPP_TRACE=OFF -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF
+cmake --build build-device-release \
+  --target unityloader bogodroid_unityloader_plugin_brickgamepro -j4
+strip build-device-release/unityloader build-device-release/unityloader.d/brickgamepro.so
 ```
 
-Build both the loader and the BrickGamePro plugin:
-
-```text
-cmake --build build-device-release --target unityloader brickgamepro.so
-```
-
-Deploy `unityloader`, `unity.toml`, and `unityloader.d/brickgamepro.so`.
-No FFmpeg runtime libraries or `LD_LIBRARY_PATH` override are required.
-
-For the current Windows-hosted container workflow, copy the edited plugin into
-the `GlES_Dev` container, build only the plugin when the loader/core did not
-change, run the container replay, then pull the plugin artifact back to the
-local staging directory:
-
-```powershell
-docker cp projects\unityloader\plugins\brickgamepro\brickgamepro.cpp GlES_Dev:/workspace/Bogodroid/projects/unityloader/plugins/brickgamepro/brickgamepro.cpp
-docker cp projects\unityloader\plugin_il2cpp.h GlES_Dev:/workspace/Bogodroid/projects/unityloader/plugin_il2cpp.h
-docker exec GlES_Dev bash -lc "cd /workspace/Bogodroid && cmake --build build-device-release --target brickgamepro.so -j2"
-docker exec GlES_Dev bash -lc "cp /workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so /game/BrickGamePro/unityloader.d/brickgamepro.so && rm -rf /game/BrickGamePro/seq-startpause-1190 && BRICKGAME_PROBE_START=1 GAME_DIR=/game/BrickGamePro W=640 H=480 SECS=45 DUMP_AT=500 CAP_MS=1000 SEQ_DIR=/game/BrickGamePro/seq-startpause-1190 bash /workspace/Bogodroid/scripts/container-run-game-seq.sh"
-docker cp GlES_Dev:/workspace/Bogodroid/build-device-release/unityloader.d/brickgamepro.so deploy\BrickGamePro\unityloader.d\brickgamepro.so
-```
-
-Useful log check after replay:
-
-```powershell
-docker exec GlES_Dev bash -lc "grep -E 'plugin armed|Canvas target|camera base|hooked GUIManager\.(ShowFeedBackMenu|LeaveFeedBack)|feedback menu|leave feedback|OpenGL Renderer|probe auto-start|start -> touch|b -> touch' -n /game/BrickGamePro/log-seq.txt | tail -n 140"
-```
-
-Expected log signs: `touch=1 refresh=1`, `canvasScale=2.2 canvasY=-1190`,
-`start -> touch 334.0,307.0`, and
-`guide -> touch 433.0,307.0`; there must be no `b -> touch 334.0,307.0`.
-Feedback popup hooks should still be installed.
-
-Useful container replay for the sticky-fire scenario:
+Copy both outputs into `/game/BrickGamePro/` for release smoke verification:
 
 ```sh
-BD_PAD_REPLAY="2500:a,2700:dpright" \
-BD_PAD_REPLAY_HOLD=1000 \
-timeout -s INT 12 ./unityloader unity.toml
+cp build-device-release/unityloader /game/BrickGamePro/unityloader
+cp build-device-release/unityloader.d/brickgamepro.so /game/BrickGamePro/unityloader.d/brickgamepro.so
+bash scripts/container-brickgamepro-ui-matrix.sh exit
 ```
 
-For the Select/Guide mapping replay, use SDL's `back` name for the physical
-Select key:
+Check its runner for a normal `exit=0`, inspect the dialog screenshot and verify
+that `log.txt` has no `[BD-*]` lines. An `exit=124` only means the time limit;
+it does not prove a normal exit. UI, Down and rotation replays share Xvfb and
+log files, so run those suites sequentially.
+
+Log-based diagnostic validators require a separate build with
+`BD_ENABLE_LOG=ON` and the corresponding plugin trace flags. Preserve the
+LOG=OFF release artifacts separately. The diagnostic UI and rotation tools are:
 
 ```sh
-BD_PAD_REPLAY="2500:back,5000:guide" \
-BD_PAD_REPLAY_HOLD=140 \
-timeout -s INT 12 ./unityloader unity.toml
+bash scripts/container-brickgamepro-ui-matrix.sh
+python3 scripts/verify-brickgamepro-ui.py /game/BrickGamePro
+bash scripts/container-brickgamepro-rotate-matrix.sh
 ```
 
-Expected plugin logs include `guide down touch=(433.0,307.0)` and a matching
-Guide touch-up event. There must be no `skin message` entry.
+The rotation verifier expects the four case directories `tetris`, `five`,
+`pause`, `quick`; copy each `seq-rotate-combo-CASE` into a common validation root
+under that case name, then run `verify-brickgamepro-rotate.py ROOT`.
 
-Expected touch sequence:
-
-```text
-A DOWN          action=0   pointers=1
-...
-A MOVE          action=2   pointers=1
-DP_RIGHT DOWN   action=261 pointers=2
-...
-A MOVE          action=2   pointers=2
-A UP            action=6   pointers=2
-DP_RIGHT UP     action=1   pointers=1
-```
-
-On device, retest from the Ports menu:
-
-- hold and release A alone;
-- hold A plus a direction, release A first;
-- hold A plus a direction, release the direction first;
-- confirm firing stops after A is released.
+Prepare runtime video using the plugin's `tools/prepare-splash-video.py` as
+shown in [the asset instructions](../projects/unityloader/plugins/brickgamepro/assets/README.md).
+Stage files locally, deploy with Dropbeak chunk/force/verify, then verify the
+whole remote SHA256SUMS. Keep backup files outside `unityloader.d/` so they
+cannot be loaded as extra plugins. Build and source cleanup do not automatically
+refresh historical deployment archives or replace the user-tested handheld files.
