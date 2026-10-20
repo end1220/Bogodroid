@@ -111,7 +111,8 @@ typedef struct BogoPluginApi {
     // Horizontal BMP strip; loop at frame_ms without extending startup.
     // Optional tail: older v8 field offsets must remain unchanged.
     int (*set_startup_animation)(const char* path, int frame_count, int frame_ms);
-    // Silent video, loop until scene ready; fit centered with the requested
+    // Silent video, minimum three seconds before Unity resume, then until scene
+    // ready; fit centered with the requested
     // maximum height as a fraction of the game window (0 < fraction <= 1).
     int (*set_startup_video)(const char* path, float height_fraction);
 } BogoPluginApi;

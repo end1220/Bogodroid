@@ -1,51 +1,53 @@
 # BrickGamePro Port Notes
 
-## Current release (2026-10-16)
+## Current release (2026-10-20)
 
-The handheld menu entry is **FatFishBrick (肥鱼方块)**. The Android package
-`com.perseusgames.brickgamepro`, plugin name and save keys retain their original
-identity. Both handhelds have the release with the corrected ExitMenu dashed
-border; the user confirmed the final layout works.
+The handheld menu entry is **FatFishBrick (肥鱼方块)**. Android package
+`com.perseusgames.brickgamepro`, plugin identity and save keys are unchanged.
+The latest Anbernic endpoint is `172.16.7.42`, with runtime files under
+`/mnt/mmc/Roms/ports/FatFishBrick`. Older IPs and captures below are historical.
 
-| Device | Host | Game directory | Launcher |
-| --- | --- | --- | --- |
-| Trimui, 1024×768 | `172.16.7.18` | `/mnt/SDCARD/Data/ports/FatFishBrick` | `/mnt/SDCARD/Roms/PORTS/FatFishBrick.sh` |
-| Anbernic, 640×480 | `172.16.7.34` | `/mnt/mmc/Roms/PORTS/FatFishBrick` | `/mnt/mmc/Roms/PORTS/FatFishBrick.sh` |
+- A is Tetris, B is Tank and G is BrickBreaker. Tank player movement is doubled;
+  firing and enemy clocks are unchanged. G's held-A interval is 0.02 seconds
+  instead of 0.01 seconds; release restores the game's normal interval.
+- Tetris/TetrisFive Down steps immediately, waits 100 ms, then repeats every
+  30 ms for the current piece. A/Y rotation calls Rotate on the Unity thread.
+- Guide directly calls PressExitBtn: in gameplay it returns to selection;
+  from selection it opens Exit Game. Start directly calls PressStartPauseGame.
+  Neither uses fixed touch coordinates. Select alone is unmapped;
+  Start+Select retains the loader exit hotkey.
+- Game Over A returns to selection. Exit Game A confirms and B cancels.
+  HUD and exit-menu font density is corrected. Original square cells are kept.
+- Silent splash video fits within 3/4 of window height and remains visible for
+  at least three seconds from first presentation, then until the scene is ready.
+  Native library preparation overlaps playback; Unity nativeResume waits for
+  the minimum so the opening game animation does not run during that hold.
+- A power-key tap pauses the nativeRender loop at a frame boundary, enters
+  kernel mem standby after key release and resumes after wake. The user
+  confirmed physical standby and final Guide behavior on the handheld.
 
-- Tetris and TetrisFive Down: immediate step, 100 ms initial repeat delay,
-  then 30 ms repeats. Holding Down applies only to the current piece.
-- A/Y rotation calls the original Rotate on the Unity thread independently of
-  horizontal movement and Down. Other games keep their original touch route.
-- Game Over: original actions hidden, one transparent decoration, A returns
-  through the original menu action. ExitMenu: A quits and B cancels; artwork
-  keeps its 571:464 aspect, and all original children including the dashed
-  Yes/No frame move down together by 260 logical units.
-- Touch controls remain invisible; Select skin switching is disabled. Skipping
-  the rating popup completes its original No action so game selection is ready.
-- HUD font density is corrected. Camera Y offset is 10.55; only the outer casing
-  expands to the screen edges, preserving square gameplay cells.
-- Splash is silent, centered, and fitted within 3/4 of window height, retaining
-  its aspect ratio. The latest 8-second source is already sped up. Runtime media
-  is 856×480 / 24 fps H.264 baseline, about 400 kbps. Video loops during startup
-  and releases its decoder, buffers and GL context at scene handoff.
+The final stripped Release build has LOG/TRACE/VERBOSE/IL2CPP_TRACE OFF,
+`JNIVM_ENABLE_RETURN_NON_ZERO=OFF` and JNI class-registration DEBUG ON.
+SDL/GL/FFmpeg native messages and fatal diagnostics may still be emitted.
+The latest 720x720 container replay exited normally with four native output
+lines and zero `[BD-*]` lines.
 
-Release builds keep LOG/TRACE/VERBOSE/IL2CPP_TRACE OFF and explicitly set
-`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`; `JNIVM_ENABLE_DEBUG` stays ON for JNI class
-registration. The validated handheld plugin hash is
-`fecb2099c79a26cf9af30a08f20cfae35e22e195aa940c9facfc74feb0638022`;
-loader hash is `2f8fe184b1b1c531d66cb54bbda1bdd887934a92c802eeb36899df5e2aec8402`;
-runtime video hash is `b472c50e6d2554917ab9b0c4698b61bd80578236af5c1d5a9d09b54c08478bf5`.
-These identify the user-tested deployment before source cleanup; future rebuilds
-may differ. Both devices passed all 145 runtime hashes. Trimui framebuffer
-capture and Guide → B → Guide → A replay confirmed the border, layout and
-normal exit; logs had no `[BD-*]` lines. Temporary test files were removed.
+| Runtime file | SHA256 |
+| --- | --- |
+| `unityloader` | `dfb11c522151b320bdbad84d47b00463b0ca5025bb2cbbb0482ea6c5c92f5293` |
+| `unityloader.d/brickgamepro.so` | `45664d72c934b24e38741218cbbe6802f8b046a3a4963eb08aeedd5dee3af9a4` |
 
-Current runtime staging is ignored `deploy/BrickGamePro/`. The final layout
-proof is in `exit-border-validation/`; older desktop snapshots and deployment
-TARs are historical copies and are not automatically refreshed by a source build.
+These files were synchronized to the latest handheld and both extracted
+Desktop distributions under `C:/Users/Administrator/Desktop/FatFishBrick`,
+including their SHA256SUMS. Runtime staging and captures are ignored under
+`deploy/BrickGamePro/`; source commits do not include game resources or binaries.
+Previous validation records below describe earlier builds, not the current
+runtime hashes or endpoints.
+
 See [startup/video analysis](BRICKGAMEPRO_SPLASH_ANALYSIS.md),
-[UI and artwork](BRICKGAMEPRO_UI_ANALYSIS.md), and
-[Down/rotation evidence](BRICKGAMEPRO_DOWN_ANALYSIS.md) for validation history.
+[UI and artwork](BRICKGAMEPRO_UI_ANALYSIS.md),
+[Down/rotation evidence](BRICKGAMEPRO_DOWN_ANALYSIS.md), and
+[oddmar merge assessment](BRICKGAME_ODDMAR_MERGE.md).
 
 ## Source cleanup verification (2026-10-16)
 
