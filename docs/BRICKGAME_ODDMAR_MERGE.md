@@ -1,6 +1,6 @@
 # BrickGame 与 oddmar 合并评估
 
-评估日期：2026-10-20。已执行 `git fetch origin`，未执行分支合并。
+评估日期：2026-10-20。以下保留合并前分析；实际执行结果见末尾。
 
 ## 分支关系
 
@@ -75,3 +75,21 @@ oddmar 已在 `D:/Locke/gitee/Bogodroid-oddmar` 工作区检出，不能在本�
 插件 API 的视频说明已补充三秒最低播放和 nativeResume 时序，未更改接口布局。
 只变更文档和注释，不改变掌机二进制。已检查差异空白、文档相对链接及 Git
 模拟合并结果。本次未构建合并后的二进制、未部署、未声称完成跨游戏回归。
+
+
+## 已执行合并与分支清理（2026-10-20）
+
+用户随后明确授权合并及删除已合入分支。合并提交 `d07ac5d` 将 oddmar
+合入 BrickGame，无文本冲突，并已推送 origin/BrickGame。
+
+删除前已确认 origin/ddmar、origin/skul、origin/video、origin/anbernic
+以及存在的同名本地分支全部是合并后 HEAD 的祖先，没有独有提交。
+已删除这四个远端分支及本地 skul、video、anbernic（本地原本没有 ddmar）。
+oddmar 分支保留。
+
+video 原工作区 D:/Locke/gitee/Bogodroid-anbernic 已切至原提交 058ddca
+的 detached HEAD；目录和未跟踪的 .workbuddy/ 保留，未删除工作区。
+
+合并后的 GLES 源文件通过 Release ARM64 对象编译，启动模板通过 bash -n，
+差异空白检查通过。本次未链接、部署完整 loader，未进行跨游戏运行回归；
+掌机和桌面发行目录仍使用此前已验证的发布版本。
