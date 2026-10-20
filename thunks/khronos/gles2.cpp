@@ -721,6 +721,7 @@ static int unit_index(GLenum unit)
 // 2D target too (its state cache "restores" it), so it has to be recognised by
 // name, not by the shader that is about to sample it.
 static std::set<GLuint> g_guest_video_names;
+static GLuint g_last_external_video_name = 0;
 
 // Is this the guest's name for the video texture? Both the name it binds as
 // GL_TEXTURE_EXTERNAL_OES and the one the SurfaceTexture stub reports qualify:
@@ -843,6 +844,7 @@ extern "C" void bd_glBindTexture(GLenum target, GLuint texture)
         // video, which would undo the redirect below; knowing the name lets
         // bd_video_bind_swap() catch that bind as well.
         g_guest_video_names.insert(texture);
+        g_last_external_video_name = texture;
         if (bd_redirect_video_bind(texture)) {
             // The guest asked for the external target and got a 2D bind, so the
             // unit bookkeeping has to say so too: everything downstream (the
@@ -862,6 +864,7 @@ extern "C" void bd_glBindTexture(GLenum target, GLuint texture)
     // decode. Substituting the backing texture here is what makes playback
     // independent of Unity's shader cache.
     if (target == BD_GL_TEXTURE_2D && bd_video::has_sink() &&
+        texture != 0 && texture == g_last_external_video_name &&
         bd_video_bind_swap(texture)) {
         return;
     }
@@ -1335,6 +1338,14 @@ extern "C" GLuint bd_glCreateProgram(void)
         BD_LOG("VIDEO", "createProgram #%llu -> %u",
                (unsigned long long)created, program);
     return program;
+}
+
+extern "C" void bd_glDeleteShader(GLuint shader)
+{
+    g_rewritten_shaders.erase(shader);
+    g_shader_to_program.erase(shader);
+    if (glad_glDeleteShader)
+        glad_glDeleteShader(shader);
 }
 
 // Unity replays compiled programs from <port>/cache/UnityShaderCache with
@@ -1958,6 +1969,20 @@ struct BdSampler
     GLenum type = 0;
 };
 static std::map<GLuint, std::vector<BdSampler>> g_program_samplers;
+
+extern "C" void bd_glDeleteProgram(GLuint program)
+{
+    g_video_programs.erase(program);
+    g_program_samplers.erase(program);
+    for (auto it = g_shader_to_program.begin(); it != g_shader_to_program.end();) {
+        if (it->second == program)
+            it = g_shader_to_program.erase(it);
+        else
+            ++it;
+    }
+    if (glad_glDeleteProgram)
+        glad_glDeleteProgram(program);
+}
 
 // Does this draw actually *read* the video? The question cannot be answered by
 // looking at the bound textures: Unity draws plenty of passes whose shader has
@@ -2599,6 +2624,8 @@ extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
             // A deleted name can be handed out again, so it must not stay on the
             // "this is the video texture" list.
             g_guest_video_names.erase(textures[i]);
+            if (textures[i] == g_last_external_video_name)
+                g_last_external_video_name = 0;
         }
     }
     if (glad_glDeleteTextures) glad_glDeleteTextures(n, textures);
@@ -3859,6 +3886,8 @@ void load_gles2_funcs()
 	bd_symtable_override("glTexSubImage2D", (uintptr_t)&bd_glTexSubImage2D);
 	bd_symtable_override("glBindTexture", (uintptr_t)&bd_glBindTexture);
 	bd_symtable_override("glDeleteTextures", (uintptr_t)&bd_glDeleteTextures);
+	bd_symtable_override("glDeleteShader", (uintptr_t)&bd_glDeleteShader);
+	bd_symtable_override("glDeleteProgram", (uintptr_t)&bd_glDeleteProgram);
 	// [BD-VIDEO] VideoPlayer: external texture binds are redirected to a
 	// GL_TEXTURE_2D the loader fills from the MediaCodec thunk, and the blit
 	// shader's samplerExternalOES is rewritten to sampler2D.
