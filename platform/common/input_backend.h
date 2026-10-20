@@ -22,6 +22,7 @@ private:
     // Callbacks to dispatch events to the Android shim layer
     std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)> onKey;
     std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> onMotion;
+    std::function<void(bool)> onPowerKey;
 
     std::unordered_map<int, float> mControllerAxisState;
     std::unordered_map<int, float> mControllerRawAxisState;
@@ -54,6 +55,7 @@ public:
     // ---- Callbacks ----
     void setKeyCallback(std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)> cb);
     void setMotionCallback(std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> cb);
+    void setPowerKeyCallback(std::function<void(bool)> cb);
     bool injectTouch(int pointerId, float x, float y,
                      float designWidth, float designHeight,
                      bool down, const char* source);

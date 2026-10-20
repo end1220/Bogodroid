@@ -4,8 +4,9 @@
 (2026-10-16). It contains 8 seconds of 856×480, 24 fps HEVC/yuv420p video
 and an AAC audio track. The deployed port is now named FatFishBrick (肥鱼方块).
 The plugin requests silent playback, centered at 3/4 of the game window height,
-preserving the video's aspect ratio. It loops until the first scene is ready;
-no minimum splash delay is added.
+preserving the video's aspect ratio. It loops for at least three seconds from
+its first presentation and remains visible until the first scene is ready. The loader waits for the minimum before
+Unity nativeResume, so scene animation does not run behind the minimum hold.
 
 Prepare the H.264 runtime MP4 with FFmpeg on PATH:
 

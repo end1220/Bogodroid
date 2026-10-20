@@ -482,3 +482,84 @@ Stage files locally, deploy with Dropbeak chunk/force/verify, then verify the
 whole remote SHA256SUMS. Keep backup files outside `unityloader.d/` so they
 cannot be loaded as extra plugins. Build and source cleanup do not automatically
 refresh historical deployment archives or replace the user-tested handheld files.
+
+
+### Tank speed and splash minimum
+
+Tank player movement now advances its independent `moveTimer` at twice the
+original rate. Firing and enemy clocks retain their original speed. Set
+`BRICKGAME_TANK_SPEED_FIX=0` for a baseline comparison. Run
+`scripts/container-brickgamepro-tank-speed.sh` for sequential four-direction
+replays; `BRICKGAME_DOWN_TRACE=1` logs `TANK move` timer resets.
+
+Startup videos remain visible for at least 3000 ms from the first presentation,
+and longer until the scene is ready. Native library preparation proceeds during
+the video; immediately before Unity nativeResume, the loader waits out any
+remaining minimum time while the video continues. Scene updates therefore start
+after the minimum, preventing its opening animation from running behind the
+extra splash hold. Background and game-swap fallback both support this gate.
+
+The original square cell artwork is retained; the experimental heart artwork
+was reverted locally and on the handheld at the user's request.
+
+Container validation (2026-10-19, QEMU aarch64 + llvmpipe): median direction
+repeat intervals baseline/modified were right 207/103 ms, left 201/96 ms,
+up 215/122 ms and down 208/112 ms. Frame quantization accounts for variation
+from the 2x timer rate. A separate Up-first baseline avoids a player death in
+the longer baseline replay. Startup durations were 4.2-4.7 seconds; an isolated
+container C++ harness using the actual dismissal predicate checked the 2999/3000
+ms boundary, unready scene and SDL tick wrap. The forced-ready plugin probe was
+container-only and restored afterward. Exit menu replay completed with exit=0.
+Local artifacts and evidence: `deploy/BrickGamePro/tank-speed-validation/`;
+`SHA256SUMS` records the staged runtime files.
+`verify-brickgamepro-tank-speed.py ROOT` checks the exported `baseline`, `fast`,
+`up-baseline`, `splash-early-ready`, and `exit` directories. The final version was deployed and tested on the handheld.
+
+2026-10-19 follow-up: the heart artwork was subsequently reverted. The resume-gate
+container harness checks fast/slow loading, independent/fallback animation and
+missing splash. Evidence is under `deploy/BrickGamePro/heart-full-v3/`.
+
+Follow-up full-container trace: minimum wait began at +1729 ms, completed at
++4375 ms before nativeResume; GUIManager.Start completed afterward and the first
+scene handoff followed at +8179 ms. The first presentation was about +1375 ms.
+The experimental heart artwork was reverted; the exit replay completed with exit=0.
+
+### G 号打砖块 A 键加速
+
+G 对应 BrickBreaker。插件在 BrickBreakerManager.StartMoveBallFast 返回后，将 timeMoveBall 从 0.01 秒加倍为 0.02 秒，使目标加速频率降低 50%。松开 A 仍由游戏原方法恢复普通速度；每次按下先重设间隔，不会叠加倍率。
+
+GlES_Dev 容器对照：15 秒和 19 秒各按住 A 两秒，基线两次均为 0.010000→0.010000，修改版两次均为 0.010000→0.020000。BRICKGAME_G_SPEED_FIX=0 可禁用，BRICKGAME_DOWN_TRACE=1 输出间隔。实际移动频率受帧率限制。
+
+### Exit Game 文本清晰度
+
+`discover_control_rects` 沿层级树追踪 ExitMenu 子节点，并将其动态字体纳入 `Text.get_pixelsPerUnit` 的 2.2×补偿。涵盖标题、Yes/No 和 FrameButton 装饰虚线；不改变字号、位置或面板布局。容器退出菜单验证前后 PPU 从 0.188 增至 0.413，退出回归 B 取消及 A 确认均通过（exit=0）。
+
+### 电源键待机
+
+unityloader 在 SDL 电源键按下时请求暂停，在 nativeRender 帧边界阻塞主循环；物理按键释放后由输入线程向 /sys/power/state 写入 mem。内核待机返回后解除阻塞。电源键不再作为 Android 游戏输入注入，唤醒后短暂过滤重复电源键事件。打不开或写入失败时记录错误并恢复主循环；按键未释放或主循环未响应也有超时恢复。
+
+容器脚本 scripts/container-unityloader-power-standby.sh 使用 BD_POWER_REPLAY、BD_POWER_STATE_PATH 和 BD_POWER_TEST_HOLD_MS 模拟电源键与内核待机返回，避免挂起宿主机。实测 1616ms 模拟待机期间 nativeRender 帧计数始终为 181；另一次恢复后确认退出成功（exit=0）。容器不能验证物理熄屏、内核真实挂起和硬件唤醒；用户已在掌机实测确认待机正常。
+
+
+### Guide / Start independent of screen aspect ratio (2026-10-20)
+
+Guide and Start no longer inject fixed 640x480 touch coordinates. SDL queues
+atomic requests consumed by GUIManager.Update on the Unity thread. Guide invokes
+GUIManager.PressExitBtn directly, preserving the original behavior: return to
+selection while playing, show Exit Game from selection. Start invokes the original
+PressStartPauseGame action. Select
+alone remains unmapped and Start+Select remains the loader exit hotkey. Direction
+and face-button mappings are unchanged.
+
+
+The final Guide behavior passed a 720x720 Tetris replay and handheld testing:
+first Guide returns to selection, second Guide opens Exit Game, B cancels and
+A quits. Release distributions use BD_ENABLE_LOG=OFF, BD_ENABLE_TRACE=OFF,
+BD_ENABLE_VERBOSE=OFF, IL2CPP_TRACE=OFF and JNIVM_ENABLE_RETURN_NON_ZERO=OFF.
+SDL/EGL or Unity native output and fatal diagnostics may still appear.
+
+Release verification: the LOG=OFF 720x720 normal-button replay completed with
+exit=0 and four native SDL/GL/FFmpeg output lines, with no [BD-*] messages. A
+separate mocked standby run wrote mem to its test state file. The stripped
+loader and plugin were synchronized to both Desktop FatFishBrick distributions
+and handheld 172.16.7.42; remote SHA256 values matched local staging.

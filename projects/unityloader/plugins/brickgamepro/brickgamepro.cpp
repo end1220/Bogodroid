@@ -39,6 +39,7 @@ static const char* g_probe_game = "Tank";
 static bool g_down_fix_enabled = true;
 static bool g_rotate_fix_enabled = true;
 static bool g_down_trace = false;
+static bool g_tank_speed_fix = true;
 static bool g_font_trace = false;
 static bool g_font_fix_enabled = true;
 static bool g_ui_trace = false;
@@ -46,6 +47,8 @@ static std::atomic<bool> g_finish_visible{false};
 static std::atomic<bool> g_pending_finish_close{false};
 static bool g_finish_a_owned = false; // SDL edge ownership survives closing.
 static std::atomic<bool> g_exit_visible{false};
+static std::atomic<bool> g_pending_guide{false};
+static std::atomic<bool> g_pending_start{false};
 static std::atomic<int> g_pending_exit_action{0}; // 1: Yes, 2: No.
 static bool g_exit_a_owned = false;
 static bool g_exit_b_owned = false;
@@ -247,6 +250,8 @@ static bool g_pending_feedback_dismiss = false;
 static void* g_leave_feedback_go = nullptr;
 static void* g_finish_menu_go = nullptr;
 static void* g_exit_menu_go = nullptr;
+static uintptr_t m_gui_press_exit = 0;
+static void* mi_gui_press_exit = nullptr;
 static uintptr_t m_gui_exit_game = 0;
 static void* mi_gui_exit_game = nullptr;
 static int g_last_screen_width = 0;
@@ -471,16 +476,14 @@ struct TouchPoint {
     uint64_t down_frame = 0;
 };
 
-static std::array<TouchPoint, 9> g_points = {{
+static std::array<TouchPoint, 7> g_points = {{
     {SDL_CONTROLLER_BUTTON_DPAD_LEFT,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,  222.0f, 375.0f},
     {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 300.0f, 375.0f},
     {SDL_CONTROLLER_BUTTON_DPAD_UP,    SDL_CONTROLLER_BUTTON_DPAD_UP,    260.0f, 335.0f},
     {SDL_CONTROLLER_BUTTON_DPAD_DOWN,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,  260.0f, 414.0f},
     {SDL_CONTROLLER_BUTTON_A,          SDL_CONTROLLER_BUTTON_A,          393.0f, 377.0f},
     {SDL_CONTROLLER_BUTTON_Y,          SDL_CONTROLLER_BUTTON_Y,          393.0f, 377.0f},
-    {SDL_CONTROLLER_BUTTON_START,      SDL_CONTROLLER_BUTTON_START,      334.0f, 307.0f},
     {SDL_CONTROLLER_BUTTON_X,          SDL_CONTROLLER_BUTTON_X,          367.0f, 307.0f},
-    {SDL_CONTROLLER_BUTTON_GUIDE,      SDL_CONTROLLER_BUTTON_GUIDE,      433.0f, 307.0f},
 }};
 static uint64_t g_frame_counter = 0;
 
@@ -621,7 +624,7 @@ static float text_ppu_hook(void* self, void* mi)
 }
 
 static void discover_control_rects(void* transform, int depth,
-                                   bool hidden_control_tree = false)
+                                   bool hidden_control_tree = false, bool exit_tree = false)
 {
     if (!transform || depth > 6 || !m_tf_get_child || !m_tf_get_child_count ||
         !m_component_get_game_object || !m_object_get_name)
@@ -644,6 +647,7 @@ static void discover_control_rects(void* transform, int depth,
         bind_control_rect(child, name);
         bind_feedback_node(child, child_go, name);
         const bool hidden_control = hidden_control_tree || find_control_rect(name);
+        const bool in_exit = exit_tree || name == "ExitMenu";
         if (hidden_control)
             bind_hidden_renderer(child_go);
         if (name == "FinishMenu")
@@ -690,7 +694,7 @@ static void discover_control_rects(void* transform, int depth,
                 void* font = m_text_font ? m_text_font(text, mi_text_font) : nullptr;
                 // HUD and finish scores share names; bind by their actual
                 // parent. Hidden controls compensate the AppContent scale.
-                const bool scaled = (parent_name == "MainGUI" || parent_name == "FinishMenu") &&
+                const bool scaled = (parent_name == "MainGUI" || parent_name == "FinishMenu" || in_exit) &&
                     font && m_font_dynamic && m_font_dynamic(font, mi_font_dynamic);
                 if (scaled && g_text_ppu_orig) {
                     g_scaled_texts.insert(text);
@@ -714,7 +718,7 @@ static void discover_control_rects(void* transform, int depth,
             g_grid_rt = child;
             g_api->log("BRICKGAME", "Grid RectTransform found rt=%p", g_grid_rt);
         }
-        discover_control_rects(child, depth + 1, hidden_control);
+        discover_control_rects(child, depth + 1, hidden_control, in_exit);
     }
 }
 
@@ -1065,6 +1069,17 @@ static uintptr_t gui_update_hook(uintptr_t self, uintptr_t mi,
             g_api->log("BRICKGAME-STARTUP", "menu=%d ticks=%u", menu, SDL_GetTicks());
         }
     }
+    // SDL only queues actions; Unity objects are accessed on the game thread.
+    if (g_pending_start.exchange(false) && m_gui_press_start_pause_game) {
+        reinterpret_cast<void_method_t>(m_gui_press_start_pause_game)(
+            reinterpret_cast<void*>(self), mi_gui_press_start_pause_game);
+        g_api->log("BRICKGAME", "Start direct PressStartPauseGame");
+    }
+    if (g_pending_guide.exchange(false) && m_gui_press_exit) {
+        reinterpret_cast<void_method_t>(m_gui_press_exit)(
+            reinterpret_cast<void*>(self), mi_gui_press_exit);
+        g_api->log("BRICKGAME", "Guide direct PressExitBtn");
+    }
     bool exit_visible = g_exit_menu_go && m_gameobject_active &&
         m_gameobject_active(g_exit_menu_go, mi_gameobject_active);
     const int exit_action = g_pending_exit_action.exchange(0);
@@ -1194,6 +1209,53 @@ BRICKGAME_COMPONENT_HOOK(tank_player_start_hook, g_tank_player_start_orig,
                          "TankPlayer.Start")
 BRICKGAME_COMPONENT_HOOK(tank_enemy_start_hook, g_tank_enemy_start_orig,
                          "TankEnemy.Start")
+
+// The original press handler resets the interval, preventing compounding.
+// Leave the release handler unchanged so normal speed is restored by the game.
+static int g_brickbreaker_interval_offset = 0;
+static uintptr_t g_brickbreaker_fast_orig = 0;
+static uintptr_t brickbreaker_fast_hook(uintptr_t self, uintptr_t mi) {
+    uintptr_t result = reinterpret_cast<orig8_t>(g_brickbreaker_fast_orig)(
+        self, mi, 0, 0, 0, 0, 0, 0);
+    if (self && g_brickbreaker_interval_offset) {
+        float& interval = *reinterpret_cast<float*>(self + g_brickbreaker_interval_offset);
+        const float before = interval;
+        const char* setting = std::getenv("BRICKGAME_G_SPEED_FIX");
+        if (!setting || std::strcmp(setting, "0") != 0)
+            interval *= 2.0f;
+        if (g_down_trace)
+            g_api->log("BRICKGAME", "G fast interval=%.6f->%.6f", double(before), double(interval));
+    }
+    return result;
+}
+
+// Advance only the player's movement clock; firing and enemies keep their clocks.
+static int g_tank_move_timer_offset = 0;
+static float (*m_delta_time)(void*, void*) = nullptr;
+static void* mi_delta_time = nullptr;
+static uintptr_t g_tank_move_orig[4] = {};
+static uintptr_t tank_move(int direction, uintptr_t self, uintptr_t mi) {
+    if (g_tank_speed_fix && self && g_tank_move_timer_offset && m_delta_time) {
+        float& timer = *reinterpret_cast<float*>(self + g_tank_move_timer_offset);
+        timer += m_delta_time(nullptr, mi_delta_time);
+    }
+    const float before = self && g_tank_move_timer_offset
+        ? *reinterpret_cast<float*>(self + g_tank_move_timer_offset) : 0;
+    uintptr_t result = reinterpret_cast<orig8_t>(g_tank_move_orig[direction])(
+        self, mi, 0, 0, 0, 0, 0, 0);
+    if (g_down_trace && self && g_tank_move_timer_offset && m_time &&
+        *reinterpret_cast<float*>(self + g_tank_move_timer_offset) < before)
+        g_api->log("BRICKGAME", "TANK move direction=%d time=%.3f timer=%.3f",
+            direction, double(m_time(nullptr, mi_time)), double(before));
+    return result;
+}
+#define TANK_MOVE_HOOK(N) \
+static uintptr_t tank_move_##N(uintptr_t self, uintptr_t mi) { return tank_move(N, self, mi); }
+TANK_MOVE_HOOK(0)
+TANK_MOVE_HOOK(1)
+TANK_MOVE_HOOK(2)
+TANK_MOVE_HOOK(3)
+#undef TANK_MOVE_HOOK
 
 static std::string mino_shape(void* object)
 {
@@ -1665,6 +1727,7 @@ static void post_il2cpp_init(void*)
                        &mi_gui_press_start_pause_game);
     resolve_gui_method(asm_image, "BackSelectGameMenu",
                        &m_gui_back_select_game, &mi_gui_back_select_game);
+    resolve_gui_method(asm_image, "PressExitBtn", &m_gui_press_exit, &mi_gui_press_exit);
     resolve_gui_method(asm_image, "ExitGame", &m_gui_exit_game, &mi_gui_exit_game);
     g_gui_menu_offset = g_il2cpp.field_offset_for(asm_image, "GUIManager", "menuStatus");
     if (g_probe_auto_start && !g_tetris_classes_logged) {
@@ -1677,6 +1740,8 @@ static void post_il2cpp_init(void*)
         g_il2cpp.log_class(asm_image, "", "ObjectManager");
         g_il2cpp.log_class(asm_image, "", "TankManager");
         g_il2cpp.log_class(asm_image, "", "TankPlayerController");
+        g_il2cpp.log_class(asm_image, "", "BrickBreakerManager");
+        g_il2cpp.log_class(asm_image, "", "SelectGameStatus");
         g_il2cpp.log_class(asm_image, "", "TankEnemyController");
     }
 
@@ -1769,6 +1834,23 @@ static void post_il2cpp_init(void*)
         g_il2cpp.hook_method(asm_image, "", "GUIManager", "LeaveFeedBack", 0,
                     reinterpret_cast<uintptr_t>(&gui_leave_feedback_hook),
                     &g_gui_leave_feedback_orig);
+        g_brickbreaker_interval_offset = g_il2cpp.field_offset_for(asm_image, "BrickBreakerManager", "timeMoveBall");
+        if (g_brickbreaker_interval_offset)
+            g_il2cpp.hook_method(asm_image, "", "BrickBreakerManager", "StartMoveBallFast", 0,
+                reinterpret_cast<uintptr_t>(&brickbreaker_fast_hook), &g_brickbreaker_fast_orig);
+        g_tank_move_timer_offset = g_il2cpp.field_offset_for(
+            asm_image, "TankPlayerController", "moveTimer");
+        g_il2cpp.resolve_call(core, "UnityEngine", "Time", "get_deltaTime", 0,
+            reinterpret_cast<void**>(&m_delta_time), &mi_delta_time);
+        if (g_tank_move_timer_offset && m_delta_time) {
+            const char* names[] = {"MoveRight", "MoveLeft", "MoveUp", "MoveDown"};
+            uintptr_t hooks[] = {reinterpret_cast<uintptr_t>(&tank_move_0),
+                reinterpret_cast<uintptr_t>(&tank_move_1), reinterpret_cast<uintptr_t>(&tank_move_2),
+                reinterpret_cast<uintptr_t>(&tank_move_3)};
+            for (int i = 0; i < 4; ++i)
+                g_il2cpp.hook_method(asm_image, "", "TankPlayerController", names[i], 0,
+                    hooks[i], &g_tank_move_orig[i]);
+        }
         if (g_probe_auto_start) {
             g_probe_menu_offset = g_il2cpp.field_offset_for(asm_image, "GUIManager", "menuStatus");
             g_probe_selection_offset = g_il2cpp.field_offset_for(
@@ -1776,7 +1858,7 @@ static void post_il2cpp_init(void*)
             void* play_fn = nullptr;
             const char* probe_method = std::strcmp(g_probe_game, "Tetris") == 0
                 ? "PlayTetris" : std::strcmp(g_probe_game, "TetrisFive") == 0
-                ? "PlayTetrisFive" : "PlayTank";
+                ? "PlayTetrisFive" : std::strcmp(g_probe_game, "BrickBreaker") == 0 ? "PlayBrickBreaker" : "PlayTank";
             if (g_il2cpp.resolve_call(asm_image, "", "GameManager", probe_method, 0,
                              &play_fn, &mi_probe_play_game)) {
                 m_probe_play_game =
@@ -1816,6 +1898,15 @@ static bool invoke_gui_manager(uintptr_t fn, void* mi, const char* name)
 
 static void on_button(int button, int down, void*)
 {
+    if (button == SDL_CONTROLLER_BUTTON_GUIDE || button == SDL_CONTROLLER_BUTTON_START) {
+        if (down) {
+            if (button == SDL_CONTROLLER_BUTTON_GUIDE)
+                g_pending_guide.store(true);
+            else
+                g_pending_start.store(true);
+        }
+        return;
+    }
     if (button == SDL_CONTROLLER_BUTTON_A || button == SDL_CONTROLLER_BUTTON_B) {
         bool& owned = button == SDL_CONTROLLER_BUTTON_A
             ? g_exit_a_owned : g_exit_b_owned;
@@ -1915,7 +2006,7 @@ static void on_frame(void*)
                 if (menu == 2) {
                     *reinterpret_cast<int*>(gui + g_probe_selection_offset) =
                         std::strcmp(g_probe_game, "Tetris") == 0 ? 1 :
-                        std::strcmp(g_probe_game, "TetrisFive") == 0 ? 13 : 2;
+                        std::strcmp(g_probe_game, "TetrisFive") == 0 ? 13 : std::strcmp(g_probe_game, "BrickBreaker") == 0 ? 7 : 2;
                     via_gui = invoke_gui_manager(m_gui_press_start_pause_game,
                         mi_gui_press_start_pause_game, "PressStartPauseGame");
                 }
@@ -2021,6 +2112,8 @@ static int init(const BogoPluginApi* api)
             g_probe_game = probe_game;
         const char* down_trace = g_api->getenv("BRICKGAME_DOWN_TRACE");
         g_down_trace = down_trace && std::strcmp(down_trace, "1") == 0;
+        const char* tank_fix = g_api->getenv("BRICKGAME_TANK_SPEED_FIX");
+        g_tank_speed_fix = !tank_fix || std::strcmp(tank_fix, "0") != 0;
         const char* down_fix = g_api->getenv("BRICKGAME_DOWN_FIX");
         g_down_fix_enabled = !down_fix || std::strcmp(down_fix, "0") != 0;
         const char* rotate_fix = g_api->getenv("BRICKGAME_ROTATE_FIX");

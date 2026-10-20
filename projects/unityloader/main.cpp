@@ -327,9 +327,139 @@ static uintptr_t bypass_video_translate(uintptr_t a0, uintptr_t a1, uintptr_t a2
 #include <glob.h>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <thread>
+#include <cerrno>
+#include <cstdint>
 #include <set>
 #include "startup_trace.h"
 #include "startup_splash.h"
+
+// A physical power-button tap must stop Unity's frame/update loop before the
+// kernel suspends the handheld. The input thread enters /sys/power/state after
+// key-up; this frame thread acknowledges at a safe boundary and sleeps on a CV.
+static std::mutex g_power_mutex;
+static std::condition_variable g_power_cv;
+static bool g_power_pending = false;
+static bool g_power_key_down = false;
+static bool g_power_main_paused = false;
+static bool g_power_release_seen = false;
+
+static void bd_power_key_event(bool down)
+{
+    if (down) {
+        {
+            std::lock_guard<std::mutex> lock(g_power_mutex);
+            if (g_power_pending)
+                return;
+            g_power_pending = true;
+            g_power_key_down = true;
+            g_power_release_seen = false;
+        }
+        BD_LOG("POWER", "standby requested by power key");
+        g_power_cv.notify_all();
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(g_power_mutex);
+    if (!g_power_key_down)
+        return;
+    g_power_key_down = false;
+    if (!g_power_cv.wait_for(lock, std::chrono::seconds(5), [] {
+            return g_power_main_paused || !g_power_pending;
+        })) {
+        g_power_pending = false;
+        g_power_main_paused = false;
+        g_power_release_seen = false;
+        lock.unlock();
+        g_power_cv.notify_all();
+        BD_LOG("POWER", "standby canceled: Unity frame loop did not pause");
+        return;
+    }
+    if (!g_power_pending)
+        return;
+    g_power_release_seen = true;
+    g_power_cv.notify_all();
+    lock.unlock();
+
+    const char* override_path = std::getenv("BD_POWER_STATE_PATH");
+    const char* state_path = override_path && *override_path
+        ? override_path : "/sys/power/state";
+    BD_LOG("POWER", "requesting system mem standby via %s", state_path);
+    int fd = open(state_path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        const int error = errno;
+        BD_LOG("POWER", "cannot open %s: errno=%d (%s)", state_path,
+               error, std::strerror(error));
+    } else {
+        const char command[] = "mem\n";
+        const ssize_t written = write(fd, command, sizeof(command) - 1);
+        const int error = errno;
+        close(fd);
+        if (written != static_cast<ssize_t>(sizeof(command) - 1)) {
+            BD_LOG("POWER", "standby write failed: bytes=%lld errno=%d (%s)",
+                   static_cast<long long>(written), error, std::strerror(error));
+        } else if (override_path && *override_path) {
+            // Deterministic host-side simulation; never affects production
+            // unless the explicit test-only state path override is supplied.
+            const char* hold = std::getenv("BD_POWER_TEST_HOLD_MS");
+            const int hold_ms = hold ? std::atoi(hold) : 0;
+            BD_LOG("POWER", "test standby active; Unity updates remain paused");
+            if (hold_ms > 0 && hold_ms <= 10000)
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            BD_LOG("POWER", "test wake; resuming Unity updates");
+        } else {
+            // A sysfs state write returns only after the wake source resumes us.
+            BD_LOG("POWER", "system woke from mem standby");
+        }
+    }
+
+    lock.lock();
+    g_power_pending = false;
+    g_power_main_paused = false;
+    g_power_release_seen = false;
+    lock.unlock();
+    g_power_cv.notify_all();
+}
+
+static void bd_power_wait_if_requested(uint64_t render_frame)
+{
+    std::unique_lock<std::mutex> lock(g_power_mutex);
+    if (!g_power_pending)
+        return;
+
+    const auto paused_at = std::chrono::steady_clock::now();
+    g_power_main_paused = true;
+    BD_LOG("POWER", "Unity nativeRender paused at frame=%llu",
+           static_cast<unsigned long long>(render_frame));
+    g_power_cv.notify_all();
+
+    // A stuck key must not freeze a game forever. Once the physical release is
+    // observed, wait without a timeout until the kernel resumes the device.
+    if (!g_power_cv.wait_for(lock, std::chrono::seconds(3), [] {
+            return g_power_release_seen || !g_power_pending;
+        }) && g_power_pending) {
+        g_power_pending = false;
+        g_power_key_down = false;
+        g_power_main_paused = false;
+        lock.unlock();
+        g_power_cv.notify_all();
+        BD_LOG("POWER", "standby canceled: power key was not released");
+        return;
+    }
+    if (g_power_pending)
+        g_power_cv.wait(lock, [] { return !g_power_pending; });
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - paused_at).count();
+    g_power_main_paused = false;
+    lock.unlock();
+    g_power_cv.notify_all();
+    BD_LOG("POWER", "Unity nativeRender resumed at frame=%llu after %lld ms",
+           static_cast<unsigned long long>(render_frame),
+           static_cast<long long>(elapsed));
+}
 
 static struct timespec g_bd_start_ts;
 static int g_bd_start_inited = 0;
@@ -1793,6 +1923,7 @@ int main(int argc, char* argv[])
     backend.setMotionCallback([unityActivity](std::shared_ptr<jnivm::android::view::MotionEvent> event) {
         unityActivity->injectEvent(event);
     });
+    backend.setPowerKeyCallback(bd_power_key_event);
 
     auto unityInitJni = unityClass->getMethod("(Landroid/content/Context;)V", "initJni");
     BOOT_LOG("calling initJni from libunity.so\n");
@@ -1836,6 +1967,8 @@ int main(int argc, char* argv[])
 
     gdb_break_here();
 
+    bd_startup_wait_before_resume();
+
     auto unityNResume = unityClass->getMethod("()V", "nativeResume");
     BOOT_LOG("calling nativeResume from libunity.so\n");
     { bd_startup::Scope elapsed("Unity nativeResume");
@@ -1849,6 +1982,7 @@ int main(int argc, char* argv[])
     auto unityNRender = unityClass->getMethod("()Z", "nativeRender");
     BD_TIME("before first nativeRender");
     BOOT_LOG("calling nativeRender from libunity.so\n");
+    bd_power_wait_if_requested(0);
     bd_input_observer_begin_frame();
     { bd_startup::Scope elapsed("first nativeRender");
       unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get()); }
@@ -1864,12 +1998,15 @@ int main(int argc, char* argv[])
 #ifdef BD_ENABLE_LOG
     unsigned startup_frames = 0, startup_slow_reports = 0;
 #endif
+    uint64_t native_render_frames = 1;
     while (true) {
+        bd_power_wait_if_requested(native_render_frames);
         bd_input_observer_begin_frame();
 #ifdef BD_ENABLE_LOG
         const double render_begin = bd_startup::ms();
 #endif
         auto ret4 = unityNRender.invoke(frame3.getJniEnv(), unityPlayerObj.get());
+        ++native_render_frames;
 #ifdef BD_ENABLE_LOG
         if (render_begin < 20000 && startup_slow_reports < 12) {
             const double duration = bd_startup::ms() - render_begin;

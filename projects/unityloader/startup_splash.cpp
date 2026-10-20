@@ -27,6 +27,12 @@ int image_w = 0, image_h = 0;
 int frame_count = 1, frame_ms = 0;
 Uint32 animation_started = 0;
 bool video_mode = false;
+Uint32 minimum_visible_ms = 0;
+
+bool can_dismiss() {
+    return scene_ready.load(std::memory_order_acquire) &&
+        SDL_GetTicks() - animation_started >= minimum_visible_ms;
+}
 float height_fraction = 1.0f;
 std::unique_ptr<StartupVideo> video;
 std::thread animation_thread;
@@ -186,6 +192,7 @@ int bd_startup_set_image(const char* path) {
     frame_count = 1;
     frame_ms = 0;
     video_mode = false;
+    minimum_visible_ms = 0;
     height_fraction = 1.0f;
     return 1;
 }
@@ -200,11 +207,30 @@ int bd_startup_set_animation(const char* path, int count, int interval_ms) {
 int bd_startup_set_video(const char* path, float fraction) {
     if (!(fraction > 0 && fraction <= 1) || !bd_startup_set_image(path)) return 0;
     video_mode = true;
+    minimum_visible_ms = 3000;
     height_fraction = fraction;
     return 1;
 }
 
 void bd_startup_scene_ready() { scene_ready.store(true, std::memory_order_release); }
+
+void bd_startup_wait_before_resume() {
+    if (!visible || !minimum_visible_ms) return;
+    const bool fallback = !background;
+    SDL_GLContext previous = SDL_GL_GetCurrentContext();
+    SDL_Window* previous_window = SDL_GL_GetCurrentWindow();
+    if (fallback && SDL_GL_MakeCurrent(sdl_win, sdl_ctx) != 0) return;
+    bd_startup::mark("waiting for splash minimum before Unity resume");
+    while (SDL_GetTicks() - animation_started < minimum_visible_ms) {
+        if (fallback) {
+            bd_startup_draw();
+            SDL_GL_SwapWindow(sdl_win);
+        }
+        SDL_Delay(1);
+    }
+    if (fallback) SDL_GL_MakeCurrent(previous_window ? previous_window : sdl_win, previous);
+    bd_startup::mark("splash minimum complete; Unity may resume");
+}
 
 void bd_startup_show() {
     if (image_path.empty()) return;
@@ -301,7 +327,7 @@ void bd_startup_show() {
 
 bool bd_startup_draw() {
     if (!visible) return false;
-    if (!background && scene_ready.load(std::memory_order_acquire)) {
+    if (!background && can_dismiss()) {
         release();
         video.reset();
         bd_startup::mark("startup image dismissed; game frame ready");
@@ -397,7 +423,7 @@ int bd_startup_make_current(void* context) {
 
 bool bd_startup_background_present() {
     if (!background) return false;
-    if (!scene_ready.load(std::memory_order_acquire) && animate.load(std::memory_order_acquire))
+    if (!can_dismiss() && animate.load(std::memory_order_acquire))
         return true;
     animate.store(false, std::memory_order_release);
     animation_thread.join();

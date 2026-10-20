@@ -7,6 +7,8 @@ int bd_startup_set_animation(const char* path, int frame_count, int frame_ms);
 int bd_startup_set_video(const char* path, float height_fraction);
 void bd_startup_scene_ready();
 void bd_startup_show();
+// Finish the minimum video presentation before Unity starts updating its scene.
+void bd_startup_wait_before_resume();
 // Called on the current render context before a guest swap.
 bool bd_startup_draw();
 // SDL-style result; -2 asks the EGL bridge to use its regular SDL binding.

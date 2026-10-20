@@ -750,6 +750,26 @@ void InputBackend::runEventLoop()
         if (!replay.empty())
             BD_LOG("PAD", "replay armed: %zu step(s)", replay.size());
     }
+    struct PowerReplayStep { Uint32 at, hold; bool down_done, up_done; };
+    std::vector<PowerReplayStep> power_replay;
+    if (const char* spec = std::getenv("BD_POWER_REPLAY")) {
+        Uint32 hold = 120;
+        if (const char* h = std::getenv("BD_POWER_REPLAY_HOLD"))
+            hold = static_cast<Uint32>(std::max(0, std::atoi(h)));
+        std::string s(spec);
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t comma = s.find(',', start);
+            std::string item = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos : comma - start);
+            start = (comma == std::string::npos) ? s.size() + 1 : comma + 1;
+            if (!item.empty()) {
+                const Uint32 at = static_cast<Uint32>(std::max(0, std::atoi(item.c_str())));
+                power_replay.push_back({at, hold, false, false});
+                BD_LOG("POWER", "test replay at %u ms (press %u ms)", at, hold);
+            }
+        }
+    }
     const Uint32 replay_t0 = SDL_GetTicks();
 
     auto replayInject = [&](int button, bool down) {
@@ -792,7 +812,7 @@ void InputBackend::runEventLoop()
     };
 
     auto replayTick = [&]() {
-        if (replay.empty()) return;
+        if (replay.empty() && power_replay.empty()) return;
         Uint32 now = SDL_GetTicks() - replay_t0;
         for (auto& step : replay) {
             if (!step.down_done && now >= step.at) {
@@ -803,8 +823,32 @@ void InputBackend::runEventLoop()
                 replayInject(step.button, false);
             }
         }
+        for (auto& step : power_replay) {
+            bool down = false;
+            bool inject = false;
+            if (!step.down_done && now >= step.at) {
+                step.down_done = true;
+                down = true;
+                inject = true;
+            } else if (step.down_done && !step.up_done && now >= step.at + step.hold) {
+                step.up_done = true;
+                inject = true;
+            }
+            if (inject) {
+                SDL_Event event{};
+                event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+                event.key.type = event.type;
+                event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+                event.key.keysym.scancode = SDL_SCANCODE_POWER;
+                event.key.keysym.sym = SDL_GetKeyFromScancode(SDL_SCANCODE_POWER);
+                SDL_PushEvent(&event);
+            }
+        }
     };
 
+    bool power_key_down = false;
+    bool suppress_power_key_up = false;
+    Uint32 ignore_power_until = 0;
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -815,6 +859,32 @@ void InputBackend::runEventLoop()
 
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
+                if (e.key.keysym.scancode == SDL_SCANCODE_POWER) {
+                    const bool down = e.type == SDL_KEYDOWN;
+                    if (down && ignore_power_until &&
+                        !SDL_TICKS_PASSED(SDL_GetTicks(), ignore_power_until)) {
+                        suppress_power_key_up = true;
+                        BD_LOG("POWER", "ignored wake-key event after standby");
+                        break;
+                    }
+                    if (!down && suppress_power_key_up) {
+                        suppress_power_key_up = false;
+                        break;
+                    }
+                    if (down && !power_key_down) {
+                        power_key_down = true;
+                        BD_LOG("POWER", "power key down");
+                        if (onPowerKey) onPowerKey(true);
+                    } else if (!down && power_key_down) {
+                        power_key_down = false;
+                        if (onPowerKey) onPowerKey(false);
+                        // Some wake-capable input drivers leave the wake press
+                        // queued for SDL. Discard that paired event, but allow
+                        // the next deliberate power press shortly afterward.
+                        ignore_power_until = SDL_GetTicks() + 500;
+                    }
+                    break;
+                }
                 if (e.key.keysym.scancode == SDL_SCANCODE_VOLUMEUP ||
                     e.key.keysym.scancode == SDL_SCANCODE_VOLUMEDOWN) {
                     if (bd_sys_volume_owns_keys()) {
@@ -1518,3 +1588,4 @@ extern "C" int bd_input_inject_touch(int pointerId, float x, float y,
 // ---- Callbacks ----
 void InputBackend::setKeyCallback(std::function<void(std::shared_ptr<jnivm::android::view::KeyEvent>)> cb) { onKey = std::move(cb); }
 void InputBackend::setMotionCallback(std::function<void(std::shared_ptr<jnivm::android::view::MotionEvent>)> cb) { onMotion = std::move(cb); }
+void InputBackend::setPowerKeyCallback(std::function<void(bool)> cb) { onPowerKey = std::move(cb); }
