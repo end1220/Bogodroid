@@ -1,3 +1,4 @@
+#include "casing_art.h"
 #include "plugin_il2cpp.h"
 #include "gameover_icons.h"
 #include "exit_icons.h"
@@ -242,6 +243,7 @@ struct CasingSide {
     bool ready = false;
 };
 static CasingSide g_casing_left, g_casing_right;
+static void* g_casing_center_rt = nullptr;
 static void* g_feedback_menu_go = nullptr;
 // ShowFeedBackMenu can replace IntroductionMenu.Start at playCounts 5/10.
 // Dismiss via the original No action on the next Unity Update; hiding the
@@ -641,6 +643,7 @@ static void discover_control_rects(void* transform, int depth,
             : nullptr;
         const std::string name = managed_string_utf8(child_name);
         if (transform == g_app_content_rt) {
+            if (name == "CasingCenter") g_casing_center_rt = child;
             if (name == "Casing_Left") g_casing_left.rt = child;
             if (name == "Casing_Right") g_casing_right.rt = child;
         }
@@ -941,6 +944,10 @@ static void apply_canvas_layout()
     apply_target(g_app_content_rt, "AppContent");
     apply_target(g_pad_rt, "Pad");
     fit_casing_sides();
+    if (g_canvas_rt && m_rt_get_rect) {
+        const Rect canvas = m_rt_get_rect(g_canvas_rt, mi_rt_get_rect);
+        casing_art::update(g_canvas_rt, g_casing_center_rt, canvas.width, canvas.height);
+    }
     apply_control_rects();
     suppress_feedback_ui();
     g_canvas_targets_logged = true;
@@ -1612,6 +1619,7 @@ static void post_il2cpp_init(void*)
 
     bind_gameover_icons(g_il2cpp, g_api);
     bind_exit_icon(g_il2cpp, g_api);
+    casing_art::bind(g_il2cpp, g_api);
     bool ok = true;
     ok &= g_il2cpp.resolve_call(core, "UnityEngine", "Component", "get_transform", 0,
                        reinterpret_cast<void**>(&m_component_get_transform),

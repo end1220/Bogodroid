@@ -1,8 +1,8 @@
 # BrickGame artwork and startup video
 
-`splashvideo.mp4` is the user's latest desktop `BrickGame/splash.mp4`
-(2026-10-16). It contains 8 seconds of 856×480, 24 fps HEVC/yuv420p video
-and an AAC audio track. The deployed port is now named FatFishBrick (肥鱼方块).
+`splashvideo.mp4` is the user's latest desktop `BrickGame/splash2.mp4`
+(2026-10-21). It contains about 8.1 seconds of 752×560, 24 fps H.264/yuv420p
+video and an AAC audio track. The deployed port is now named FatFishBrick (肥鱼方块).
 The plugin requests silent playback, centered at 3/4 of the game window height,
 preserving the video's aspect ratio. It loops for at least three seconds from
 its first presentation and remains visible until the first scene is ready. The loader waits for the minimum before

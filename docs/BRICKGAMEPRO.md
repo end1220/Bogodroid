@@ -565,3 +565,33 @@ exit=0 and four native SDL/GL/FFmpeg output lines, with no [BD-*] messages. A
 separate mocked standby run wrote mem to its test state file. The stripped
 loader and plugin were synchronized to both Desktop FatFishBrick distributions
 and handheld 172.16.7.42; remote SHA256 values matched local staging.
+
+## Separate casing character (2026-10-21)
+
+The Blue atlas now uses the supplied `BlueNew2.png` (versioned as
+`assets/blue-casing.png`). `tools/replace-blue-skin.py` replaces only texture
+path ID 16's ETC2_RGBA8 payload in `sharedassets0.assets`: split11 and split12
+change, with the original split lengths, all Sprite metadata and every other
+serialized object preserved. The generated manifest and previous split files
+are in `build-trimui-1280x720/blue-separated/`.
+
+The supplied 244x493 `女孩.png` is embedded as `assets/casing-girl.png` in the
+plugin. `casing_art.cpp` creates one noninteractive RawImage under the root
+Canvas, after the casing branches. Its left edge follows CasingCenter's right
+world corner converted back into root Canvas coordinates, with a 0.4%-of-height
+overlap, an additional left shift of 11/244 of the rendered character width
+(11 source-art pixels), and a 1.5% bottom inset. This keeps the character against the game panel
+on both 4:3 and wide screens, instead of against the physical screen edge. Height is 45% of Canvas height; width is
+height multiplied by 244/493. This deliberately avoids inheriting the stretched
+casing rectangle. Geometry updates only when Canvas dimensions change. The
+managed texture releases its CPU pixel copy and temporary GC root after loading.
+
+Container validation used the current ARM64 loader and rebuilt plugin with
+Release, LOG ON, TRACE/VERBOSE/IL2CPP_TRACE OFF, and explicitly
+JNIVM_ENABLE_RETURN_NON_ZERO OFF. Xvfb screenshots at 1280x720 and 640x480 show
+an unstretched character fully within the right casing, at respectively 324 and
+216 pixels high. Files: `build-trimui-1280x720/blue-separated/1280x720.png` and
+`640x480.png`. The panel-aligned revision is captured as
+`panel-1280x720.png` and `panel-640x480.png` in the same directory. Capture the X11 root window for visual verification: this
+container's GL readback dump is black even when the actual window is rendered.
+No handheld deployment was performed.
