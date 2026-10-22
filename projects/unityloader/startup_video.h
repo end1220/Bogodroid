@@ -3,7 +3,7 @@
 #include <memory>
 
 // A bounded, silent video decoder. Owned by the startup presentation thread;
-// keeps the displayed RGBA frame, the latest due frame, and one pending frame.
+// keeps the displayed RGB24 frame, the latest due frame, and one pending frame.
 class StartupVideo {
 public:
     StartupVideo();

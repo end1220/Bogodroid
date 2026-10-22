@@ -298,8 +298,9 @@ void bd_startup_show() {
         image_h = video_mode ? video->height() : rgba->h;
         animation_started = SDL_GetTicks();
         glad_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glad_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image_w, image_h, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE,
+        const GLenum format = video_mode ? GL_RGB : GL_RGBA;
+        glad_glTexImage2D(GL_TEXTURE_2D, 0, format, image_w, image_h, 0,
+                         format, GL_UNSIGNED_BYTE,
                          video_mode ? video->pixels() : rgba->pixels);
         glad_glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
         glad_glBindTexture(GL_TEXTURE_2D, binding);
@@ -375,7 +376,7 @@ bool bd_startup_draw() {
         glad_glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glad_glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         glad_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image_w, image_h,
-                             GL_RGBA, GL_UNSIGNED_BYTE, video->pixels());
+                             GL_RGB, GL_UNSIGNED_BYTE, video->pixels());
         glad_glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
         glad_glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
         glad_glPixelStorei(GL_UNPACK_SKIP_PIXELS, skip_pixels);

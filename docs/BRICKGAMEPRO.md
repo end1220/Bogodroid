@@ -595,3 +595,16 @@ an unstretched character fully within the right casing, at respectively 324 and
 `panel-1280x720.png` and `panel-640x480.png` in the same directory. Capture the X11 root window for visual verification: this
 container's GL readback dump is black even when the actual window is rendered.
 No handheld deployment was performed.
+
+## Splash RGB upload compatibility (2026-10-22)
+
+The startup decoder outputs packed RGB24 and uploads it with `GL_RGB`.
+Container FFmpeg 4.2 and the tested TrimUI runtime both returned zero rows for
+YUV420P-to-RGBA conversion; RGB24 returned the complete frame. Keep the decoder
+buffer size, row stride, initial texture format and subsequent uploads consistent.
+This avoids extra runtime libraries. TrimUI and Anbernic both passed handheld
+playback tests with the current 752x560 H.264 startup video.
+
+Release deployment for this fix explicitly disables `BD_ENABLE_LOG`, TRACE,
+VERBOSE and IL2CPP_TRACE; `JNIVM_ENABLE_RETURN_NON_ZERO` stays OFF. Fatal error
+diagnostics remain independent of these switches.

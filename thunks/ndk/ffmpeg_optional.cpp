@@ -10,6 +10,7 @@
 
 #include <dlfcn.h>
 #include <mutex>
+#include "logging.h"
 
 namespace bd_ffmpeg {
 #define BD_FFMPEG_DEFINE(name) decltype(&::name) name = nullptr;
@@ -21,7 +22,14 @@ std::once_flag g_once;
 bool g_available = false;
 
 void* open_one(const char* soname) {
-    return dlopen(soname, RTLD_LAZY | RTLD_GLOBAL);
+    dlerror();
+    void* handle = dlopen(soname, RTLD_LAZY | RTLD_GLOBAL);
+    if (!handle) {
+        const char* error = dlerror();
+        BD_LOG("FFMPEG", "dlopen %s failed: %s", soname,
+               error ? error : "unknown error");
+    }
+    return handle;
 }
 
 void load_once() {
@@ -33,6 +41,7 @@ void load_once() {
     g_available = avutil && swresample && swscale && avcodec && avformat;
 #define BD_FFMPEG_LOAD(name) \
     name = reinterpret_cast<decltype(name)>(dlsym(RTLD_DEFAULT, #name)); \
+    if (!name) BD_LOG("FFMPEG", "symbol missing: %s", #name); \
     g_available = g_available && name;
     BD_FFMPEG_SYMBOLS(BD_FFMPEG_LOAD)
 #undef BD_FFMPEG_LOAD
