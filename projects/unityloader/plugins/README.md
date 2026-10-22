@@ -60,6 +60,9 @@ Bundled plugins:
 - `terraria_autoname`: title-specific character naming support.
 - `samurai2_offline`: offline Madfinger Google Play JNI implementation. It
   requires `[google_play] offline = true` in the game's TOML file.
+- `spacesquids`: Space Squids native flight/fire and touch cursor menus,
+  directional ship-list scrolling, sliders, and death-panel input protection.
+  See [controller and deployment notes](../../../docs/SPACESQUIDS_CONTROLLER.md).
 - `skul_pad`: **archived** Skul PAD/bootstrap hooks (port stopped; keep
   `game_patches.skul_pad.enabled = false` unless replaying that case study).
 
@@ -138,6 +141,25 @@ edges, axis values, and render-frame boundaries before the Android compatibility
 path filters or remaps the event. Callbacks must stay bounded and must not throw
 across the C ABI boundary. Plugins that install RVA hooks should use
 `api->so_base(api->il2cpp)` for the opaque module's load base.
+
+## Controller capture and cursor (optional ABI v8 tail)
+
+Check `struct_size` before using `set_controller_capture(enabled)` and
+`set_present_cursor(visible, x, y, design_width, design_height)`. Existing v8
+field offsets are unchanged; plugins using these entries require a newer host.
+
+Capture runs after raw input observers. The input thread releases previously
+delivered controller keys, sends neutral axes, and suppresses subsequent native
+controller input while observers continue receiving physical input. Start+Select
+still exits. A plugin must manage held-button and axis-neutral gating when it
+returns control to the game; capture does not replay held input on release.
+
+The cursor uses top-left design coordinates, matching `inject_touch`, and draws
+after the game's present transform and before swap (hidden during startup).
+It is a white 15-pixel cross with a dark 19-pixel outline in drawable pixels;
+the arm widths are 5 and 9 pixels. GL draw-framebuffer, scissor, clear color,
+and color-mask state are restored afterward. These calls set host-owned state;
+title UI discovery and navigation remain in the plugin.
 
 ## Present viewport (ABI v8)
 

@@ -542,6 +542,11 @@ extern "C" ABI_ATTR int __system_property_get_impl(const char* name, char* value
         {"ro.product.cpu.abilist", "arm64-v8a"},
         {"ro.product.cpu.abilist64", "arm64-v8a"},
         {"ro.product.cpu.abilist32", ""},
+        // Unity 2022 enables Android Game SDK Swappy frame pacing by default.
+        // Swappy's ChoreographerThread has no usable callback under Bogodroid
+        // and dereferences NULL on the first eglSwapBuffers. The documented
+        // opt-out is the swappy.disable system property.
+        {"swappy.disable", "1"},
     };
     if (name) {
         for (const auto& prop : kProps) {

@@ -847,42 +847,55 @@ jnivm::android::app::AlertDialogBuilder::AlertDialogBuilder(std::shared_ptr<jniv
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setTitle(std::shared_ptr<jnivm::CharSequence> title)
 {
-    if (auto str = title->toString()) {
-        warning("AlertDialog title: %s\n", str->c_str());
+    if (title) {
+        if (auto str = title->toString()) {
+            BD_LOG("DIALOG", "AlertDialog title: %s", str->c_str());
+        }
     }
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setMessage(std::shared_ptr<jnivm::CharSequence> message)
 {
-    if (auto str = message->toString()) {
-        warning("AlertDialog message: %s\n", str->c_str());
+    if (message) {
+        if (auto str = message->toString()) {
+            BD_LOG("DIALOG", "AlertDialog message: %s", str->c_str());
+        }
     }
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setPositiveButton(std::shared_ptr<jnivm::CharSequence> text, std::shared_ptr<jnivm::android::app::DialogInterfaceOnClickListener> listener)
 {
+    BD_LOG("DIALOG", "AlertDialog positive text=%s listener=%p",
+           (text && text->toString()) ? text->toString()->c_str() : "(null)",
+           (void*)listener.get());
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setNegativeButton(std::shared_ptr<jnivm::CharSequence> text, std::shared_ptr<jnivm::android::app::DialogInterfaceOnClickListener> listener)
 {
+    BD_LOG("DIALOG", "AlertDialog negative text=%s listener=%p",
+           (text && text->toString()) ? text->toString()->c_str() : "(null)",
+           (void*)listener.get());
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setOnCancelListener(std::shared_ptr<jnivm::android::app::DialogInterfaceOnCancelListener> listener)
 {
+    BD_LOG("DIALOG", "AlertDialog onCancel listener=%p", (void*)listener.get());
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialogBuilder> jnivm::android::app::AlertDialogBuilder::setView(std::shared_ptr<jnivm::android::view::View> view)
 {
+    BD_LOG("DIALOG", "AlertDialog setView=%p", (void*)view.get());
     return std::static_pointer_cast<jnivm::android::app::AlertDialogBuilder>(shared_from_this());
 }
 
 std::shared_ptr<jnivm::android::app::AlertDialog> jnivm::android::app::AlertDialogBuilder::show()
 {
+    BD_LOG("DIALOG", "AlertDialog show");
     return std::make_shared<jnivm::android::app::AlertDialog>();
 }
 

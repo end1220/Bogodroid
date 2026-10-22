@@ -13,6 +13,7 @@
 #include "so_util.h"
 #include "thunk_gen.h"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <errno.h>
@@ -92,6 +93,95 @@ struct BD_PresentViewport {
 };
 
 static BD_PresentViewport g_present_viewport;
+
+struct BD_PresentCursor {
+    std::atomic<bool> visible{false};
+    std::atomic<float> x{0.0f};
+    std::atomic<float> y{0.0f};
+    std::atomic<float> designWidth{0.0f};
+    std::atomic<float> designHeight{0.0f};
+};
+static BD_PresentCursor g_present_cursor;
+
+extern "C" int bd_present_cursor_set(int visible, float x, float y,
+                                      float designWidth, float designHeight)
+{
+    g_present_cursor.x.store(x, std::memory_order_relaxed);
+    g_present_cursor.y.store(y, std::memory_order_relaxed);
+    g_present_cursor.designWidth.store(designWidth, std::memory_order_relaxed);
+    g_present_cursor.designHeight.store(designHeight, std::memory_order_relaxed);
+    g_present_cursor.visible.store(visible != 0, std::memory_order_release);
+    return 1;
+}
+
+static void bd_present_cursor_draw()
+{
+    if (!g_present_cursor.visible.load(std::memory_order_acquire) ||
+        !sdl_win || !glad_glScissor || !glad_glClearColor || !glad_glClear ||
+        !glad_glGetIntegerv || !glad_glGetFloatv || !glad_glIsEnabled)
+        return;
+
+    int width = 0;
+    int height = 0;
+    SDL_GL_GetDrawableSize(sdl_win, &width, &height);
+    const float logicalWidth = g_present_cursor.designWidth.load(
+        std::memory_order_relaxed);
+    const float logicalHeight = g_present_cursor.designHeight.load(
+        std::memory_order_relaxed);
+    if (width <= 0 || height <= 0 || logicalWidth <= 0.0f ||
+        logicalHeight <= 0.0f)
+        return;
+
+    const float x = g_present_cursor.x.load(std::memory_order_relaxed) /
+        logicalWidth * width;
+    const float y = g_present_cursor.y.load(std::memory_order_relaxed) /
+        logicalHeight * height;
+    const int cx = std::clamp(static_cast<int>(std::lround(x)), 0, width - 1);
+    const int cy = std::clamp(static_cast<int>(std::lround(y)), 0, height - 1);
+
+    GLint previous_draw_fbo = 0;
+    GLint previous_scissor[4]{};
+    GLfloat previous_clear[4]{};
+    GLboolean previous_color_mask[4]{};
+    glad_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+    glad_glGetIntegerv(GL_SCISSOR_BOX, previous_scissor);
+    glad_glGetFloatv(GL_COLOR_CLEAR_VALUE, previous_clear);
+    glad_glGetBooleanv(GL_COLOR_WRITEMASK, previous_color_mask);
+    const GLboolean scissor_was_enabled = glad_glIsEnabled(GL_SCISSOR_TEST);
+    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glad_glEnable(GL_SCISSOR_TEST);
+    glad_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    auto rect = [&](int left, int top, int w, int h,
+                    float r, float g, float b) {
+        left = std::clamp(left, 0, width);
+        top = std::clamp(top, 0, height);
+        w = std::clamp(w, 0, width - left);
+        h = std::clamp(h, 0, height - top);
+        if (w <= 0 || h <= 0)
+            return;
+        glad_glScissor(left, height - top - h, w, h);
+        glad_glClearColor(r, g, b, 1.0f);
+        glad_glClear(GL_COLOR_BUFFER_BIT);
+    };
+
+    rect(cx - 4, cy - 9, 9, 19, 0.02f, 0.03f, 0.04f);
+    rect(cx - 9, cy - 4, 19, 9, 0.02f, 0.03f, 0.04f);
+    rect(cx - 2, cy - 7, 5, 15, 1.0f, 1.0f, 1.0f);
+    rect(cx - 7, cy - 2, 15, 5, 1.0f, 1.0f, 1.0f);
+    rect(cx - 1, cy - 1, 3, 3, 1.0f, 1.0f, 1.0f);
+
+    glad_glClearColor(previous_clear[0], previous_clear[1],
+                      previous_clear[2], previous_clear[3]);
+    glad_glColorMask(previous_color_mask[0], previous_color_mask[1],
+                     previous_color_mask[2], previous_color_mask[3]);
+    glad_glScissor(previous_scissor[0], previous_scissor[1],
+                   previous_scissor[2], previous_scissor[3]);
+    if (!scissor_was_enabled)
+        glad_glDisable(GL_SCISSOR_TEST);
+    glad_glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
+                            static_cast<GLuint>(previous_draw_fbo));
+}
 
 extern "C" int bd_present_viewport_set_filter(int enabled, double renderScale,
                                               const char* anchor, int offsetY,
@@ -1001,6 +1091,8 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
         bd_apply_present_viewport_transform();
     if (!skip_swap) {
         const bool splash = bd_startup_draw();
+        if (!splash)
+            bd_present_cursor_draw();
         SDL_GL_SwapWindow(sdl_win);
         static bool first_game_swap = true;
         if (!splash && first_game_swap) {

@@ -26,12 +26,19 @@ private:
 
     std::unordered_map<int, float> mControllerAxisState;
     std::unordered_map<int, float> mControllerRawAxisState;
+    // Physical stick values, kept separate so D-pad synthesis can be merged in
+    // without the D-pad release zeroing an active analog stick (and vice versa).
+    std::unordered_map<int, float> mControllerStickAxisState;
+    float mDpadAxisX = 0.0f;
+    float mDpadAxisY = 0.0f;
     float mLeftStickRange = 1.0f;
     float mRightStickRange = 1.0f;
     bool mClampStickVector = false;
 
     InputBackend(); // Private constructor for singleton
     void dispatchControllerAxisMotion(int sdlAxis, Sint16 rawValue);
+    void publishControllerAxes();
+    void updateDpadAxes(int logicalButton, bool down);
 
 public:
     // Singleton access

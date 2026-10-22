@@ -222,6 +222,7 @@ handled and which (particle systems, custom shaders) may need `--skip`.
 | Name                              | Project Name  | Status        | Notes                                                                                                              |
 |-----------------------------------|---------------|---------------|--------------------------------------------------------------------------------------------------------------------|
 | Unity 2021.3f (aarch64 il2cpp)                      | unityloader   | Working  | Runs simple games. Graphics, audio and input work. |
+| Space Squids (Unity 2022.2.14f1, ARM64 IL2CPP) | unityloader + spacesquids | Handheld tested | Native flight/fire, X missiles, touch cursor menus and all 11 ship cards. [Setup and controls](docs/SPACESQUIDS_CONTROLLER.md). |
 | Unity 2021.3f (aarch64 mono)                      | unityloader   | Working POC  | Simple demos and benchmarks are working, with low but reasonable performance. Implementation is still incomplete. |
 | Super Hexagon                     | hexagonloader | Not Booting   | Unchanged from Pre-NEO Bogodroid, needs complete rework  |
 | Limbo                             | limboloader   | Loading Screen| Unchanged from Pre-NEO Bogodroid, needs complete rework  |

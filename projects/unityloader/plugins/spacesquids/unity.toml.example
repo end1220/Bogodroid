@@ -1,0 +1,37 @@
+# Copy beside unityloader as unity.toml. Supply your own ARM64 game resources.
+[paths]
+game_files = "./game/"
+support_files = "./game/"
+# Android paths are relative to game_files after initialization.
+android_package_code = "./"
+android_external_files = "../conf/"
+android_files = "../conf/"
+android_cache = "../cache/"
+android_obb_dirs = ["./"]
+android_source_dirs = ["./"]
+
+[package]
+packageName = "com.bolopix.calamarispaziali"
+versionName = "0.1"
+mainIntentBundle = { unity = "-force-gles32" }
+
+[device]
+# Tested logical viewport; refresh rate is detected automatically.
+displayWidth = 640
+displayHeight = 480
+displayTouchscreen = 1
+
+[input]
+controller = true
+controller_name = "Microsoft X-Box 360 pad"
+touch_mode = true
+dpad_synthesize_hat = false
+dpad_synthesize_stick = true
+controller_key_events = false
+
+[unity]
+version = "il2cpp"
+block_analytics = true
+
+[google_play]
+offline = true

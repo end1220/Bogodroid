@@ -21,7 +21,7 @@ Unity 2022 和 Hollow Knight 四个 Ports 目录中运行通过并正常退出�
 |---|---|
 | GLES | 3.2 / Mali-G31；假 EGL（`BD_FAKE_EGL=ON`）；`SDL_GL_SetSwapInterval(0)` |
 | 分辨率 | 物理 640×480；插件把 16:9 相机铺满 4:3 |
-| 按键 | 内置 `ANBERNIC-keys` mapping；`dpad_synthesize_hat=false` |
+| 按键 | `ANBERNIC-keys` mapping；`dpad_synthesize_hat=false`。当前 loader 从 `gamecontrollerdb.txt` 加载，部署时须携带数据库（旧验证版使用内置表） |
 | 音频 | FMOD OpenSL 失败 → AudioTrack/`fakefmod` → SDL → ALSA。**不要**开 `BD_ENABLE_OPENSLES_SHIM` |
 | 音量 | `openbor_volume` sysfs（0–10）→ fakefmod 软件增益；游戏内 `VOLUMEUP`/`DOWN` 写回 sysfs |
 

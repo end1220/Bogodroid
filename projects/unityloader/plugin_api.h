@@ -115,6 +115,12 @@ typedef struct BogoPluginApi {
     // ready; fit centered with the requested
     // maximum height as a fraction of the game window (0 < fraction <= 1).
     int (*set_startup_video)(const char* path, float height_fraction);
+    // Optional v8 tail: capture stops controller KeyEvents and axes after
+    // observers, releasing previously delivered input on the input thread.
+    // The final-frame cursor uses top-left design coordinates, like touch.
+    int (*set_controller_capture)(int enabled);
+    int (*set_present_cursor)(int visible, float x, float y,
+                              float design_width, float design_height);
 } BogoPluginApi;
 
 typedef int (*BogoPluginInit)(const BogoPluginApi* api);

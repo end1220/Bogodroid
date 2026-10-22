@@ -111,6 +111,7 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern 'JNIVM_ENABLE|BD_ENABL
 | 分辨率 / 刷新率自动探测 | `[device] displayWidth/Height/RefreshRate`；`0` 或省略 = 探测（SDL → `/dev/fb0` → 640x480@60）。实现 `platform/common/device_display.cpp`，日志标签 `[BD-DEVICE]` |
 | PAD Java stub | `[play_asset_delivery] enabled/default_pack/pack_version/pack_path_template` |
 | 每帧 present 钩子 | Plugin ABI v6：`register_present_callback` |
+| 手柄捕获 / UI 光标 | ABI v8 可选尾部：`set_controller_capture` / `set_present_cursor`，需核对 `struct_size`；[Space Squids 示例](SPACESQUIDS_CONTROLLER.md) |
 | 模块生命周期 | Plugin ABI v6：`find_module(name)` / `register_module_loaded(name, cb, userdata)` |
 | CPU present / swap pause | `BD_EGL_CPU_PRESENT`、`BD_EGL_SWAP_PAUSE`（插件可 setenv） |
 

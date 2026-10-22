@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include "input_observer.h"
 #include <unistd.h>
 
@@ -64,9 +65,13 @@ static constexpr float BD_AXIS_RELEASE_THR = 0.30f;
 // Unity InputSystem's NavigationModel sticky-latch race on quick taps.
 // true  → AOSP-standard (HAT + KEYCODE), but exposes the race.
 static bool input_dpad_synthesize_hat = true;
+// D-pad → left-stick axes (AXIS_X/AXIS_Y). Handhelds without an analog stick
+// need this so a title reading Horizontal/Vertical still moves.
+static bool input_dpad_synthesize_stick = true;
 static bool input_start_select_exit = true;
 static bool g_exit_hotkey_start_down = false;
 static bool g_exit_hotkey_select_down = false;
+static std::atomic<bool> g_controller_input_captured{false};
 
 static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, const char* source)
 {
@@ -333,29 +338,16 @@ static void load_input_remap()
     bind_scancode("start",   SDL_SCANCODE_RETURN);
 }
 
-// doukutsu-rs 已验证的 Anbernic gpio-keys（js0 名 ANBERNIC-keys）。
-// 社区 community db 通常没有这条，不内置则 SDL 只出 JOYBUTTON/JOYHAT，
-// 当前事件循环吃的是 GameController 事件，按键会被丢掉。
-static const char* const kBuiltinControllerMaps[] = {
-    "19000000010000000100000000010000,ANBERNIC-keys,a:b0,b:b1,x:b3,y:b2,back:b6,start:b7,guide:b8,leftshoulder:b4,rightshoulder:b5,lefttrigger:b9,righttrigger:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftx:a0,lefty:a1,platform:Linux,",
-    "0300000008100000e501000001010000,Anbernic Gamepad,a:b1,b:b0,back:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b6,leftstick:b13,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b14,righttrigger:b9,rightx:a2,righty:a4,start:b11,x:b3,y:b4,platform:Linux,",
-};
-
 static void bd_load_gamecontroller_mappings()
 {
+    // Keep device mappings in the shipped database, so a per-device correction
+    // is not overwritten by an embedded mapping after loading this file.
     const char* db = getenv("SDL_GAMECONTROLLERCONFIG_FILE");
     if (db && db[0]) {
         int n = SDL_GameControllerAddMappingsFromFile(db);
         BD_LOG("INPUT", "SDL_GameControllerAddMappingsFromFile(%s) = %d", db, n);
     } else if (SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt") >= 0) {
         BD_LOG("INPUT", "loaded ./gamecontrollerdb.txt");
-    }
-
-    for (const char* line : kBuiltinControllerMaps) {
-        int rc = SDL_GameControllerAddMapping(line);
-        const char* name = strchr(line, ',');
-        BD_LOG("INPUT", "builtin map %s rc=%d",
-               name ? name + 1 : line, rc);
     }
 }
 
@@ -390,6 +382,8 @@ InputBackend::InputBackend()
     BD_LOG("INPUT-TOUCH", "controller_key_events=%d",
            input_controller_key_events ? 1 : 0);
     input_dpad_synthesize_hat = config["input"]["dpad_synthesize_hat"].value_or<bool>(true);
+    input_dpad_synthesize_stick =
+        config["input"]["dpad_synthesize_stick"].value_or<bool>(true);
     input_start_select_exit = config["input"]["start_select_exit"].value_or<bool>(true);
     BD_LOG("EXIT", "Start+Select hotkey enabled=%d", input_start_select_exit);
     if (auto* calibration = config["input"]["axis_calibration"].as_table()) {
@@ -416,6 +410,8 @@ InputBackend::InputBackend()
     } else {
         BD_LOG("INPUT-REMAP", "dpad_synthesize_hat = true (D-pad → KEYCODE + AXIS_HAT)");
     }
+    BD_LOG("INPUT-REMAP", "dpad_synthesize_stick = %s (D-pad → AXIS_X/AXIS_Y)",
+           input_dpad_synthesize_stick ? "true" : "false");
     load_input_remap();
 
     if (SDL_Init(SDL_INIT_EVENTS) < 0) {
@@ -543,6 +539,12 @@ InputBackend::InputBackend()
         mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_Y]     = 0.0f;
         mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_Z]     = 0.0f;
         mControllerRawAxisState[jnivm::android::view::MotionEvent::AXIS_RZ]    = 0.0f;
+        mControllerStickAxisState[jnivm::android::view::MotionEvent::AXIS_X]   = 0.0f;
+        mControllerStickAxisState[jnivm::android::view::MotionEvent::AXIS_Y]   = 0.0f;
+        mControllerStickAxisState[jnivm::android::view::MotionEvent::AXIS_Z]   = 0.0f;
+        mControllerStickAxisState[jnivm::android::view::MotionEvent::AXIS_RZ]  = 0.0f;
+        mDpadAxisX = 0.0f;
+        mDpadAxisY = 0.0f;
     }
 }
 
@@ -658,8 +660,19 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
             x /= magnitude;
             y /= magnitude;
         }
-        mControllerAxisState[xAxis] = x;
-        mControllerAxisState[yAxis] = y;
+        // Keep the physical stick separate; D-pad synthesis is merged on top so
+        // releasing one source never cancels the other.
+        mControllerStickAxisState[xAxis] = x;
+        mControllerStickAxisState[yAxis] = y;
+        if (isLeftStick) {
+            mControllerAxisState[xAxis] =
+                std::clamp(x + (input_dpad_synthesize_stick ? mDpadAxisX : 0.f), -1.0f, 1.0f);
+            mControllerAxisState[yAxis] =
+                std::clamp(y + (input_dpad_synthesize_stick ? mDpadAxisY : 0.f), -1.0f, 1.0f);
+        } else {
+            mControllerAxisState[xAxis] = x;
+            mControllerAxisState[yAxis] = y;
+        }
         motionValue = mControllerAxisState[axis];
     }
 
@@ -708,10 +721,62 @@ void InputBackend::dispatchControllerAxisMotion(int sdlAxis, Sint16 rawAxisValue
     }
 }
 
+// Merge the physical left stick and the D-pad-derived axis state, then publish
+// one MotionEvent. Called for D-pad edges; analog-stick motion publishes through
+// dispatchControllerAxisMotion().
+void InputBackend::publishControllerAxes()
+{
+    auto stick = [&](int axis) {
+        auto it = mControllerStickAxisState.find(axis);
+        return it == mControllerStickAxisState.end() ? 0.0f : it->second;
+    };
+    const float leftX = stick(jnivm::android::view::MotionEvent::AXIS_X);
+    const float leftY = stick(jnivm::android::view::MotionEvent::AXIS_Y);
+    mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_X] =
+        std::clamp(leftX + (input_dpad_synthesize_stick ? mDpadAxisX : 0.f), -1.0f, 1.0f);
+    mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_Y] =
+        std::clamp(leftY + (input_dpad_synthesize_stick ? mDpadAxisY : 0.f), -1.0f, 1.0f);
+    if (input_dpad_synthesize_hat) {
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_HAT_X] = mDpadAxisX;
+        mControllerAxisState[jnivm::android::view::MotionEvent::AXIS_HAT_Y] = mDpadAxisY;
+    }
+    if (!onMotion)
+        return;
+    auto dev = devices[INPUT_ID_XBOX];
+    auto motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
+        dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
+    motionEvent->axisValues = mControllerAxisState;
+    onMotion(motionEvent);
+}
+
+void InputBackend::updateDpadAxes(int logicalButton, bool down)
+{
+    if (!input_dpad_synthesize_stick && !input_dpad_synthesize_hat)
+        return;
+    switch (logicalButton) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        mDpadAxisY = down ? -1.0f : 0.0f; break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        mDpadAxisY = down ? +1.0f : 0.0f; break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        mDpadAxisX = down ? -1.0f : 0.0f; break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        mDpadAxisX = down ? +1.0f : 0.0f; break;
+    default:
+        return;
+    }
+    BD_LOG("PAD", "dpad axis %s x=%.1f y=%.1f",
+           down ? "down" : "up",
+           static_cast<double>(mDpadAxisX), static_cast<double>(mDpadAxisY));
+    publishControllerAxes();
+}
+
 // ---- Event Loop ----
 void InputBackend::runEventLoop()
 {
     running = true;
+    bool controller_input_captured = false;
+    std::map<int, std::pair<int, int>> delivered_controller_keys;
 
     // Diagnostic input playback. BD_PAD_REPLAY="8000:a,12000:b,16000:guide"
     // presses controller buttons at the given millisecond offsets, holding each
@@ -739,17 +804,27 @@ void InputBackend::runEventLoop()
             std::string name = item.substr(colon + 1);
             while (!name.empty() && std::isspace((unsigned char)name.front())) name.erase(name.begin());
             while (!name.empty() && std::isspace((unsigned char)name.back()))  name.pop_back();
+            // Optional per-press hold: "18000:a:4000". Useful for verifying
+            // held-button ownership across scene transitions and UI drags.
+            Uint32 step_hold = hold;
+            const size_t hold_separator = name.find(':');
+            if (hold_separator != std::string::npos) {
+                step_hold = static_cast<Uint32>(std::max(1,
+                    std::atoi(name.substr(hold_separator + 1).c_str())));
+                name.resize(hold_separator);
+            }
             SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(name.c_str());
             if (b == SDL_CONTROLLER_BUTTON_INVALID) {
                 BD_LOG("PAD", "replay: unknown button name '%s' — skipped", name.c_str());
                 continue;
             }
-            replay.push_back({ at, hold, (int)b, false, false });
-            BD_LOG("PAD", "replay: %s at %u ms (hold %u ms)", name.c_str(), at, hold);
+            replay.push_back({ at, step_hold, (int)b, false, false });
+            BD_LOG("PAD", "replay: %s at %u ms (hold %u ms)", name.c_str(), at, step_hold);
         }
         if (!replay.empty())
             BD_LOG("PAD", "replay armed: %zu step(s)", replay.size());
     }
+
     struct PowerReplayStep { Uint32 at, hold; bool down_done, up_done; };
     std::vector<PowerReplayStep> power_replay;
     if (const char* spec = std::getenv("BD_POWER_REPLAY")) {
@@ -772,6 +847,42 @@ void InputBackend::runEventLoop()
     }
     const Uint32 replay_t0 = SDL_GetTicks();
 
+    // Diagnostic axis playback. BD_PAD_AXIS_REPLAY="14000:leftx:-32768,16000:leftx:0"
+    // Drives the same controller-axis -> Android MotionEvent path a physical
+    // pad uses, so headless runs can validate a title's native joystick axes.
+    struct AxisReplayStep { Uint32 at; int axis; Sint16 value; bool done; };
+    std::vector<AxisReplayStep> axis_replay;
+    if (const char* spec = std::getenv("BD_PAD_AXIS_REPLAY")) {
+        std::string s(spec);
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t comma = s.find(',', start);
+            std::string item = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos : comma - start);
+            start = (comma == std::string::npos) ? s.size() + 1 : comma + 1;
+            if (item.empty()) continue;
+            size_t c1 = item.find(':');
+            size_t c2 = (c1 == std::string::npos) ? std::string::npos : item.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) continue;
+            Uint32 at = (Uint32)std::atoi(item.substr(0, c1).c_str());
+            std::string name = item.substr(c1 + 1, c2 - c1 - 1);
+            while (!name.empty() && std::isspace((unsigned char)name.front())) name.erase(name.begin());
+            while (!name.empty() && std::isspace((unsigned char)name.back()))  name.pop_back();
+            int value = std::atoi(item.substr(c2 + 1).c_str());
+            if (value < -32768) value = -32768;
+            if (value > 32767) value = 32767;
+            SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(name.c_str());
+            if (a == SDL_CONTROLLER_AXIS_INVALID) {
+                BD_LOG("PAD", "axis replay: unknown axis '%s' — skipped", name.c_str());
+                continue;
+            }
+            axis_replay.push_back({at, (int)a, (Sint16)value, false});
+            BD_LOG("PAD", "axis replay: %s=%d at %u ms", name.c_str(), value, at);
+        }
+        if (!axis_replay.empty())
+            BD_LOG("PAD", "axis replay armed: %zu step(s)", axis_replay.size());
+    }
+
     auto replayInject = [&](int button, bool down) {
         const char* bname = SDL_GameControllerGetStringForButton(
             (SDL_GameControllerButton)button);
@@ -789,6 +900,12 @@ void InputBackend::runEventLoop()
         bd_exit_hotkey_update(button == SDL_CONTROLLER_BUTTON_START,
                               button == SDL_CONTROLLER_BUTTON_BACK,
                               down, "replay");
+        if (controller_input_captured)
+            return;
+        // Exercise the D-pad → left-stick synthesis exactly as a real pad does,
+        // even with controller_key_events = false.
+        if (is_dpad_button(button))
+            updateDpadAxes(bd_remap_dpad_button(button), down);
         if (!input_controller_key_events)
             return;
         if (!onKey) {
@@ -809,11 +926,24 @@ void InputBackend::runEventLoop()
         keyEvent->downTime = bd_stamp_keyevent_downtime(
             dev->id, keyCode, action, keyEvent->timestamp);
         onKey(keyEvent);
+        if (down)
+            delivered_controller_keys[button] = {dev->id, keyCode};
+        else
+            delivered_controller_keys.erase(button);
     };
 
     auto replayTick = [&]() {
-        if (replay.empty() && power_replay.empty()) return;
+        if (replay.empty() && power_replay.empty() && axis_replay.empty()) return;
         Uint32 now = SDL_GetTicks() - replay_t0;
+        for (auto& step : axis_replay) {
+            if (!step.done && now >= step.at) {
+                step.done = true;
+                BD_LOG("PAD", "AXIS REPLAY axis=%d value=%d", step.axis, (int)step.value);
+                bd_input_observer_note_axis(step.axis, step.value);
+                if (!controller_input_captured)
+                    dispatchControllerAxisMotion(step.axis, step.value);
+            }
+        }
         for (auto& step : replay) {
             if (!step.down_done && now >= step.at) {
                 step.down_done = true;
@@ -850,6 +980,49 @@ void InputBackend::runEventLoop()
     bool suppress_power_key_up = false;
     Uint32 ignore_power_until = 0;
     while (running) {
+        const bool capture_requested =
+            g_controller_input_captured.load(std::memory_order_acquire);
+        if (capture_requested != controller_input_captured) {
+            if (capture_requested) {
+                for (const auto& entry : delivered_controller_keys) {
+                    const int device_id = entry.second.first;
+                    const int key_code = entry.second.second;
+                    auto device = devices[device_id];
+                    if (!device || !onKey)
+                        continue;
+                    auto key_event = std::make_shared<jnivm::android::view::KeyEvent>(
+                        device, jnivm::android::view::KeyEvent::ACTION_UP,
+                        key_code, 0);
+                    key_event->downTime = bd_stamp_keyevent_downtime(
+                        device_id, key_code,
+                        jnivm::android::view::KeyEvent::ACTION_UP,
+                        key_event->timestamp);
+                    onKey(key_event);
+                }
+                delivered_controller_keys.clear();
+                bool axes_active = mDpadAxisX != 0.f || mDpadAxisY != 0.f;
+                for (const auto& axis : mControllerAxisState)
+                    axes_active = axes_active || axis.second != 0.f;
+                if (axes_active) {
+                    for (int button : {SDL_CONTROLLER_BUTTON_DPAD_UP,
+                                   SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+                                   SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+                                   SDL_CONTROLLER_BUTTON_DPAD_RIGHT})
+                        updateDpadAxes(button, false);
+                    for (int axis : {SDL_CONTROLLER_AXIS_LEFTX,
+                                 SDL_CONTROLLER_AXIS_LEFTY,
+                                 SDL_CONTROLLER_AXIS_RIGHTX,
+                                 SDL_CONTROLLER_AXIS_RIGHTY,
+                                 SDL_CONTROLLER_AXIS_TRIGGERLEFT,
+                                 SDL_CONTROLLER_AXIS_TRIGGERRIGHT})
+                        dispatchControllerAxisMotion(axis, 0);
+                }
+                BD_LOG("PAD", "controller input captured; sent neutral/release state");
+            } else {
+                BD_LOG("PAD", "controller input released to Unity");
+            }
+            controller_input_captured = capture_requested;
+        }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
@@ -1035,7 +1208,8 @@ void InputBackend::runEventLoop()
 
             case SDL_CONTROLLERAXISMOTION: {
                 bd_input_observer_note_axis(e.caxis.axis, e.caxis.value);
-                dispatchControllerAxisMotion(e.caxis.axis, e.caxis.value);
+                if (!controller_input_captured)
+                    dispatchControllerAxisMotion(e.caxis.axis, e.caxis.value);
                 break;
             }
 
@@ -1046,8 +1220,17 @@ void InputBackend::runEventLoop()
                 // Notify plugins about the raw SDL event before the Android
                 // compatibility path can filter or remap it.
                 bd_input_observer_note_button(physicalButton, down ? 1 : 0);
+                bd_exit_hotkey_update(physicalButton == SDL_CONTROLLER_BUTTON_START,
+                                      physicalButton == SDL_CONTROLLER_BUTTON_BACK,
+                                      down, "controller");
+                if (controller_input_captured)
+                    break;
                 if (!input_enable_controller)
                     break;
+                // D-pad → left-stick axes must happen even when controller key
+                // events are disabled; many handhelds have no analog stick.
+                if (is_dpad_button(physicalButton))
+                    updateDpadAxes(bd_remap_dpad_button(physicalButton), down);
                 if (!onKey && input_controller_key_events)
                     break;
                 int action  = (e.type == SDL_CONTROLLERBUTTONDOWN)
@@ -1068,13 +1251,8 @@ void InputBackend::runEventLoop()
                            (int)(physicalButton == SDL_CONTROLLER_BUTTON_START),
                            (int)(physicalButton == SDL_CONTROLLER_BUTTON_BACK));
                 }
-                bd_exit_hotkey_update(physicalButton == SDL_CONTROLLER_BUTTON_START,
-                                      physicalButton == SDL_CONTROLLER_BUTTON_BACK,
-                                      action == jnivm::android::view::KeyEvent::ACTION_DOWN,
-                                      "controller");
                 if (!input_controller_key_events)
                     break;
-                bool is_dpad = is_dpad_button(physicalButton);
                 auto keyDev = bd_keycode_uses_keyboard_device(keyCode)
                     ? devices[INPUT_ID_KEYBOARD]
                     : devices[INPUT_ID_XBOX];
@@ -1083,41 +1261,13 @@ void InputBackend::runEventLoop()
                 keyEvent->downTime = bd_stamp_keyevent_downtime(
                     keyDev->id, keyCode, action, keyEvent->timestamp);
 
-                // Mirror dpad on the HAT axis (AOSP fans out KeyEvent+MotionEvent).
-                // Release uses +0.0f to avoid -0.0f sign surprises downstream.
-                // Skipped when dpad_synthesize_hat = false (Unity sticky-latch race).
-                std::shared_ptr<jnivm::android::view::MotionEvent> motionEvent;
-                if (onMotion && is_dpad && input_dpad_synthesize_hat) {
-                    bool down = (action == jnivm::android::view::KeyEvent::ACTION_DOWN);
-                    int   axis = -1;
-                    float signedV = 0.0f;
-                    switch (logicalButton) {
-                        case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_Y;
-                            signedV = down ? -1.0f : 0.0f; break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_Y;
-                            signedV = down ? +1.0f : 0.0f; break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_X;
-                            signedV = down ? -1.0f : 0.0f; break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                            axis = jnivm::android::view::MotionEvent::AXIS_HAT_X;
-                            signedV = down ? +1.0f : 0.0f; break;
-                    }
-                    if (axis >= 0) {
-                        mControllerAxisState[axis] = signedV;
-                        auto dev = devices[INPUT_ID_XBOX];
-                        motionEvent = std::make_shared<jnivm::android::view::MotionEvent>(
-                            dev, jnivm::android::view::MotionEvent::ACTION_MOVE, 0.0f, 0.0f);
-                        motionEvent->axisValues = mControllerAxisState;
-                    }
-                }
-
                 onKey(keyEvent);
-                if (motionEvent) onMotion(motionEvent);
-                if (!motionEvent && onMotion &&
-                    bd_keycode_uses_keyboard_device(keyCode) &&
+                if (action == jnivm::android::view::KeyEvent::ACTION_DOWN)
+                    delivered_controller_keys[physicalButton] = {
+                        keyDev->id, keyCode};
+                else
+                    delivered_controller_keys.erase(physicalButton);
+                if (onMotion && bd_keycode_uses_keyboard_device(keyCode) &&
                     action == jnivm::android::view::KeyEvent::ACTION_UP) {
                     auto dev = devices[INPUT_ID_XBOX];
                     auto flushEvent = std::make_shared<jnivm::android::view::MotionEvent>(
@@ -1583,6 +1733,12 @@ extern "C" int bd_input_inject_touch(int pointerId, float x, float y,
     return InputBackend::instance().injectTouch(pointerId, x, y, designWidth,
                                                 designHeight, down != 0,
                                                 source) ? 1 : 0;
+}
+
+extern "C" int bd_input_set_controller_capture(int enabled)
+{
+    g_controller_input_captured.store(enabled != 0, std::memory_order_release);
+    return 1;
 }
 
 // ---- Callbacks ----

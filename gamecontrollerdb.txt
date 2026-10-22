@@ -1,0 +1,14 @@
+
+# ANBERNIC H700 系列（设备名 ANBERNIC-keys）：
+# 0=A 1=B 2=Y 3=X 4=L1 5=R1 6=SELECT 7=START 8=MENU 9=L2 10=R2
+# SDL 逻辑映射以实际条目为准：a=b0、b=b1、x=b3、y=b2；不再由 loader 内置表覆盖
+19000000010000000100000000010000,ANBERNIC-keys,a:b0,b:b1,x:b3,y:b2,back:b6,start:b7,guide:b8,leftshoulder:b4,rightshoulder:b5,lefttrigger:b9,righttrigger:b10,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftx:a0,lefty:a1,platform:Linux,
+
+# Miniloong（设备名 Loong Gamepad）：
+# 0=B 1=A 2=X 3=Y 4=L1 5=R1 6=L2 7=R2 8=SELECT 9=START 10=MENU 13=V- 14=V+（音量键不映射）
+1900fe3c039900001399000002010000,Loong Gamepad,a:b1,b:b0,x:b2,y:b3,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,platform:Linux,
+19000000039900001399000002010000,Loong Gamepad,a:b1,b:b0,x:b2,y:b3,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,platform:Linux,
+
+# Trimui（内核上报为 Xbox 360 Controller）
+# 当前设备实测映射：a=b1、b=b0、x=b3、y=b2；MENU=guide:b8
+0300a3845e0400008e02000014010000,Trimui (X360 Controller),a:b1,b:b0,x:b3,y:b2,back:b6,start:b7,guide:b8,leftshoulder:b4,rightshoulder:b5,leftstick:b9,rightstick:b10,lefttrigger:a2,righttrigger:a5,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a3,righty:a4,platform:Linux,

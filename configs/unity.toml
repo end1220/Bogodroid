@@ -37,6 +37,9 @@ backend = "auto"
 # [input]
 # controller_name = "Xbox 360 Controller"
 # dpad_synthesize_hat = false
+# Independently enable D-pad -> left-stick axes (default true).
+# dpad_synthesize_stick = true
+# Device mappings: SDL_GAMECONTROLLERCONFIG_FILE or ./gamecontrollerdb.txt.
 
 # Scale a stick whose SDL values do not reach the full -1..1 range.
 # [input.axis_calibration]

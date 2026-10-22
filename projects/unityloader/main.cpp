@@ -37,6 +37,9 @@ extern "C" int bd_present_viewport_set(int enabled, double renderScale,
 extern "C" int bd_present_viewport_set_filter(int enabled, double renderScale,
                                                const char* anchor, int offsetY,
                                                const char* filter);
+extern "C" int bd_present_cursor_set(int visible, float x, float y,
+                                      float designWidth, float designHeight);
+extern "C" int bd_input_set_controller_capture(int enabled);
 
 // Unity 2018's AndroidVideoMedia rejects the unpacked, hostless
 // jar:file://!/assets/... form before it reaches the NDK extractor. The
@@ -1021,6 +1024,16 @@ namespace plugin_host {
                                      design_height, down, source);
     }
 
+    static int api_set_controller_capture(int enabled) {
+        return bd_input_set_controller_capture(enabled);
+    }
+
+    static int api_set_present_cursor(int visible, float x, float y,
+                                      float design_width, float design_height) {
+        return bd_present_cursor_set(visible, x, y, design_width,
+                                     design_height);
+    }
+
     static int api_set_present_viewport(int enabled, double render_scale,
                                         const char* anchor, int offset_y) {
         return bd_present_viewport_set(enabled, render_scale, anchor, offset_y);
@@ -1276,6 +1289,8 @@ namespace plugin_host {
         api.startup_scene_ready = &bd_startup_scene_ready;
         api.set_startup_animation = &bd_startup_set_animation;
         api.set_startup_video = &bd_startup_set_video;
+        api.set_controller_capture = &api_set_controller_capture;
+        api.set_present_cursor = &api_set_present_cursor;
         api.register_asset_source_callback = &api_register_asset_source_callback;
         api.register_jni_class = &api_register_jni_class;
         api.jni_string_utf8 = &api_jni_string_utf8;

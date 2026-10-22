@@ -239,6 +239,112 @@ ABI_ATTR int32_t ANativeWindow_getHeight(ANativeWindow *window)
     return height;
 }
 
+// Unity 2022 initializes the Android sensor stack at startup even when the
+// game only reads touches. Returning null for every ASensor* entry made Unity
+// dereference a null sensor (SIGSEGV at a plt0 trampoline). Provide a small
+// inert sensor/queue so the engine can complete Input initialization; no
+// events are ever produced.
+struct bd_fake_sensor {
+    int type;
+};
+
+struct bd_fake_sensor_queue {
+    int unused;
+};
+
+static bd_fake_sensor g_bd_fake_sensors[16];
+static bd_fake_sensor_queue g_bd_fake_sensor_queue;
+
+extern "C" {
+
+ABI_ATTR void* ASensorManager_getInstance()
+{
+    static int instance;
+    return &instance;
+}
+
+ABI_ATTR void* ASensorManager_getInstanceForPackage(const char*)
+{
+    return ASensorManager_getInstance();
+}
+
+ABI_ATTR void* ASensorManager_getDefaultSensor(void*, int type)
+{
+    if (type <= 0 || type >= (int)(sizeof(g_bd_fake_sensors) /
+                                   sizeof(g_bd_fake_sensors[0])))
+        type = 1;
+    g_bd_fake_sensors[type].type = type;
+    return &g_bd_fake_sensors[type];
+}
+
+ABI_ATTR void* ASensorManager_createEventQueue(void*, void*, int, void*, void*)
+{
+    return &g_bd_fake_sensor_queue;
+}
+
+ABI_ATTR int ASensorManager_destroyEventQueue(void*, void*)
+{
+    return 0;
+}
+
+ABI_ATTR int ASensorManager_getSensorList(void*, void*)
+{
+    return 0;
+}
+
+ABI_ATTR int ASensorEventQueue_enableSensor(void*, const void*)
+{
+    return 0;
+}
+
+ABI_ATTR int ASensorEventQueue_disableSensor(void*, const void*)
+{
+    return 0;
+}
+
+ABI_ATTR int ASensorEventQueue_setEventRate(void*, const void*, int32_t)
+{
+    return 0;
+}
+
+ABI_ATTR int ASensorEventQueue_hasEvents(void*)
+{
+    return 0;
+}
+
+ABI_ATTR ssize_t ASensorEventQueue_getEvents(void*, void*, size_t)
+{
+    return 0;
+}
+
+ABI_ATTR const char* ASensor_getName(const void*)
+{
+    return "Bogodroid sensor";
+}
+
+ABI_ATTR const char* ASensor_getVendor(const void*)
+{
+    return "Bogodroid";
+}
+
+ABI_ATTR int ASensor_getType(const void* sensor)
+{
+    const bd_fake_sensor* s = (const bd_fake_sensor*)sensor;
+    return s ? s->type : 1;
+}
+
+ABI_ATTR float ASensor_getResolution(const void*)
+{
+    return 0.001f;
+}
+
+ABI_ATTR int ASensor_getMinDelay(const void*)
+{
+    return 10000;
+}
+
+} // extern "C"
+
 ABI_ATTR void __assert2(const char* __file, int __line, const char* __function, const char* __msg)
 {
     fatal_error("ASSERT!! File: %s Line: %d Function: %s Message: %s\n",__file, __line, __function, __msg);
@@ -264,10 +370,22 @@ NO_THUNK("AConfiguration_getScreenSize", (uintptr_t)&AConfiguration_getScreenSiz
 NO_THUNK("AConfiguration_getScreenLong", (uintptr_t)&AConfiguration_getScreenLong),
 NO_THUNK("AConfiguration_getUiModeType", (uintptr_t)&AConfiguration_getUiModeType),
 NO_THUNK("AConfiguration_getUiModeNight", (uintptr_t)&AConfiguration_getUiModeNight),
-NO_THUNK("ASensorManager_getInstanceForPackage", (uintptr_t)&ret0), //AWFUL
-NO_THUNK("ASensorManager_getInstance", (uintptr_t)&ret0), //AWFUL
-NO_THUNK("ASensorManager_getDefaultSensor", (uintptr_t)&ret0), //AWFUL
-NO_THUNK("ASensorManager_createEventQueue", (uintptr_t)&ret0), //AWFUL
+NO_THUNK("ASensorManager_getInstanceForPackage", (uintptr_t)&ASensorManager_getInstanceForPackage),
+NO_THUNK("ASensorManager_getInstance", (uintptr_t)&ASensorManager_getInstance),
+NO_THUNK("ASensorManager_getDefaultSensor", (uintptr_t)&ASensorManager_getDefaultSensor),
+NO_THUNK("ASensorManager_createEventQueue", (uintptr_t)&ASensorManager_createEventQueue),
+NO_THUNK("ASensorManager_destroyEventQueue", (uintptr_t)&ASensorManager_destroyEventQueue),
+NO_THUNK("ASensorManager_getSensorList", (uintptr_t)&ASensorManager_getSensorList),
+NO_THUNK("ASensorEventQueue_enableSensor", (uintptr_t)&ASensorEventQueue_enableSensor),
+NO_THUNK("ASensorEventQueue_disableSensor", (uintptr_t)&ASensorEventQueue_disableSensor),
+NO_THUNK("ASensorEventQueue_setEventRate", (uintptr_t)&ASensorEventQueue_setEventRate),
+NO_THUNK("ASensorEventQueue_hasEvents", (uintptr_t)&ASensorEventQueue_hasEvents),
+NO_THUNK("ASensorEventQueue_getEvents", (uintptr_t)&ASensorEventQueue_getEvents),
+NO_THUNK("ASensor_getName", (uintptr_t)&ASensor_getName),
+NO_THUNK("ASensor_getVendor", (uintptr_t)&ASensor_getVendor),
+NO_THUNK("ASensor_getType", (uintptr_t)&ASensor_getType),
+NO_THUNK("ASensor_getResolution", (uintptr_t)&ASensor_getResolution),
+NO_THUNK("ASensor_getMinDelay", (uintptr_t)&ASensor_getMinDelay),
     NO_THUNK("ALooper_prepare", (uintptr_t)&ALooper_prepare),
     NO_THUNK("ALooper_forThread", (uintptr_t)&ALooper_forThread),
     NO_THUNK("ALooper_acquire", (uintptr_t)&ALooper_acquire),
