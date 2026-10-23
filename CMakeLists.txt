@@ -127,6 +127,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     platform/common/config.cpp
     platform/common/device_display.cpp
     platform/common/input_backend.cpp
+    platform/common/haptics_backend.cpp
     platform/common/input_observer.cpp
     platform/common/shader_cache.cpp
     platform/common/sys_volume.cpp

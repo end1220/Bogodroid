@@ -16,6 +16,7 @@ toml::table config;
 #include "monocompat/il2cpp_log_shim.h"
 #include "platform.h"
 #include "input_backend.h"
+#include "haptics_backend.h"
 #include "so_util.h"
 #include <baron/baron.h>
 #include <dlfcn.h>
@@ -2036,11 +2037,13 @@ int main(int argc, char* argv[])
         if (jnivm::com::unity3d::player::activity_finish_ready()) {
             BD_LOG("EXIT", "Activity.finish requested and input idle - stopping Unity render loop");
             bd_flush_prefs_impl();
+            bd_haptics::prepare_exit();
             _exit(0);
         }
         if (!ret4.z) {
             BD_LOG("EXIT", "nativeRender returned false - Unity requested quit");
             bd_flush_prefs_impl();
+            bd_haptics::prepare_exit();
             _exit(0);
         }
     }

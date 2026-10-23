@@ -14,6 +14,7 @@ extern toml::table config;
 void InitJNIAndroidClasses(FakeJni::Jvm* vm)
 {
     verbose("JBRIDGE", "Initializing Android JNI Classes");
+    vm->registerClass<jnivm::android::ManifestPermission>();
     // Net
     vm->registerClass<jnivm::android::net::Uri>();
 
@@ -60,6 +61,7 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::android::media::MediaCodecInfoCodecCapabilities>();
 
     // OS
+    vm->registerClass<jnivm::android::os::Vibrator>();
     vm->registerClass<jnivm::android::os::Build>();
     vm->registerClass<jnivm::android::os::BuildVersion>();
     vm->registerClass<jnivm::android::os::Process>();

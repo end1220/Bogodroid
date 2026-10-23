@@ -642,6 +642,9 @@ jnivm::android::content::Context::getSystemService(std::shared_ptr<FakeJni::JStr
     if (*service == POWER_SERVICE)
         return std::make_shared<jnivm::android::os::PowerManager>();
 
+    if (*service == VIBRATOR_SERVICE)
+        return std::make_shared<jnivm::android::os::Vibrator>();
+
     if (*service == MEDIA_ROUTER_SERVICE)
         return std::make_shared<jnivm::android::media::MediaRouter>();
 
@@ -912,6 +915,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&Context::AUDIO_SERVICE> {}, "AUDIO_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MEDIA_ROUTER_SERVICE> {}, "MEDIA_ROUTER_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::POWER_SERVICE> {}, "POWER_SERVICE", FakeJni::JFieldID::STATIC },
+    { FakeJni::Field<&Context::VIBRATOR_SERVICE> {}, "VIBRATOR_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::INPUT_SERVICE> {}, "INPUT_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::WINDOW_SERVICE> {}, "WINDOW_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MODE_PRIVATE> {}, "MODE_PRIVATE", FakeJni::JFieldID::STATIC },

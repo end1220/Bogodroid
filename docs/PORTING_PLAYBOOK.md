@@ -112,6 +112,7 @@ Select-String -Path build-aarch64\CMakeCache.txt -Pattern 'JNIVM_ENABLE|BD_ENABL
 | PAD Java stub | `[play_asset_delivery] enabled/default_pack/pack_version/pack_path_template` |
 | 每帧 present 钩子 | Plugin ABI v6：`register_present_callback` |
 | 手柄捕获 / UI 光标 | ABI v8 可选尾部：`set_controller_capture` / `set_present_cursor`，需核对 `struct_size`；[Space Squids 示例](SPACESQUIDS_CONTROLLER.md) |
+| 掌机震动 | 通用 `android.os.Vibrator` → SDL joystick rumble，需 `[input] controller = true`；[接口、限制与验证](HAPTICS.md)，Space Squids 已确认掌机输出有效 |
 | 模块生命周期 | Plugin ABI v6：`find_module(name)` / `register_module_loaded(name, cb, userdata)` |
 | CPU present / swap pause | `BD_EGL_CPU_PRESENT`、`BD_EGL_SWAP_PAUSE`（插件可 setenv） |
 

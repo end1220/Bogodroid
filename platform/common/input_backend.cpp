@@ -6,6 +6,7 @@
 #include "device_display.h"
 #include "logging.h"
 #include "sys_volume.h"
+#include "haptics_backend.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -82,6 +83,7 @@ static void bd_exit_hotkey_update(bool is_start, bool is_select, bool down, cons
     if (g_exit_hotkey_start_down && g_exit_hotkey_select_down) {
         BD_LOG("EXIT", "Start+Select exit hotkey (%s)", source ? source : "input");
         bd_flush_prefs_impl();
+        bd_haptics::shutdown();
         _exit(0);
     }
 }
@@ -545,11 +547,13 @@ InputBackend::InputBackend()
         mControllerStickAxisState[jnivm::android::view::MotionEvent::AXIS_RZ]  = 0.0f;
         mDpadAxisX = 0.0f;
         mDpadAxisY = 0.0f;
+        bd_haptics::refresh_devices();
     }
 }
 
 InputBackend::~InputBackend()
 {
+    bd_haptics::shutdown();
     if (input_enable_controller) {
         // Clean up controllers
         for (int i = 0; i < SDL_NumJoysticks(); ++i) {
@@ -1026,6 +1030,10 @@ void InputBackend::runEventLoop()
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
+            case SDL_JOYDEVICEADDED:
+            case SDL_JOYDEVICEREMOVED:
+                bd_haptics::refresh_devices();
+                break;
             case SDL_QUIT:
                 running = false;
                 break;
@@ -1046,11 +1054,13 @@ void InputBackend::runEventLoop()
                     }
                     if (down && !power_key_down) {
                         power_key_down = true;
+                        bd_haptics::set_suspended(true);
                         BD_LOG("POWER", "power key down");
                         if (onPowerKey) onPowerKey(true);
                     } else if (!down && power_key_down) {
                         power_key_down = false;
                         if (onPowerKey) onPowerKey(false);
+                        bd_haptics::set_suspended(false);
                         // Some wake-capable input drivers leave the wake press
                         // queued for SDL. Discard that paired event, but allow
                         // the next deliberate power press shortly afterward.
@@ -1283,9 +1293,11 @@ void InputBackend::runEventLoop()
                 break;
             }
         }
+        bd_haptics::update();
         SDL_Delay(4); // Be a good citizen
         replayTick();
     }
+    bd_haptics::shutdown();
 }
 
 // Edge-trigger a synthesized KeyEvent for one axis-direction slot.

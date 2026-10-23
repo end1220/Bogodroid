@@ -25,6 +25,12 @@ void InitJNIAndroidClasses(FakeJni::Jvm* vm);
 
 namespace jnivm {
 namespace android {
+    class ManifestPermission : public FakeJni::JObject {
+    public:
+        DEFINE_CLASS_NAME("android/Manifest$permission")
+        inline static FakeJni::JString VIBRATE = (FakeJni::JString) "android.permission.VIBRATE";
+    };
+
     namespace graphics {
         class SurfaceTexture : public FakeJni::JObject {
         public:
@@ -529,6 +535,14 @@ namespace android {
         };
     }
     namespace os {
+
+        class Vibrator : public FakeJni::JObject {
+        public:
+            DEFINE_CLASS_NAME("android/os/Vibrator")
+            bool hasVibrator();
+            void vibrate(FakeJni::JLong milliseconds);
+            void cancel();
+        };
         class Handler;
     }
     namespace hardware {
@@ -973,6 +987,7 @@ namespace android {
             inline static FakeJni::JString AUDIO_SERVICE = (FakeJni::JString) "audio";
             inline static FakeJni::JString MEDIA_ROUTER_SERVICE = (FakeJni::JString) "media_router";
             inline static FakeJni::JString POWER_SERVICE = (FakeJni::JString) "power";
+            inline static FakeJni::JString VIBRATOR_SERVICE = (FakeJni::JString) "vibrator";
             inline static FakeJni::JString INPUT_SERVICE = (FakeJni::JString) "input";
             inline static FakeJni::JString WINDOW_SERVICE = (FakeJni::JString) "window";
 

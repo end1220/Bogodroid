@@ -5,10 +5,28 @@ extern toml::table config;
 #include "baron/baron.h"
 #include "javac.h"
 #include "logging.h"
+#include "haptics_backend.h"
 #include <fstream>
 #include <pthread.h>
 #include <inttypes.h>
 #include <unistd.h>
+
+///// Vibrator (legacy Android / Unity Handheld.Vibrate)
+
+bool jnivm::android::os::Vibrator::hasVibrator()
+{
+    return bd_haptics::has_vibrator();
+}
+
+void jnivm::android::os::Vibrator::vibrate(FakeJni::JLong milliseconds)
+{
+    bd_haptics::vibrate(milliseconds);
+}
+
+void jnivm::android::os::Vibrator::cancel()
+{
+    bd_haptics::cancel();
+}
 
 ///// Bundle
 
@@ -538,6 +556,16 @@ bool jnivm::android::os::PowerManager::isSustainedPerformanceModeSupported()
 ///// ParcelFileDescriptor — factory-stubbed. See android_descriptors.cpp.
 
 ///// OS Descriptors
+
+BEGIN_NATIVE_DESCRIPTOR(jnivm::android::ManifestPermission)
+    { FakeJni::Field<&ManifestPermission::VIBRATE> {}, "VIBRATE", FakeJni::JFieldID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
+BEGIN_NATIVE_DESCRIPTOR(jnivm::android::os::Vibrator)
+    { FakeJni::Function<&Vibrator::hasVibrator> {}, "hasVibrator", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Vibrator::vibrate> {}, "vibrate", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Vibrator::cancel> {}, "cancel", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
 
 // FakeJni::Function cannot deduce an overloaded member pointer, so spell out
 // the two Bundle::getString signatures once.
