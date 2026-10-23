@@ -242,6 +242,13 @@ dpad_synthesize_hat=false
 controller_key_events=false
 ```
 
+The plugin resolves each button's `RectTransform` at runtime and injects at its
+actual screen-space center. It does not use fixed 640x480 button coordinates,
+so the same input path works on 1280x720 devices. Overlay canvases use their
+world coordinates directly; camera canvases use `Camera.WorldToScreenPoint`.
+The `RectTransformUtility.WorldToScreenPoint` path is intentionally not used
+because that method is absent from this game's IL2CPP metadata.
+
 Tetris Down is now a title-specific exception. After resolving and checking
 the original IL2CPP field layout, the plugin queues physical Down edges for
 the active mino's `CheckUserInput`: one original `MoveDown` on the next Update,

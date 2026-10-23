@@ -467,9 +467,60 @@ static ControlRect* find_control_rect(const std::string& name)
     return nullptr;
 }
 
+static Vector3 (*m_touch_transform_point)(void*, Vector3, void*) = nullptr;
+static void* mi_touch_transform_point = nullptr;
+static Vector3 (*m_touch_camera_project)(void*, Vector3, void*) = nullptr;
+static void* mi_touch_camera_project = nullptr;
+static void* (*m_touch_canvas_camera)(void*, void*) = nullptr;
+static void* mi_touch_canvas_camera = nullptr;
+
+static bool control_screen_point(const char* name, float& x, float& y)
+{
+    ControlRect* control = find_control_rect(name);
+    if (!control || !control->rt || !m_rt_get_rect || !m_touch_transform_point ||
+        !m_touch_canvas_camera || !g_canvas_type ||
+        !m_canvas_mode || !m_screen_width || !m_screen_height)
+        return false;
+    void* camera = nullptr;
+    bool found_canvas = false;
+    for (void* node = control->rt; node; node = m_tf_get_parent(node, mi_tf_get_parent)) {
+        void* go = m_component_get_game_object(node, mi_component_get_game_object);
+        void* canvas = m_gameobject_get_component(go, g_canvas_type, mi_gameobject_get_component);
+        if (!canvas) continue;
+        if (m_canvas_mode(canvas, mi_canvas_mode) != 0) {
+            camera = m_touch_canvas_camera(canvas, mi_touch_canvas_camera);
+            if (!camera) return false;
+        }
+        found_canvas = true;
+        break;
+    }
+    if (!found_canvas) return false;
+    const Rect rect = m_rt_get_rect(control->rt, mi_rt_get_rect);
+    const Vector3 world = m_touch_transform_point(control->rt,
+        {rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, 0}, mi_touch_transform_point);
+    Vector2 screen = {world.x, world.y}; // ScreenSpaceOverlay world units are pixels.
+    if (camera) {
+        if (!m_touch_camera_project) return false;
+        const Vector3 projected = m_touch_camera_project(camera, world, mi_touch_camera_project);
+        if (projected.z <= 0) return false;
+        screen = {projected.x, projected.y};
+    }
+    const int width = m_screen_width(mi_screen_width);
+    const int height = m_screen_height(mi_screen_height);
+    if (width <= 0 || height <= 0 || !std::isfinite(screen.x) ||
+        !std::isfinite(screen.y) || screen.x < 0 || screen.x >= width ||
+        screen.y < 0 || screen.y >= height) return false;
+    // Injection uses top-left coordinates in its reference space. Normalize
+    // actual Unity pixels only after projection; no button positions are fixed.
+    x = screen.x * g_design_width / width;
+    y = (height - screen.y) * g_design_height / height;
+    return true;
+}
+
 struct TouchPoint {
     int button = SDL_CONTROLLER_BUTTON_INVALID;
     int pointer_id = -1;
+    const char* object_name = nullptr;
     float x = 0.0f;
     float y = 0.0f;
     bool active = false;
@@ -479,13 +530,13 @@ struct TouchPoint {
 };
 
 static std::array<TouchPoint, 7> g_points = {{
-    {SDL_CONTROLLER_BUTTON_DPAD_LEFT,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,  222.0f, 375.0f},
-    {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 300.0f, 375.0f},
-    {SDL_CONTROLLER_BUTTON_DPAD_UP,    SDL_CONTROLLER_BUTTON_DPAD_UP,    260.0f, 335.0f},
-    {SDL_CONTROLLER_BUTTON_DPAD_DOWN,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,  260.0f, 414.0f},
-    {SDL_CONTROLLER_BUTTON_A,          SDL_CONTROLLER_BUTTON_A,          393.0f, 377.0f},
-    {SDL_CONTROLLER_BUTTON_Y,          SDL_CONTROLLER_BUTTON_Y,          393.0f, 377.0f},
-    {SDL_CONTROLLER_BUTTON_X,          SDL_CONTROLLER_BUTTON_X,          367.0f, 307.0f},
+    {SDL_CONTROLLER_BUTTON_DPAD_LEFT,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,  "LeftBtn"},
+    {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, "RightBtn"},
+    {SDL_CONTROLLER_BUTTON_DPAD_UP,    SDL_CONTROLLER_BUTTON_DPAD_UP,    "UpBtn"},
+    {SDL_CONTROLLER_BUTTON_DPAD_DOWN,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,  "DownBtn"},
+    {SDL_CONTROLLER_BUTTON_A,          SDL_CONTROLLER_BUTTON_A,          "EnterBtn"},
+    {SDL_CONTROLLER_BUTTON_Y,          SDL_CONTROLLER_BUTTON_Y,          "EnterBtn"},
+    {SDL_CONTROLLER_BUTTON_X,          SDL_CONTROLLER_BUTTON_X,          "StartPauseBtn"},
 }};
 static uint64_t g_frame_counter = 0;
 
@@ -1617,6 +1668,14 @@ static void post_il2cpp_init(void*)
         return;
     }
 
+    g_il2cpp.resolve_call(core, "UnityEngine", "Transform", "TransformPoint", 1,
+        reinterpret_cast<void**>(&m_touch_transform_point), &mi_touch_transform_point);
+    g_il2cpp.resolve_call(core, "UnityEngine", "Camera", "WorldToScreenPoint", 1,
+        reinterpret_cast<void**>(&m_touch_camera_project), &mi_touch_camera_project);
+    void* touch_canvas = g_il2cpp.find_class_image("UnityEngine", "Canvas");
+    if (touch_canvas)
+        g_il2cpp.resolve_call(touch_canvas, "UnityEngine", "Canvas", "get_worldCamera", 0,
+            reinterpret_cast<void**>(&m_touch_canvas_camera), &mi_touch_canvas_camera);
     bind_gameover_icons(g_il2cpp, g_api);
     bind_exit_icon(g_il2cpp, g_api);
     casing_art::bind(g_il2cpp, g_api);
@@ -1963,6 +2022,8 @@ static void on_button(int button, int down, void*)
             }
             if (point.active)
                 return;
+            if (!control_screen_point(point.object_name, point.x, point.y))
+                return;
         } else {
             if (!point.active)
                 return;
@@ -2143,8 +2204,8 @@ static int init(const BogoPluginApi* api)
         for (const auto& point : g_points) {
             const char* name = SDL_GameControllerGetStringForButton(
                 static_cast<SDL_GameControllerButton>(point.button));
-            g_api->log("BRICKGAME", "%s -> touch %.1f,%.1f",
-                       name ? name : "?", point.x, point.y);
+            g_api->log("BRICKGAME", "%s -> runtime rect %s",
+                       name ? name : "?", point.object_name);
         }
     }
 

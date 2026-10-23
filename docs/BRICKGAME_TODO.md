@@ -1,6 +1,6 @@
 # BrickGame 待办
 
-更新日期：2026-10-21
+更新日期：2026-10-23
 
 ## Unity 6 集成
 
@@ -16,44 +16,26 @@
 - [ ] 按项目构建说明显式设置
   `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`，并使用单独构建目录。
 
-## TrimUI 1280×720 显示与左方向键
+## TrimUI 1280×720 显示与左方向键（已完成）
 
-- [ ] 获取问题机型、固件版本、BrickGame 启动日志和现场画面，确认 SDL
-  display mode、SDL window/drawable、EGL surface 与实际面板是否都为
-  1280×720。当前自动探测优先 SDL、其次 `/dev/fb0`；错误尺寸会导致 Unity
-  逻辑分辨率与 drawable 不一致。特别检查默认 framebuffer `glViewport` 是否
-  与 drawable 尺寸相符，以及设备是否沿用 640×480 配置。
-- [ ] 读取启动日志中的 `[BD-DEVICE]`、`[BD-EGL_SDL]`、`[BD-VIDEO]` 和
-  `SDL_NumJoysticks`/GUID；现有 BrickGame 日志在启动脚本中重定向到
-  `/dev/null`，诊断构建/启动时需临时保留日志。
-- [ ] 按左键时确认 SDL 是否收到 `SDL_CONTROLLERBUTTON_*` 的
-  `DPAD_LEFT`、`SDL_JOYHATMOTION` 或 `SDL_KEYDOWN/UP`。现有 BrickGame 配置
-  使用 `controller_key_events=false`，游戏移动由插件把 SDL 控制器方向键
-  转成屏幕触摸；因此若该设备的左键没有被 SDL 识别为 `DPAD_LEFT`，或映射到
-  其他按钮，Android `KEYCODE_DPAD_LEFT` 路径不会补救插件触摸路径。
-- [ ] 若确认是设备 GUID 缺少/错误映射，为该机型加入 SDL GameController
-  mapping（优先放入设备 `gamecontrollerdb.txt` 并由启动器加载）；若固件只产生
-  joystick hat/key 事件，再补相应 SDL 事件兼容。保持其他键映射不变并容器回放
-  左、右及斜向按键后上机确认。
-- [ ] 显示修复应以实际 1280×720 drawable 为准，避免为适配单台设备直接硬编码
-  BrickGame 的 Unity 逻辑分辨率。若发现视口/裁切问题，再按日志区分面板探测、
-  framebuffer mode 与 Unity viewport，不先改游戏 Canvas 布局。
+- [x] 保持屏幕尺寸自动探测，边框横向铺满；女孩装饰独立保持原比例并根据游戏区域定位。
+- [x] 将插件固定点击坐标改为按钮 RectTransform 实际中心，适配不同宽高比。
+- [x] 容器 1280×720 回放 A、左、右键，确认触摸按下和松开正常。
+- [x] 用户在 Anbernic 和 TrimUI 真机测试通过，并更新桌面两个平台包。
 
-### 当前排查结论
+### 修复与验证
 
-源码中没有 TrimUI 1280×720 设备的现场 SDL GUID、按键事件或显示日志，因此
-尚不能唯一判定根因。已有证据支持两条重点假设：
+固定 640×480 按钮坐标在宽屏布局下偏离实际按钮中心。新逻辑通过
+`Transform.TransformPoint` 取得按钮矩形中心的世界坐标；Overlay Canvas
+直接使用其屏幕像素位置，Camera Canvas 使用 `Camera.WorldToScreenPoint`。
+最后转换为触摸注入接口的参考坐标，并将 Y 轴从左下原点转为左上原点。
+按住和松开沿用按下时的位置，节点未就绪时不点击。
 
-1. **左键输入**：BrickGame 用插件屏幕触摸而非通用 Android 按键注入；按键是否
-   有效取决于 SDL GameController mapping 与插件收到的逻辑 D-pad 事件。其余方向
-   键正常使“仅左键映射异常”成为优先检查项；缺少该设备的事件日志前，不能确认
-   是键位 mapping、SDL hat 报告还是固件问题。
-2. **显示**：配置将 `displayWidth/Height` 留为自动探测，启动器没有按机型覆盖。
-   设备报告 1280×720 时预计会请求该窗口/GL drawable 尺寸，但 SDL/fb0 数据与真实
-   面板若不一致，Unity viewport 会出现裁切或留边。项目另有视频在 1280×720
-   viewport 与较小 drawable 不匹配导致左下区域裁切的历史案例；这说明值得检查
-   尺寸链路，不能据此认定本次 BrickGame 已发生同一问题。
+首版运行时投影曾依赖该游戏未保留的 `RectTransformUtility.WorldToScreenPoint`，
+导致所有点击被跳过；容器诊断确认方法缺失后，已移除此依赖。
+1280×720 容器中左键的参考坐标为 `(246.9,375.0)`，旧值为 `(222,375)`。
+用户于 2026-10-23 确认 Anbernic 与 TrimUI 测试通过。
 
-需要从该 TrimUI 取得信息：准确型号/固件、屏幕异常的具体表现或照片，以及能保留
-上述 SDL/BD 日志的一次启动记录。拿到日志后可区分显示尺寸链路和 controller GUID
-问题，再做有针对性的修复。
+本次修改仅在 `brickgamepro` 插件内。正式包 loader 保持 Release、
+LOG/TRACE/VERBOSE/IL2CPP_TRACE 全 OFF；桌面包已同步验证过的插件与
+项目 `gamecontrollerdb.txt`。设备键位数据库仍由 loader 加载，不由插件覆盖。
