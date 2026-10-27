@@ -1,14 +1,7 @@
 # Scratch image for running the aarch64 unityloader under emulation on the
 # Windows host (Docker Desktop + binfmt). Mirrors the handheld's glibc 2.31
-
-# target, adds the shared libraries unityloader links against (SDL2 and the
-# FFmpeg 4.2 runtimes used by thunks/ndk/media.cpp), and adds a software GL stack
-# so SDL can create its GLES window: the handheld has a real Mali/EGL driver, a
-# container has no GPU, so Mesa llvmpipe under Xvfb stands in for it.
-# target, adds the only shared library unityloader links against (SDL2), and
-# adds a software GL stack so SDL can create its GLES window: the handheld has
-# a real Mali/EGL driver, a container has no GPU, so Mesa llvmpipe under Xvfb
-# stands in for it.
+# target, supplies SDL2 plus optional FFmpeg 4.2 runtimes loaded by the media
+# bridge, and uses Mesa llvmpipe under Xvfb for software GLES rendering.
 #
 #   docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f Dockerfile.test .
 #   docker run --rm --platform linux/arm64 \
@@ -28,9 +21,7 @@ RUN apt-get update \
       libsdl2-2.0-0 \
       ca-certificates \
       gdb \
-
       procps \
-
       xvfb \
       x11-utils \
       x11-apps \
@@ -42,12 +33,10 @@ RUN apt-get update \
       libgles2-mesa \
       libglapi-mesa \
       libgbm1 \
-
       libavformat58 \
       libavcodec58 \
       libavutil56 \
       libswresample3 \
       libswscale5 \
-
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /game

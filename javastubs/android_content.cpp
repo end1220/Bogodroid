@@ -835,18 +835,6 @@ jnivm::android::content::Context::getExternalCacheDir()
 }
 
 
-static std::string bd_compute_obb_dir()
-{
-    auto* dirs = config["paths"]["android_obb_dirs"].as_array();
-    std::string value = "./";
-    if (dirs && !dirs->empty()) {
-        if (auto* first = dirs->get(0)->as_string())
-            value = std::string(first->get());
-    }
-    std::filesystem::path path(value);
-    if (path.is_relative())
-        path = std::filesystem::current_path() / path;
-    return bd_abs_path(path.lexically_normal().string());
 // Android exposes assets through Context.getAssets(); Unity and its plugins
 // open files under assets/ this way (the rest of Unity's IO goes straight
 // through libc on the staged game_files tree). AssetManager is the real stub.
@@ -894,11 +882,6 @@ static std::vector<std::string> bd_obb_dirs()
 std::shared_ptr<jnivm::java::io::File>
 jnivm::android::content::Context::getObbDir()
 {
-
-    const std::string path = bd_compute_obb_dir();
-    BD_LOG("DATADIR", "getObbDir -> %s", path.c_str());
-    return std::make_shared<jnivm::java::io::File>(
-        std::make_shared<FakeJni::JString>(path.c_str()));
     const std::vector<std::string> dirs = bd_obb_dirs();
     if (dirs.empty())
         return nullptr;
@@ -1151,7 +1134,6 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::content::pm::ActivityInfo) { FakeJni::Co
     { FakeJni::Field<&Context::INPUT_SERVICE> {}, "INPUT_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::WINDOW_SERVICE> {}, "WINDOW_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::SENSOR_SERVICE> {}, "SENSOR_SERVICE", FakeJni::JFieldID::STATIC },
-    { FakeJni::Field<&Context::VIBRATOR_SERVICE> {}, "VIBRATOR_SERVICE", FakeJni::JFieldID::STATIC },
     { FakeJni::Field<&Context::MODE_PRIVATE> {}, "MODE_PRIVATE", FakeJni::JFieldID::STATIC },
     { FakeJni::Function<&Context::getSystemService> {}, "getSystemService", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Context::getContentResolver> {}, "getContentResolver", FakeJni::JMethodID::PUBLIC },

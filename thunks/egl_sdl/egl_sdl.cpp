@@ -881,16 +881,6 @@ static void bd_panel_check(int drawable_w, int drawable_h)
     }
 }
 
-namespace jnivm::android::view {
-class Choreographer;
-
-class Choreographer {
-public:
-    static std::shared_ptr<Choreographer> getInstance();
-    void signalVSync();
-};
-}
-
 static int egl_ext_blocked(const char* sym)
 {
     // Mali / SDL 2.0.10 没有这些；转发给真 libEGL 会在 Anbernic 上崩。

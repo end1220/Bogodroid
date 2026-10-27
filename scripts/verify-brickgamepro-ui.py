@@ -34,13 +34,18 @@ for name in (args.case,) if args.case else ('finish', 'buttons', 'exit'):
         assert 'DOWN finish' in text and 'Finish visible=1' in text
         assert text.count('Finish A close visible=0 menu=2') == 1
         closed = text.split('Finish A close visible=0 menu=2', 1)[1]
-        assert 'start down touch=' in closed and 'DOWN spawn TetrisMino' in closed and 'DOWN step' in closed
+        assert 'Start direct PressStartPauseGame' in closed
+        assert 'DOWN spawn TetrisMino' in closed and 'DOWN step' in closed
         assert 'a down touch=' not in text and 'a up touch=' not in text, 'dismissal leaked A into gameplay'
         summary[name]['a_dismissed_to_menu'] = True
         summary[name]['game_restarted'] = True
     elif name == 'buttons':
-        for key in ('start', 'x', 'guide', 'a', 'dpright'):
+        assert text.count('Start direct PressStartPauseGame') >= 3
+        assert 'Guide direct PressExitBtn' in text
+        for key in ('x', 'dpright'):
             assert f'{key} down touch=' in text and f'{key} up touch=' in text, (name, key)
+        assert 'ROTATE edge a ' in text and '[BD-PAD] REPLAY DOWN btn=0 (a)' in text
+        assert '[BD-PAD] REPLAY UP btn=0 (a)' in text
         assert 'skin message ' not in text, 'Select changed skin'
         assert '[BD-PAD] replay: back at ' in text, 'Select not exercised'
         blocked = re.findall(r'UI blocked color renderer=.*alpha=([\d.]+)', text)

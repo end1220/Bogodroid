@@ -101,6 +101,8 @@ void JNIBridgeProxy::onFrameAvailable(
     } else {
         verbose("JNIBridgeProxy",
                 "onFrameAvailable() called on a proxy that doesn't implement OnFrameAvailableListener!");
+    }
+}
 // The loader stores the listeners but never fires them (see
 // registerDisplayListener in javastubs/android_misc.cpp and
 // addOnLayoutChangeListener in javastubs/android_view.cpp), so these four only

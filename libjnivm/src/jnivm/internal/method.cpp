@@ -55,6 +55,7 @@ static std::string normalize_jni_sig(const std::string& in) {
         out.push_back(inClass && c == '.' ? '/' : c);
     }
     return out;
+}
 // Same bookkeeping as log_stub_miss_once, for the (class, method, signature)
 // triples that VM::setDefault() answers. Distinct tag on purpose: it means
 // "no C++ stub, but the intended value is already configured", which is not

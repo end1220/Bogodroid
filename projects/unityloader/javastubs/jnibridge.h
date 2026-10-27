@@ -30,7 +30,6 @@ namespace bitter {
                                public jnivm::android::hardware::display::DisplayManager::DisplayListener,
                                public jnivm::android::view::ViewOnLayoutChangeListener,
                                public jnivm::android::hardware::input::InputManager::InputDeviceListener,
-                               public jnivm::android::hardware::display::DisplayManager::DisplayListener,
                                public jnivm::com::unity3d::player::IAssetPackManagerStatusQueryCallback,
                                public jnivm::com::unity3d::player::IAssetPackManagerDownloadStatusCallback,
                                public jnivm::com::unity3d::player::IAssetPackManagerMobileDataConfirmationCallback,

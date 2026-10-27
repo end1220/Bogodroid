@@ -76,6 +76,7 @@ namespace android {
             int height = 0;
             std::shared_ptr<OnFrameAvailableListener> listener;
         };
+    }
     // Android's register*Listener APIs all take a java-side android.os.Handler
     // to pick the callback thread. os/ is defined further down, so forward
     // declare it here rather than reordering the file.
@@ -1245,13 +1246,8 @@ namespace android {
             inline static FakeJni::JString VIBRATOR_SERVICE = (FakeJni::JString) "vibrator";
             inline static FakeJni::JString INPUT_SERVICE = (FakeJni::JString) "input";
             inline static FakeJni::JString WINDOW_SERVICE = (FakeJni::JString) "window";
-            // Declared for completeness: Unity reads the constant and then asks
-            // getSystemService() for it. We have no SensorManager / Vibrator
-            // stub, so both still resolve to null (getSystemService logs the
-            // unknown service) — same behaviour as before, minus the
-            // "Unknown Field Getter" noise.
+            // Unity may request sensors; unsupported services resolve to null.
             inline static FakeJni::JString SENSOR_SERVICE = (FakeJni::JString) "sensor";
-            inline static FakeJni::JString VIBRATOR_SERVICE = (FakeJni::JString) "vibrator";
 
             inline static int MODE_PRIVATE = 0;
 
@@ -1280,22 +1276,11 @@ namespace android {
             static std::shared_ptr<jnivm::java::io::File> getExternalFilesDirInternal();
             int checkCallingOrSelfPermission(std::shared_ptr<FakeJni::JString> permission);
 
-            // getAssets / getPackageManager / getResources / getWindow /
-            // getAssets / getPackageManager / getResources / getWindow are
-            // factory-backed in android_descriptors.cpp.
-
-            // These four are Context methods in the real API (Activity inherits
-            // them), so declaring them here lets both Context-typed and
-            // Activity-typed callers resolve them.
+            // Context methods are inherited by Activity and resolve for either type.
             std::shared_ptr<jnivm::android::content::res::AssetManager> getAssets();
             std::shared_ptr<jnivm::android::content::pm::PackageManager> getPackageManager();
             std::shared_ptr<jnivm::android::content::res::Resources> getResources();
-            // OBB dirs come from [paths] android_obb_dirs. Unity asks for them
-            // when the game ships expansion files; returning null (the old
-            // STUB-MISS default) makes it treat the install as data-less.
-            std::shared_ptr<jnivm::java::io::File> getObbDir();
-            std::shared_ptr<jnivm::Array<jnivm::java::io::File>> getObbDirs();
-            // getContentResolver / getWindow / getWindowManager ->
+            // getWindow / getWindowManager ->
             // STUB-MISS path (registerFactory in android_descriptors.cpp).
         };
 
