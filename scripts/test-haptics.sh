@@ -10,3 +10,9 @@ trap 'rm -rf "$out"' EXIT
   -Wl,--wrap=open,--wrap=close,--wrap=ioctl -ldl -o "$out/test-haptics"
 "$out/test-haptics"
 "$out/test-haptics" legacy
+
+# TrimUI motor path: simulated sysfs attributes, no pad at all.
+"${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread \
+  -Iplatform/common scripts/test-haptics-motor.cpp platform/common/haptics_backend.cpp \
+  -Wl,--wrap=open,--wrap=close,--wrap=lseek,--wrap=write -ldl -o "$out/test-haptics-motor"
+"$out/test-haptics-motor"

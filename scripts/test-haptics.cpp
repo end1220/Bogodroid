@@ -73,6 +73,15 @@ dirent* __wrap_readdir(DIR*)
 int __wrap_closedir(DIR*) { return 0; }
 int __wrap_open(const char* path, int flags, ...)
 {
+    // The TrimUI motor probe runs before any pad is consulted and opens both
+    // attributes before it gives up; this machine has no motor, so the SDL path
+    // below must still be exercised.
+    if (std::strncmp(path, "/sys/class/", 11) == 0) {
+        assert(std::strcmp(path, "/sys/class/gpio/gpio227/value") == 0 ||
+               std::strcmp(path, "/sys/class/motor/voltage") == 0);
+        assert((flags & O_ACCMODE) == O_WRONLY);
+        return -1;
+    }
     assert(std::strcmp(path, "/dev/input/event8") == 0);
     assert((flags & O_ACCMODE) == O_RDONLY); // Capability probe never writes.
     return 123;

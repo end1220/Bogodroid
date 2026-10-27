@@ -25,15 +25,34 @@ using Clock = std::chrono::steady_clock;
 // Bound a legacy one-shot both for SDL 2.0.10's effect duration and bad guest
 // values. Normal Unity Handheld.Vibrate requests are much shorter (500 ms).
 constexpr int64_t max_duration_ms = 60000;
+// A coin motor needs a moment to spin up, so a 100 ms hit is close to
+// invisible; every motor pulse gets at least this long.
+constexpr int64_t motor_min_pulse_ms = 250;
+constexpr const char* motor_level_on = "3500000";
+constexpr const char* motor_level_off = "500000";
 struct Device {
     SDL_Joystick* joystick;
     SDL_JoystickID id;
     bool capable;
 };
+// TrimUI handhelds expose no force-feedback device on the pad, so SDL rejects
+// every rumble with "That operation is not supported" and the motor never
+// moves. Their firmware drives it from userspace instead: gpio227 switches the
+// motor on and /sys/class/motor/voltage sets the strength (500000 = off,
+// 2000000..3500000 = level); MainUI's own rumble setting writes the same two
+// files. Prefer that path where it exists and keep SDL for pads that really do
+// carry an FF_RUMBLE device.
+struct Motor {
+    int value = -1; // /sys/class/gpio/gpio227/value; -1 = unusable
+    int level = -1; // /sys/class/motor/voltage
+    bool probed = false;
+    bool on = false;
+};
 struct State {
     std::mutex mutex;
     std::condition_variable stopped;
     std::vector<Device> devices;
+    Motor motor;
     SDL_Joystick* playing = nullptr;
     Clock::time_point until{};
     bool dirty = false;
@@ -98,8 +117,80 @@ bool can_rumble(SDL_Joystick* joystick)
 #endif
 }
 
+#ifdef __linux__
+void motor_write(int fd, const char* text)
+{
+    if (fd < 0) return;
+    // sysfs attributes ignore the offset, but seeking keeps a repeated write
+    // predictable. A refused write must never take the game down with it.
+    const off_t seeked = lseek(fd, 0, SEEK_SET);
+    const ssize_t written = write(fd, text, std::strlen(text));
+    (void)seeked;
+    (void)written;
+}
+
+void motor_off(State& s)
+{
+    if (s.motor.value < 0) return;
+    motor_write(s.motor.level, motor_level_off);
+    motor_write(s.motor.value, "0");
+    s.motor.on = false;
+}
+
+void motor_on(State& s)
+{
+    // Park at rest, then switch on and raise the level: the order MainUI uses,
+    // so every pulse starts from a known state.
+    motor_write(s.motor.level, motor_level_off);
+    motor_write(s.motor.value, "1");
+    motor_write(s.motor.level, motor_level_on);
+    s.motor.on = true;
+}
+
+bool motor_ready(State& s)
+{
+    Motor& m = s.motor;
+    if (m.probed) return m.value >= 0;
+    m.probed = true;
+    const int value = open("/sys/class/gpio/gpio227/value", O_WRONLY | O_CLOEXEC);
+    const int level = open("/sys/class/motor/voltage", O_WRONLY | O_CLOEXEC);
+    if (value < 0 || level < 0) {
+        if (value >= 0) close(value);
+        if (level >= 0) close(level);
+        return false;
+    }
+    m.value = value;
+    m.level = level;
+    // A previous run killed mid-pulse leaves the switch on and nobody to clear
+    // it, so every start begins from the resting state.
+    motor_off(s);
+    const int direction =
+        open("/sys/class/gpio/gpio227/direction", O_WRONLY | O_CLOEXEC);
+    if (direction >= 0) {
+        motor_write(direction, "out");
+        close(direction);
+    }
+    BD_LOG("HAPTICS", "TrimUI motor (gpio227 + motor/voltage)");
+    return true;
+}
+
+void motor_close(State& s)
+{
+    motor_off(s);
+    if (s.motor.value >= 0) close(s.motor.value);
+    if (s.motor.level >= 0) close(s.motor.level);
+    s.motor.value = s.motor.level = -1;
+}
+#else
+bool motor_ready(State&) { return false; }
+void motor_on(State&) {}
+void motor_off(State&) {}
+void motor_close(State&) {}
+#endif
+
 void stop_locked(State& s)
 {
+    motor_off(s); // Unlike an SDL effect, nothing stops the motor on its own.
     if (s.playing) {
         if (SDL_JoystickRumble(s.playing, 0, 0, 0) != 0)
             BD_LOG("HAPTICS", "stop failed: %s", SDL_GetError());
@@ -120,7 +211,7 @@ bool has_vibrator()
 {
     auto& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    return !s.exiting && capable_locked(s);
+    return !s.exiting && (motor_ready(s) || capable_locked(s));
 }
 
 void vibrate(int64_t milliseconds)
@@ -129,7 +220,8 @@ void vibrate(int64_t milliseconds)
     if (milliseconds <= 0) return;
     auto& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (s.exiting || s.suspended || !capable_locked(s)) return;
+    if (s.exiting || s.suspended) return;
+    if (!motor_ready(s) && !capable_locked(s)) return;
     s.until = Clock::now() + std::chrono::milliseconds(
         std::min(milliseconds, max_duration_ms));
     s.dirty = true; // Latest request replaces the previous one, never queues up.
@@ -148,6 +240,7 @@ void refresh_devices()
     auto& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (s.exiting) return;
+    motor_ready(s); // Log the output once per run, not once per pulse.
     for (auto it = s.devices.begin(); it != s.devices.end();) {
         if (!SDL_JoystickGetAttached(it->joystick)) {
             if (s.playing == it->joystick || it->capable) clear_locked(s);
@@ -177,15 +270,28 @@ void update()
     std::lock_guard<std::mutex> lock(s.mutex);
     const auto now = Clock::now();
     if (s.exiting || s.suspended || s.until <= now) {
-        if (s.dirty || s.playing) clear_locked(s);
+        if (s.dirty || s.playing || s.motor.on) clear_locked(s);
         return;
     }
     if (!s.dirty) return;
     s.dirty = false;
     // Round up so a short valid request does not turn into SDL's zero-duration
     // stop command. A separate deadline also stops it if SDL's timer is late.
-    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+    auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
         s.until - now).count();
+    if (motor_ready(s)) {
+        // TrimUI: no FF device, so the motor is switched on here and switched
+        // off by the deadline check above. Short pulses are stretched, and the
+        // deadline with them, or a coin motor would barely twitch.
+        if (remaining < motor_min_pulse_ms) {
+            remaining = motor_min_pulse_ms;
+            s.until = now + std::chrono::milliseconds(remaining);
+        }
+        motor_on(s);
+        BD_DEBUG("HAPTICS", "motor on duration=%lld ms",
+                 static_cast<long long>(remaining));
+        return;
+    }
     for (auto& d : s.devices) {
         if (!d.capable) continue;
         if (SDL_JoystickRumble(d.joystick, 0xffff, 0xffff,
@@ -217,6 +323,7 @@ void shutdown()
     std::lock_guard<std::mutex> lock(s.mutex);
     s.exiting = true;
     clear_locked(s);
+    motor_close(s);
     for (auto& d : s.devices) SDL_JoystickClose(d.joystick);
     s.devices.clear();
 }
@@ -227,6 +334,9 @@ void prepare_exit()
     std::unique_lock<std::mutex> lock(s.mutex);
     s.exiting = true;
     s.until = {};
+    // Nothing reclaims a sysfs-driven motor when the process dies, unlike an
+    // evdev effect, so it is stopped here rather than left to the input thread.
+    motor_off(s);
     if (!s.playing) {
         s.dirty = false;
         return;
