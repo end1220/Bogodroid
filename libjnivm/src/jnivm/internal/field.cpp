@@ -16,7 +16,12 @@ jfieldID jnivm::GetFieldID(JNIEnv *env, jclass cl_, const char *name, const char
 
     auto cur = cl;
     auto sname = name;
-    auto ssig = type;
+    // Field types can arrive in the binary spelling for the same reason method
+    // signatures do (Unity 6 forName's the type's class); see NormalizeDots().
+    std::string stype = type ? type : "";
+    if (stype.find('.') != std::string::npos)
+        stype = NormalizeDots(std::move(stype));
+    auto ssig = stype.c_str();
     auto ccl =
             std::find_if(cur->fields.begin(), cur->fields.end(),
                                     [&sname, &ssig](std::shared_ptr<Field> &namesp) {
@@ -32,7 +37,7 @@ jfieldID jnivm::GetFieldID(JNIEnv *env, jclass cl_, const char *name, const char
         if(cur->baseclasses) {
             for(auto&& i : cur->baseclasses(ENV::FromJNIEnv(env))) {
                 if(i) {
-                    auto id = GetFieldID<isStatic, true, false>(env, (jclass)i.get(), name, type);
+                    auto id = GetFieldID<isStatic, true, false>(env, (jclass)i.get(), name, ssig);
                     if(id) {
                         return id;
                     }

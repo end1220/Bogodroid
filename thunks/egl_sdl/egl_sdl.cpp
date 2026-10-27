@@ -4,6 +4,7 @@
 #include "device_display.h"
 #include "process_memory.h"
 #include "plugin_present.h"
+#include "choreographer_bridge.h"
 #include "glad_egl.h"
 #include "gles2.h"
 #include "logging.h"
@@ -710,6 +711,7 @@ static void bd_log_sdl_display_mode(const char* label, int display_index)
     }
 }
 
+
 // Small helpers for reading the sysfs framebuffer files. Missing files are
 // normal (containers, KMS-only devices) and must never be fatal.
 static bool bd_read_small_file(const char* path, char* buf, size_t len)
@@ -1109,10 +1111,7 @@ EGLBoolean eglSwapBuffers_impl(EGLDisplay display,
     bd_log_process_memory_throttled("eglSwapBuffers", bd_mem_log_interval_ms());
 #endif
 
-    auto choreographer = jnivm::android::view::Choreographer::getInstance();
-    if (choreographer) {
-        choreographer->signalVSync();
-    }
+    bd_choreographer_signal_vsync();
     return EGL_TRUE;
 }
 

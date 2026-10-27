@@ -1,0 +1,43 @@
+[paths]
+
+# Unity 6 test package (Jump6/Unity6, Unity 6000.6.0f1). The loader runs from
+# the extracted APK root, so lib/arm64-v8a/ and assets/ sit next to this file
+# and game_files is "."; android_* dirs land next to them.
+game_files="./"
+support_files="./"
+
+android_package_code="./"
+android_external_files="./conf/"
+android_files="./conf/"
+android_cache="./cache/"
+android_source_dirs=["./"]
+android_obb_dirs=["./"]
+
+
+[package]
+
+packageName="com.LockeCP.Unity6"
+versionName="1.0"
+# Unity 6 reads this twice: as the Intent extra "unity" (the engine command
+# line) and as the initJni(Context, type, cmdline) argument. The package is
+# GLES-only for the Mali handheld, so force the API here as well.
+mainIntentBundle = { unity = "-force-gles32" }
+
+
+[device]
+
+# 0 = probe SDL / /dev/fb0. Pinned to the Anbernic 4:3 panel for the container
+# test so the reported Screen.width/height does not depend on the host.
+displayWidth=640
+displayHeight=480
+displayRotation=0
+
+
+[audio]
+
+backend = "auto"
+
+
+[gpu]
+
+textureMaxDim = 512

@@ -6,6 +6,14 @@
 #include "log.h"
 
 std::shared_ptr<jnivm::Class> jnivm::InternalFindClass(ENV *env, const char *name, bool returnZero, bool trace) {
+	// Class.forName() hands us Java binary names; see NormalizeDots(). Covering
+	// it here (rather than only in the Class.forName hook) also normalizes the
+	// JNI_DEBUG namespace walk and any other name-keyed entry point.
+	std::string canonical;
+	if (name && std::strchr(name, '.')) {
+		canonical = NormalizeDots(name);
+		name = canonical.c_str();
+	}
 	auto prefix = name;
 	auto && nenv = *env;
 	auto && vm = nenv.GetVM();

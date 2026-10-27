@@ -29,6 +29,7 @@ toml::table config;
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "alooper.h"
 #include "anative_activity.h"
 #include "ndk.h"
 // Decode benchmark entry point (BD_MEDIA_BENCH); implemented in thunks/ndk/media.cpp.
@@ -575,7 +576,167 @@ static int ends_with(const char* str, const char* suffix)
 
 
 
+// Unity reads its command line from the Activity Intent extra "unity", and
+// Unity 6 additionally hands it to UnityPlayer.initJni() as a String (it must
+// not be null). [package] mainIntentBundle is the loader's only Intent source,
+// so mirror that, with an escape hatch for one-off experiments:
+// BD_UNITY_CMDLINE env > [unity] cmdline in the toml > mainIntentBundle.unity.
+static std::string bd_unity_cmdline() {
+    if (const char* env = getenv("BD_UNITY_CMDLINE")) {
+        if (*env)
+            return env;
+    }
+    if (auto value = config["unity"]["cmdline"].value<std::string>())
+        return *value;
+    if (auto value = config["package"]["mainIntentBundle"]["unity"].value<std::string>())
+        return *value;
+    return "";
+}
+
 extern "C" void bd_flush_prefs_impl();
+
+#ifdef BD_ENABLE_LOG
+// libunity attaches its player/render natives with RegisterNatives() during
+// JNI_OnLoad, so when the loader invokes a name/signature it did not register
+// the only symptom is a bare "No such Method!" from MethodProxy. Dumping the
+// registered set turns that into a diff. Only compiled with logging on.
+static void bd_dump_natives(JClass* clazz, const char* which) {
+    if (!clazz)
+        return;
+    BD_LOG("UNITY6", "%s: class=%s ptr=%p methods=%zu natives=%zu", which, clazz->nativeprefix.c_str(),
+           (void*)clazz, clazz->methods.size(), clazz->natives.size());
+    for (auto& m : clazz->methods) {
+        if (m && m->native)
+            BD_LOG("UNITY6", "  %s%s%s", m->_static ? "static " : "", m->name.c_str(), m->signature.c_str());
+    }
+}
+#else
+#define bd_dump_natives(clazz, which) ((void)0)
+#endif
+
+#ifdef BD_ENABLE_LOG
+// Diagnostic for the Java surface Unity 6 actually talks to. GetMethodID()
+// walks `baseclasses`, and a baseclass whose `typecheck[typeid(T)]` slot was
+// never filled in resolves to a null shared_ptr that the traversal skips in
+// silence (the "Fatal BaseClass not registred!" throw in extends.h is
+// NDEBUG-only). The lookup then falls through to Baron's fabricated
+// placeholder, which has no handle, logs a single [STUB-MISS] and returns a
+// type default. Printing the chain and marking which entries are callable
+// (H = handle, D = dynamic lambda, N = registered native) shows whether a
+// missing Java member is a missing stub or a broken parent link.
+static void bd_dump_members(JClass* clazz, const char* filter, int depth) {
+    if (!clazz || depth > 8)
+        return;
+    BD_LOG("JNI-CHAIN", "%*s%s (methods=%zu fields=%zu)", depth * 2, "",
+           clazz->nativeprefix.c_str(), clazz->methods.size(), clazz->fields.size());
+    for (auto& m : clazz->methods) {
+        if (!m || !m->name.size())
+            continue;
+        if (filter && m->name.find(filter) == std::string::npos)
+            continue;
+        BD_LOG("JNI-CHAIN", "%*s  %s%s%s%s", depth * 2, "", m->_static ? "static " : "",
+               m->name.c_str(), m->signature.c_str(),
+               m->nativehandle ? " [H]" : m->dynamic ? " [D]" : m->native ? " [N]" : " [NO-HANDLE]");
+    }
+    if (!clazz->baseclasses)
+        return;
+    jnivm::ENV* env = jnivm::ENV::FromJNIEnv(&FakeJni::JniEnvContext().getJniEnv());
+    for (auto& base : clazz->baseclasses(env)) {
+        if (!base) {
+            BD_LOG("JNI-CHAIN", "%*s  <null baseclass: typecheck slot never filled>", depth * 2, "");
+            continue;
+        }
+        bd_dump_members(base.get(), filter, depth + 1);
+    }
+}
+#else
+#define bd_dump_members(clazz, filter, depth) ((void)0)
+#endif
+
+#ifdef BD_ENABLE_LOG
+// Reproduces the exact lookup Unity performs (FindClass + GetMethodID) and
+// reports whether the returned jmethodID carries a callable implementation.
+// A miss does not fail loudly: GetMethodID fabricates a placeholder Method
+// (pushed into the class' own table, which is why methods grows past natives)
+// that only logs [STUB-MISS] once and returns a type default at call time.
+static void bd_probe_method(const char* className, const char* name, const char* sig) {
+    JNIEnv* env = &FakeJni::JniEnvContext().getJniEnv();
+    jclass cl = env->FindClass(className);
+    if (!cl) {
+        BD_LOG("JNI-PROBE", "%s.%s%s -> class not found", className, name, sig);
+        return;
+    }
+    jmethodID mid = env->GetMethodID(cl, name, sig);
+    auto* m = reinterpret_cast<jnivm::Method*>(mid);
+    if (!mid) {
+        BD_LOG("JNI-PROBE", "%s.%s%s -> NULL id", className, name, sig);
+        return;
+    }
+    BD_LOG("JNI-PROBE", "%s.%s%s -> %s (static=%d native=%d handle=%d dynamic=%d)",
+           className, name, sig,
+           m->nativehandle ? "REAL" : m->dynamic ? "DYNAMIC" : m->native ? "NATIVE" : "PLACEHOLDER",
+           (int)m->_static, (m->native ? 1 : 0), (m->nativehandle ? 1 : 0), (m->dynamic ? 1 : 0));
+}
+
+// One line per "why is this member missing" question, so the next [STUB-MISS]
+// can be answered without recompiling:
+//   M <class>|<method-or-field>|<signature>   probe one lookup
+//   D <class>|<substring>                     dump matching members + parents
+// Set BD_JNI_PROBE_FILE to the path; BD_JNI_PROBE=1 uses the built-in Unity 6
+// set. Blank lines and '#' comments are skipped.
+static void bd_probe_script(const char* path) {
+    std::ifstream in(path);
+    if (!in) {
+        BD_LOG("JNI-PROBE", "cannot open %s", path);
+        return;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (line.back() == '\r')
+            line.pop_back();
+        const bool dump = line[0] == 'D';
+        if (line[0] != 'D' && line[0] != 'M')
+            continue;
+        // Skip the whitespace between the directive and the class name: a
+        // stray leading space makes FindClass invent a phantom class.
+        size_t start = 1;
+        while (start < line.size() && (line[start] == ' ' || line[start] == '\t'))
+            start++;
+        const std::string rest = line.substr(start);
+        const size_t bar = rest.find('|');
+        if (bar == std::string::npos)
+            continue;
+        const std::string cls = rest.substr(0, bar);
+        const std::string arg = rest.substr(bar + 1);
+        if (dump) {
+            // Same lookup the guest uses, not vm.findClass(): the two can
+            // disagree about which Class object a name resolves to.
+            JNIEnv* env = &FakeJni::JniEnvContext().getJniEnv();
+            auto viaVm = vm.findClass(cls.c_str());
+            auto viaEnv = reinterpret_cast<JClass*>(env->FindClass(cls.c_str()));
+            BD_LOG("JNI-PROBE", "%s: vm=%p threadVM=%p vmFind=%s(%zu) envFind=%s(%zu) sameObject=%d",
+                   cls.c_str(), (void*)&vm, (void*)jnivm::ENV::FromJNIEnv(env)->GetVM(),
+                   viaVm ? "hit" : "null",
+                   viaVm ? viaVm->methods.size() : 0, viaEnv ? "hit" : "null",
+                   viaEnv ? viaEnv->methods.size() : 0, viaVm.get() == viaEnv);
+            bd_dump_members(viaVm.get(), arg.c_str(), 0);
+            bd_dump_members(viaEnv, arg.c_str(), 0);
+            continue;
+        }
+        const size_t bar2 = arg.find('|');
+        if (bar2 == std::string::npos || bar2 + 1 >= arg.size()) {
+            BD_LOG("JNI-PROBE", "skipping malformed line: %s", line.c_str());
+            continue;
+        }
+        bd_probe_method(cls.c_str(), arg.substr(0, bar2).c_str(), arg.substr(bar2 + 1).c_str());
+    }
+}
+#else
+#define bd_probe_method(className, name, sig) ((void)0)
+#define bd_probe_script(path) ((void)0)
+#endif
 
 // Generic config-driven IL2CPP value patcher. Reads [[il2cpp_patch]] from the
 // game toml; after il2cpp_init, resolves each (class, method) by name via the
@@ -1587,6 +1748,7 @@ int main(int argc, char* argv[])
     print_backtrace_on_segfault(); // Registers a signal handler to print backtrace on segfaults
     exit_on_signals(); // Exits when CTRL-C is presset (or SIGINT or SIGTERM is received)
 
+
     // Decode benchmark mode: measure FFmpeg on this CPU and exit without ever
     // touching Unity. See bd_media_bench() in thunks/ndk/media.cpp.
     if (const char* bench = getenv("BD_MEDIA_BENCH")) {
@@ -1594,6 +1756,16 @@ int main(int argc, char* argv[])
         bd_media_bench(bench, frames ? atoi(frames) : 0);
         return 0;
     }
+    // On Android the main thread already owns an ALooper by the time any app
+    // code runs: ActivityThread.main() calls Looper.prepareMainLooper(), which
+    // creates it through ALooper_prepare(). Bogodroid has no ART, so the main
+    // thread is looper-less — and Unity 6 looks the looper up during libunity.so
+    // static init with ALooper_forThread() ("Couldn't retrieve native ALooper
+    // for UI thread."); the resulting null ALooper becomes a null NdkLooper,
+    // whose CreateHandler()/WaitForCreation() then dereference `this` and
+    // SIGSEGV. Prepare it here, while we are still single-threaded, so the
+    // lookup succeeds exactly like it does on device.
+    ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
 
     if (argc < 2) {
         fatal_error("Usage: %s <config file>\n", argv[0]);
@@ -1618,10 +1790,59 @@ int main(int argc, char* argv[])
     { bd_startup::Scope elapsed("plugin JNI init"); plugin_host::run_jni_init(&vm); }
     { bd_startup::Scope elapsed("JNI class registration"); InitJNIBinding(&vm); }
 
-    JClass* unityClass = vm.findClass("com/unity3d/player/UnityPlayer").get();
+    // Unity 6 resolves DVM::FindLibrary() through
+    // java.lang.Object.getClass().getClassLoader().findLibrary(), so a
+    // getClass() that does not resolve kills il2cpp loading outright. These
+    // dumps are opt-in (BD_JNI_PROBE=1) because they are only useful while
+    // wiring up a new player version; BD_JNI_PROBE=<file> answers the next
+    // [STUB-MISS] question without a rebuild (see bd_probe_script).
+    if (const char* probe = getenv("BD_JNI_PROBE"); probe && *probe && *probe != '0') {
+        {
+            // Does re-running a registration land members on the class the VM
+            // hands back? Separates "registration never happened" from
+            // "findClass disagrees about which Class object we want".
+            auto before = vm.findClass("com/unity3d/player/UnityPlayer");
+            auto again = jnivm::com::unity3d::player::UnityPlayer::registerClass();
+            auto after = vm.findClass("com/unity3d/player/UnityPlayer");
+            BD_LOG("JNI-PROBE", "re-register UnityPlayer: before=%zu same=%d after=%zu methods=%zu",
+                   before ? before->methods.size() : 0, before.get() == again.get(),
+                   after ? after->methods.size() : 0, again->methods.size());
+        }
+        if (probe[1] != '\0') {
+            bd_probe_script(probe);
+        } else {
+            bd_dump_members(vm.findClass("com/unity3d/player/UnityPlayerForActivityOrService").get(),
+                            "getClass", 0);
+            bd_dump_members(vm.findClass("android/app/Activity").get(), "Service", 0);
+            bd_probe_method("java/lang/Object", "getClass", "()Ljava/lang/Class;");
+            bd_probe_method("com/unity3d/player/UnityPlayerForActivityOrService", "getClass",
+                            "()Ljava/lang/Class;");
+            bd_probe_method("android/app/Activity", "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;");
+            bd_probe_method("android/content/Context", "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;");
+        }
+    }
+
+    JClass* unityBaseClass = vm.findClass("com/unity3d/player/UnityPlayer").get();
+
+    // Unity 6 (6000.x) moved the player/render natives (initJni, nativeRender,
+    // nativeResume, nativeRecreateGfxState, ...) off
+    // com/unity3d/player/UnityPlayer onto
+    // com/unity3d/player/UnityPlayerForActivityOrService, which is the class
+    // UnityPlayerActivity instantiates. That class exists in every Unity 6
+    // package, but which of the two actually carries the natives is only known
+    // after libunity's JNI_OnLoad has registered them, so `unityClass` starts
+    // as the pre-6 layout and is re-resolved below.
+    JClass* unityV6Class = vm.findClass("com/unity3d/player/UnityPlayerForActivityOrService").get();
+    JClass* unityClass = unityBaseClass;
 
     auto unityActivity = std::make_shared<jnivm::com::unity3d::player::UnityPlayerActivity>();
-    auto unityPlayer = std::make_shared<jnivm::com::unity3d::player::UnityPlayer>();
+    std::shared_ptr<jnivm::com::unity3d::player::UnityPlayer> unityPlayer;
+    if (unityV6Class)
+        unityPlayer = std::make_shared<jnivm::com::unity3d::player::UnityPlayerForActivityOrService>();
+    else
+        unityPlayer = std::make_shared<jnivm::com::unity3d::player::UnityPlayer>();
     auto unityPlayerObj = std::dynamic_pointer_cast<jnivm::Object>(unityPlayer);
     unityActivity->mUnityPlayer = unityPlayer;
     jnivm::com::unity3d::player::UnityPlayer::currentActivity = unityActivity;
@@ -1932,6 +2153,42 @@ int main(int argc, char* argv[])
         BD_TIME("after libunity JNI_OnLoad");
     }
 
+    // Unity's Java UnityPlayer constructor news an HFPStatus, stores it in
+    // m_HFPStatus and its constructor calls the (libunity-owned) native
+    // HFPStatus.initHFPStatusJni() — that call is how libunity caches the
+    // object it later drives for Bluetooth hands-free (SCO) audio routing
+    // (clearHFPStat/getHFPStat/setHFPRecordingStat). Our Java side does not run,
+    // so both steps happen here. It has to be *after* the JNI_OnLoad above:
+    // before it, initHFPStatusJni does not exist yet and the call would resolve
+    // to nothing, leaving libunity with a null object to call clearHFPStat on
+    // ("CallMethod object is null", Class=`Invalid`).
+    if (auto hfpClass = vm.findClass("com/unity3d/player/HFPStatus")) {
+        unityPlayer->m_HFPStatus =
+            std::make_shared<jnivm::com::unity3d::player::HFPStatus>(unityActivity);
+        auto hfpObj = std::dynamic_pointer_cast<jnivm::Object>(unityPlayer->m_HFPStatus);
+        LocalFrame hfpFrame(vm);
+        if (auto initHfp = hfpClass->getMethod("()V", "initHFPStatusJni")) {
+            initHfp.invoke(hfpFrame.getJniEnv(), hfpObj.get());
+            BD_LOG("HFPStatus", "initHFPStatusJni() invoked (libunity caches the object)");
+        } else {
+            BD_LOG("HFPStatus",
+                   "initHFPStatusJni not registered by libunity; SCO audio path has no object");
+        }
+    } else {
+        BD_LOG("HFPStatus", "class not found; SCO audio path has no object");
+    }
+
+    bd_dump_natives(unityBaseClass, "UnityPlayer");
+    bd_dump_natives(unityV6Class, "UnityPlayerForActivityOrService");
+
+    // libunity has registered its natives by now: Unity 6 attaches the render
+    // entry points to UnityPlayerForActivityOrService, older versions keep
+    // them on UnityPlayer. Drive whichever one actually has nativeRender.
+    if (unityV6Class && unityV6Class->getMethod("()Z", "nativeRender")) {
+        unityClass = unityV6Class;
+        BD_LOG("JNI", "Unity 6 layout: player natives live on %s", unityClass->getName().c_str());
+    }
+
     backend.setKeyCallback([unityActivity](std::shared_ptr<jnivm::android::view::KeyEvent> event) {
         unityActivity->injectEvent(event);
     });
@@ -1941,12 +2198,32 @@ int main(int argc, char* argv[])
     });
     backend.setPowerKeyCallback(bd_power_key_event);
 
-    auto unityInitJni = unityClass->getMethod("(Landroid/content/Context;)V", "initJni");
-    BOOT_LOG("calling initJni from libunity.so\n");
+    auto unityInitJni = unityClass->getMethod("(Landroid/content/Context;ILjava/lang/String;)V", "initJni");
     auto activity = std::make_shared<jnivm::android::app::Activity>();
     LocalFrame frame2(vm);
-    { bd_startup::Scope elapsed("Unity initJni");
-      unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity); }
+    if (unityInitJni) {
+        // Unity 6: initJni(Context, contextType, cmdline). The int is
+        // UnityPlayer's context type enum — 0 = "ActivityOrService",
+        // 1 = "GameActivity" (com.unity3d.player.a.l in the Java sources).
+        // The String is the same "-force-..." command line Unity would read
+        // from the Intent extra "unity", so it has to be non-null.
+        const std::string cmdline = bd_unity_cmdline();
+        BOOT_LOG("calling initJni(Context, 0, \"%s\") from libunity.so\n", cmdline.c_str());
+        unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity,
+                            (FakeJni::JInt)0, std::make_shared<FakeJni::JString>(cmdline));
+    } else {
+        unityInitJni = unityClass->getMethod("(Landroid/content/Context;)V", "initJni");
+        if (!unityInitJni) {
+            fatal_error("initJni()/initJni(Context) not found on %s: libunity.so did not register it\n",
+                        unityClass->getName().c_str());
+        }
+        BOOT_LOG("calling initJni from libunity.so\n");
+        unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity);
+    }
+
+    // initJni() is where Unity commits to the ActivityOrService role; a second
+    // dump shows whether the render entry points were attached during it.
+    bd_dump_natives(unityClass, "player (after initJni)");
 
     // In another thread, start the event loop
     std::thread([&backend]() {
@@ -1957,6 +2234,8 @@ int main(int argc, char* argv[])
     // return 0;
 
     auto unityNRecreateGfxState = unityClass->getMethod("(ILandroid/view/Surface;)V", "nativeRecreateGfxState");
+    if (!unityNRecreateGfxState)
+        fatal_error("nativeRecreateGfxState not registered on %s\n", unityClass->getName().c_str());
     BOOT_LOG("calling nativeRecreateGfxState from libunity.so\n");
     auto surface = std::make_shared<jnivm::android::view::Surface>();
     LocalFrame frame3(vm);
