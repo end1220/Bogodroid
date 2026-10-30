@@ -2198,7 +2198,23 @@ int main(int argc, char* argv[])
     });
     backend.setPowerKeyCallback(bd_power_key_event);
 
-    auto unityInitJni = unityClass->getMethod("(Landroid/content/Context;ILjava/lang/String;)V", "initJni");
+    // initJni does not necessarily live on the class that carries nativeRender.
+    // Unity 6000.0.x keeps it on com/unity3d/player/UnityPlayer while
+    // nativeRender / nativeResume / nativeRecreateGfxState have already moved to
+    // UnityPlayerForActivityOrService. Blackmoor 2 (6000.0.70f1) is exactly
+    // that shape: RegisterNatives logs
+    //   initJni (Landroid/content/Context;I)V  ->  under UnityPlayer
+    // while the ForActivityOrService table has 41 entries and none of them is
+    // initJni. Probing only the render class aborts with "did not register it",
+    // so try the render class first and fall back to the base player class.
+    auto find_init_jni = [&](const char* sig) {
+        auto m = unityClass->getMethod(sig, "initJni");
+        if (!m && unityBaseClass && unityClass != unityBaseClass)
+            m = unityBaseClass->getMethod(sig, "initJni");
+        return m;
+    };
+
+    auto unityInitJni = find_init_jni("(Landroid/content/Context;ILjava/lang/String;)V");
     auto activity = std::make_shared<jnivm::android::app::Activity>();
     LocalFrame frame2(vm);
     if (unityInitJni) {
@@ -2211,11 +2227,18 @@ int main(int argc, char* argv[])
         BOOT_LOG("calling initJni(Context, 0, \"%s\") from libunity.so\n", cmdline.c_str());
         unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity,
                             (FakeJni::JInt)0, std::make_shared<FakeJni::JString>(cmdline));
+    } else if ((unityInitJni = find_init_jni("(Landroid/content/Context;I)V"))) {
+        // Unity 6000.0.x: initJni(Context, contextType) -- same enum, but the
+        // cmdline String argument does not exist yet (it appears in later 6000.x).
+        BOOT_LOG("calling initJni(Context, 0) from libunity.so (Unity 6000.0.x)\n");
+        unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity,
+                            (FakeJni::JInt)0);
     } else {
-        unityInitJni = unityClass->getMethod("(Landroid/content/Context;)V", "initJni");
+        unityInitJni = find_init_jni("(Landroid/content/Context;)V");
         if (!unityInitJni) {
-            fatal_error("initJni()/initJni(Context) not found on %s: libunity.so did not register it\n",
-                        unityClass->getName().c_str());
+            fatal_error("initJni not found on %s or %s: libunity.so did not register it\n",
+                        unityClass->getName().c_str(),
+                        unityBaseClass ? unityBaseClass->getName().c_str() : "(none)");
         }
         BOOT_LOG("calling initJni from libunity.so\n");
         unityInitJni.invoke(frame2.getJniEnv(), unityPlayerObj.get(), activity);

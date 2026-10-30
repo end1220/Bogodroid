@@ -293,6 +293,26 @@ std::shared_ptr<FakeJni::JArray<int>> jnivm::android::view::InputDevice::getDevi
     return InputBackend::instance().getDeviceIds();
 }
 
+// Erased-signature twins of the two static lookups above. See the comment in
+// android.h: Unity asks for "()Ljava/lang/Object;" and "(I)Ljava/lang/Object;",
+// and a null answer there hides every controller from the engine.
+std::shared_ptr<jnivm::Object> jnivm::android::view::InputDevice::getDeviceIdsErased()
+{
+    auto ids = InputBackend::instance().getDeviceIds();
+    BD_LOG("INPUT-ENUM", "InputDevice.getDeviceIds() -> int[%d]", (int)ids->getSize());
+    return std::static_pointer_cast<jnivm::Object>(ids);
+}
+
+std::shared_ptr<jnivm::Object> jnivm::android::view::InputDevice::getDeviceErased(int device)
+{
+    auto dev = InputBackend::instance().getDevice(device);
+    BD_LOG("INPUT-ENUM", "InputDevice.getDevice(%d) -> %s", device,
+           dev ? dev->getName()->asStdString().c_str() : "(none)");
+    if (!dev)
+        return nullptr;
+    return std::static_pointer_cast<jnivm::Object>(dev);
+}
+
 void jnivm::android::view::InputDevice::addMotionRange(int axis, int src, float min, float max, float flat, float fuzz)
 {
     motionRanges.push_back(std::make_shared<MotionRange>(axis, src, min, max, flat, fuzz));
@@ -759,6 +779,10 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::Display) { FakeJni::Constructor<Di
     { FakeJni::Function<&InputDevice::getMotionRange> {}, "getMotionRange", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&InputDevice::getDevice> {}, "getDevice", FakeJni::JMethodID::STATIC },
     { FakeJni::Function<&InputDevice::getDeviceIds> {}, "getDeviceIds", FakeJni::JMethodID::STATIC },
+    // Erased-return twins Unity 6 actually looks up (PUBLIC, because it resolves
+    // them with GetMethodID). Distinct signatures, so they coexist.
+    { FakeJni::Function<&InputDevice::getDeviceErased> {}, "getDevice", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&InputDevice::getDeviceIdsErased> {}, "getDeviceIds", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::android::view::InputEvent) { FakeJni::Constructor<InputEvent, std::shared_ptr<jnivm::android::view::InputDevice>> {} },

@@ -1116,7 +1116,11 @@ THUNK_DIRECT(inet_network),
 THUNK_DIRECT(inet_nsap_addr),
 THUNK_DIRECT(inet_nsap_ntoa),
 THUNK_DIRECT(inet_ntoa),
-THUNK_DIRECT(inet_ntop),
+// [BD] inet_ntop -> guarded wrapper. A NULL sockaddr from a failed
+// getsockname()/getaddrinfo() reaches libc's inet_ntop4 as (void*)4 and
+// dereferences it; see inet_ntop_safe_impl() in misc.cpp. Keep this override if
+// generate_libc.py is ever re-run.
+NO_THUNK("inet_ntop", (uintptr_t)&inet_ntop_safe_impl),
 THUNK_DIRECT(inet_pton),
 THUNK_DIRECT(initgroups),
 THUNK_DIRECT(insque),

@@ -586,7 +586,10 @@ std::shared_ptr<jnivm::android::view::InputDevice> InputBackend::getDevice(int i
 {
     std::lock_guard<std::mutex> lock(deviceMutex);
     auto it = devices.find(id);
-    return (it != devices.end()) ? it->second : nullptr;
+    const bool found = it != devices.end();
+    BD_LOG("INPUT-ENUM", "getDevice(%d) -> %s", id,
+           found ? it->second->getName()->asStdString().c_str() : "(none)");
+    return found ? it->second : nullptr;
 }
 
 std::shared_ptr<FakeJni::JArray<FakeJni::JInt>> InputBackend::getDeviceIds()
@@ -597,6 +600,11 @@ std::shared_ptr<FakeJni::JArray<FakeJni::JInt>> InputBackend::getDeviceIds()
     for (const auto& kv : devices) {
         (*ids)[i++] = kv.first;
     }
+    // Whether the engine enumerates input devices at all decides if a pad
+    // exists in Unity's eyes: with an empty list Input.GetJoystickNames() stays
+    // empty and every KeyCode.JoystickButtonN event is dropped even though
+    // nativeInjectEvent accepted it.
+    BD_LOG("INPUT-ENUM", "getDeviceIds() -> %d device(s)", i);
     return ids;
 }
 

@@ -1034,6 +1034,33 @@ void HookClassExtensions(FakeJni::Jvm* vm)
         return vm->findClass(jniName.c_str());
     });
 
+    // Unity 6 (6000.0.70f1 and later) resolves optional Java subsystems with the
+    // THREE-argument Class.forName(String, boolean, ClassLoader). Only the
+    // one-argument form used to be hooked, so that lookup missed, libunity got a
+    // null jclass and every Play Asset Delivery call collapsed into
+    //   GetStaticMethodID class is null init, (LUnityPlayer;LContext;)LPADWrapper;
+    //   [STUB-MISS] Class=`(null)` Member=`init` ...
+    // The PAD wrapper then never existed, its callback table stayed null, and
+    // libunity dereferenced it during startup (pc=0 at libunity+0x7c7f08).
+    //
+    // The two-arity coexistence is safe: HookManager registers by the signature
+    // derived from the lambda, so the one-argument hook keeps serving callers
+    // that build a 1-element jvalue array, and this one serves the 3-element
+    // callers. Nothing is overridden.
+    classClass->Hook(&frame.getJniEnv(), "forName",
+        [vm](std::shared_ptr<FakeJni::JString> name, FakeJni::JBoolean initialize,
+             std::shared_ptr<jnivm::java::lang::ClassLoader> loader)
+            -> std::shared_ptr<jnivm::Class> {
+            (void)initialize;
+            (void)loader;
+            if (name == nullptr)
+                return std::shared_ptr<jnivm::Class>(nullptr);
+            std::string jniName = name->asStdString();
+            std::replace(jniName.begin(), jniName.end(), '.', '/');
+            BD_LOG("JBRIDGE", "Class forName(String,boolean,ClassLoader) %s", jniName.c_str());
+            return vm->findClass(jniName.c_str());
+        });
+
     // Class.getName
     classClass->HookInstanceFunction(&frame.getJniEnv(), "getName", [](jnivm::ENV* env, jnivm::Object* self) -> std::shared_ptr<FakeJni::JString> {
         auto representedClass = dynamic_cast<jnivm::Class*>(self);

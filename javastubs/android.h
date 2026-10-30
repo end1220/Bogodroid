@@ -301,6 +301,27 @@ namespace android {
             static std::shared_ptr<jnivm::android::view::InputDevice> getDevice(int device);
             static std::shared_ptr<FakeJni::JArray<int>> getDeviceIds();
 
+            // Unity 6's Android player asks for both of these with an *erased*
+            // return type and through GetMethodID rather than GetStaticMethodID:
+            //
+            //   [STUB-MISS] Class=`android/view/InputDevice` Member=`getDeviceIds`
+            //                Sig=`()Ljava/lang/Object;`  -> returning default
+            //   [STUB-MISS] Class=`android/view/InputDevice` Member=`getDevice`
+            //                Sig=`(I)Ljava/lang/Object;` -> returning default
+            //
+            // jnivm matches name+signature exactly, so the real entries above
+            // ("()[I" / "(I)Landroid/view/InputDevice;") never answered. Both
+            // misses came back null, Unity's Java input layer therefore saw no
+            // joystick at all, and every injected KEYCODE_BUTTON_A /
+            // KEYCODE_DPAD_DOWN was silently dropped -- even though
+            // nativeInjectEvent returned 1. The menu stayed on STORY no matter
+            // what BD_PAD_REPLAY pressed.
+            //
+            // C++ cannot overload on return type, hence distinct member names
+            // registered under the Java names in android_view.cpp.
+            static std::shared_ptr<jnivm::Object> getDeviceIdsErased();
+            static std::shared_ptr<jnivm::Object> getDeviceErased(int device);
+
             void addMotionRange(int axis, int src, float min, float max, float flat, float fuzz); // Helper
         };
 

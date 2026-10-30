@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <sys/socket.h>
 
 
 #include "platform.h"
@@ -231,6 +232,7 @@ extern "C" ABI_ATTR char* strrchr_safe_impl(const char *, int);
 extern "C" ABI_ATTR int strcmp_safe_impl(const char *, const char *);
 extern "C" ABI_ATTR int strncmp_safe_impl(const char *, const char *, size_t);
 extern "C" ABI_ATTR char* strstr_safe_impl(const char *, const char *);
+extern "C" ABI_ATTR const char* inet_ntop_safe_impl(int, const void *, char *, socklen_t);
 extern "C" ABI_ATTR void syslog_impl(int priority, const char *format, ...);
 extern "C" ABI_ATTR int __open_2_impl(const char *, int);
 extern "C" ABI_ATTR void __assert_impl(const char *expression, const char *file, int line);

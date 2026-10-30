@@ -7,6 +7,7 @@
 #include "javac.h"
 #include "jnibridge.h"
 #include "logging.h"
+#include "ump.h"
 #include "unity.h"
 #include <jnivm/field.h>
 
@@ -43,6 +44,35 @@ void InitJNIBinding(FakeJni::Jvm* vm)
     // vm->registerClass<jnivm::com::google::androidgamesdk::SwappyDisplayManager>();
 
     vm->registerClass<jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper>();
+    {
+        // Diagnostic: libunity reports "GetStaticMethodID class is null init" for
+        // this type, which means its FindClass returned null. Answer whether the
+        // registry itself resolves the name, so the failure can be attributed to
+        // registration vs. the lookup libunity performs.
+        auto pad_cls = vm->findClass("com/unity3d/player/PlayAssetDeliveryUnityWrapper");
+        BD_LOG("PAD", "registry lookup PlayAssetDeliveryUnityWrapper -> %s",
+               pad_cls ? "FOUND" : "NULL");
+    }
+    // ── Google UMP consent ───────────────────────────────────────────
+    // Blackmoor 2's ad SDK calls
+    // com.google.android.ump.UserMessagingPlatform.getConsentInformation()
+    // before anything else; with the package unregistered the lookup answered
+    // null, the C# layer threw NullReferenceException and the process died in
+    // the IL2CPP threadpool before the first real frame. See javastubs/ump.h.
+    vm->registerClass<jnivm::com::google::android::ump::UserMessagingPlatform>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentInformation>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentRequestParameters>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentRequestParameters::Builder>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentDebugSettings>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentDebugSettings::Builder>();
+    vm->registerClass<jnivm::com::google::android::ump::ConsentForm>();
+    vm->registerClass<jnivm::com::google::android::ump::FormError>();
+    {
+        auto ump_cls = vm->findClass("com/google/android/ump/UserMessagingPlatform");
+        BD_LOG("UMP", "registry lookup UserMessagingPlatform -> %s",
+               ump_cls ? "FOUND" : "NULL");
+    }
+
     // Unity's Java UnityPlayer news an HFPStatus and keeps it in m_HFPStatus;
     // main.cpp does the same so libunity's SCO/audio path has the object it
     // expects (see the class comment in javastubs/unity.h).

@@ -25,9 +25,12 @@
 
 
 #include "bionic_file.h"
+#include <arpa/inet.h>
 #include <linux/futex.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <cstring>
+#include <stdint.h>
 
 extern "C" ABI_ATTR int login_tty_impl(int fd)
 {
@@ -611,6 +614,57 @@ extern "C" ABI_ATTR char* strstr_safe_impl(const char* haystack, const char* nee
 {
     if (!haystack || !needle) return nullptr;
     return (char*)strstr(haystack, needle);
+}
+
+// A failed network lookup must not become a segfault.
+//
+// Blackmoor 2 formats a peer address on its IL2CPP threadpool after
+// getsockname()/getaddrinfo() without checking the result. With nothing usable
+// to talk to, the sockaddr stays NULL, `&sa->sin_addr` evaluates to offset 4,
+// and libc's inet_ntop4 dereferences it:
+//
+//   [BD-SEGV] signal 11 si_code=1 si_addr=0x7
+//   pc libc-2.31.so+0xed640        (ldrb w5, [x0, #3]  with x0 == 4)
+//   tid name "IL2CPP Threadpo"
+//
+// The faulting frame is inside libc, so the game-side caller is not visible in
+// any backtrace we can unwind. Answer the zero address instead of faulting and
+// name the caller once, so the real call site can be found later.
+//
+// 0x1000 as the cutoff: any address below the first page is a NULL plus a
+// struct member offset, which is the only shape this guard is meant to catch --
+// a genuinely mapped buffer is always higher.
+extern "C" ABI_ATTR const char* inet_ntop_safe_impl(int af, const void* src, char* dst,
+                                                    socklen_t size)
+{
+    if (!dst || size == 0)
+        return nullptr;
+    if (!src || (uintptr_t)src < 0x1000) {
+        static std::atomic<int> n{0};
+        const int cur = ++n;
+        if (cur <= 5) {
+            char where[512];
+            bd_describe_address(__builtin_return_address(0), where, sizeof(where));
+            BD_DEBUG("NETGUARD",
+                     "inet_ntop(af=%d, src=%p) -- bad src, answering the zero address (%s) #%d",
+                     af, src, where, cur);
+        }
+        if (af == AF_INET6) {
+            if (size < 3) {
+                dst[0] = 0;
+                return nullptr;
+            }
+            memcpy(dst, "::", 3);
+            return dst;
+        }
+        if (size < 8) {
+            dst[0] = 0;
+            return nullptr;
+        }
+        memcpy(dst, "0.0.0.0", 8);
+        return dst;
+    }
+    return inet_ntop(af, src, dst, size);
 }
 
 extern "C" ABI_ATTR const void* __system_property_find_impl(const char* name)

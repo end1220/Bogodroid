@@ -364,12 +364,19 @@ jnivm::com::unity3d::player::PlayAssetDeliveryUnityWrapper::getAssetPackPath(
 
     std::filesystem::path path;
     if (pack_name == "UnityDataAssetPack") {
-        // Unity's MountDataArchive only accepts paths that contain
-        // ".apk/", ".obb/", ".jar/", or ".zip/" (ZipCentralDirectory). A plain
-        // directory like game_root fails with "Path ... was not parsed" and
-        // never opens datapack.unity3d. Return an APK-style assets path whose
-        // zip payload is staged next to gamedata as UnityDataAssetPack.apk.
-        path = game_root / "UnityDataAssetPack.apk" / "assets";
+        // Hand Unity the real extracted directory when the split payload has been
+        // unpacked in place. The ".apk/assets" form below only helps when the
+        // payload still lives inside a zip (MountDataArchive wants a ".apk/"
+        // segment). Pointing at a <name>.apk that does not exist on disk made
+        // Unity treat the pack as not installed, which surfaces as
+        //   AlertDialog: "Not enough storage space to install required resources."
+        // and then blocks in the first nativeRender waiting for a tap.
+        std::filesystem::path unpacked = game_root / "assets";
+        std::error_code ec;
+        if (std::filesystem::is_directory(unpacked, ec))
+            path = unpacked;
+        else
+            path = game_root / "UnityDataAssetPack.apk" / "assets";
     } else if (pack_name == "UnityStreamingAssetsPack") {
         // StreamingAssets live under assets/ in this port layout. Addressables
         // loads CustomAssetPacksData.json from
