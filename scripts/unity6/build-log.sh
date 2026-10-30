@@ -1,20 +1,33 @@
 #!/bin/bash
-# Build the diagnostic unityloader: same optimisation level as the shipping
-# build (Release) but with BD logging compiled in, and WITHOUT stripping, so
-# crash backtraces and [BD-*] lines are usable. ~90 MB, handheld only
-# temporarily.
+# ============================================================================
+# DEPRECATED — 与 scripts/build-docker.sh 同属 x86 Debian 交叉路线，整条不通。
 #
-#   scripts/unity6/build-log.sh [TRACE]                          (host side)
-#   bash /work/scripts/unity6/build-log.sh --in-container        (in the builder)
+# 依赖 build-docker.sh 先配出 build-unity6/，而那一步在第一次编译就死在
+# libavcodec/avcodec.h 找不到。仓库里从未存在过由这个脚本产出的 unityloader。
 #
+# 现行排查档做法（GlES_Dev 容器内，/workspace/Bogodroid，不 strip）：
+#   cmake -S . -B build-anbernic-rel -G Ninja \
+#     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+#     -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+#     -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF &&
+#   cmake --build build-anbernic-rel -j"$(nproc)" --target unityloader
+# 完整命令见 docs/PORTING_PLAYBOOK.md §1.1 / §1.5。
+# 要复活：先修镜像，再删掉下面那段 guard。
+# ============================================================================
+#
+# 原始说明（历史）：Release 优化级 + LOG ON，不 strip（回溯可用，约 90 MB）。
+#   scripts/unity6/build-log.sh [TRACE]                     (host side)
+#   bash /work/scripts/unity6/build-log.sh --in-container   (in the builder)
 #   BUILD_DIR  cmake build dir (default build-unity6)
-#   TRACE      any non-empty value also turns on BD_ENABLE_TRACE (BD_DEBUG /
-#              BOOT_LOG); JNIVM_ENABLE_TRACE follows BD_ENABLE_LOG
-#
-# Never strip this one: `strip` removes exactly the symbols the build exists
-# for, and the loss is silent until you need a backtrace.
-# See docs/UNITY6.md 4 and AGENTS.md for the switch hierarchy.
+#   TRACE      any non-empty value also turns on BD_ENABLE_TRACE
 set -eu
+
+cat >&2 <<'EOF'
+[build-log.sh] DEPRECATED：依赖 build-docker.sh 那条从未跑通的 x86 交叉路线。
+现行排查档在 GlES_Dev 容器内编 build-anbernic-rel（LOG=ON，不 strip），
+见 docs/PORTING_PLAYBOOK.md §1.1 / §1.5。
+EOF
+exit 1
 
 BUILD_DIR="${BUILD_DIR:-build-unity6}"
 IMAGE="${BOGO_BUILDER_IMAGE:-bogo-builder:unity2017-armv7}"

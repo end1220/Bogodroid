@@ -1,262 +1,190 @@
-# BogoDroid NEO — Docker 交叉编译流程
+# 容器构建（GlES_Dev）
 
 > © 2025-2026 jenny92-tech &lt;jennyliu90223@gmail.com&gt; · GPL v3
-
-> **此文档为 AI 阅读用。**未来的 Claude 会话读完本文档后应当能直接复现：
-> 在 macOS / x86 Linux 主机上用 Docker 交叉编译出 ARM64 ELF
-> （`unityloader`），并部署到 R36S Pro 等 ARM64 PortMaster 掌机。
 >
-> 上游 README 里的 `How to Build` 是 Linux 原生构建路径，**不适用**于本工作流。
+> **本页讲这个仓库实际怎么编出 `unityloader`**：在 `GlES_Dev` 容器里编。
+> 流水线怎么走、装到掌机哪里、日志开不开——看 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) 与 [`AGENTS.md`](AGENTS.md)。
+> 上游那套 x86 Debian 交叉（`Dockerfile.builder` / `scripts/build-docker.sh`）已不可用，原因见 §5。
 
 ---
 
-## 0. 变量约定
+## 0. 链路与基线
 
-所有命令引用以下变量。AI 在执行前应当从 cwd / 用户提示中解析出实际值，不要写死路径：
+```
+宿主仓库  --docker cp-->  GlES_Dev:/workspace/Bogodroid  --cmake/ninja-->  unityloader
+                                                                  --strip--> dropbeak push 掌机
+```
 
-| 变量 | 含义 | 解析方式 |
+容器基线（`docker exec GlES_Dev …` 实测）：
+
+| 项 | 值 |
+|---|---|
+| 镜像 / 容器 | `dropbeak-gles-dev:local` → 容器名 `GlES_Dev` |
+| 系统 | Ubuntu 20.04.6 LTS（glibc 2.31） |
+| 编译器 | `aarch64-linux-gnu-g++` 9.4.0（`crossbuild-essential-arm64`） |
+| CMake / 生成器 | 3.16.3 / Ninja |
+| FFmpeg | 4.2 dev，`/usr/include/aarch64-linux-gnu/libavcodec/avcodec.h` |
+| 源码副本 | `/workspace/Bogodroid`（**注意不是仓库名**） |
+
+产物要求掌机 glibc ≥ 2.31：TrimUI Smart Pro 2.33、Anbernic H700 均满足。`-static-libstdc++ -static-libgcc` 已默认开启，防旧固件缺 `GLIBCXX_3.4.31`。
+
+`/workspace/Bogodroid` 是**副本，不是 bind mount**。里面的 `.git` 是个失效的 worktree 指针（指向 `D:/Locke/gitee/Bogodroid/.git/...`），所以容器里 `git` 命令不可用，也不要指望它跟着宿主自动更新。
+
+---
+
+## 1. 同步源码
+
+只推改动过的文件，别整树重推（副本已有 6.2 GB）：
+
+```bash
+# 目录级（项目/插件）
+docker cp projects/unityloader/. GlES_Dev:/workspace/Bogodroid/projects/unityloader/
+# 单文件
+docker cp thunks/egl_sdl/egl_sdl.cpp GlES_Dev:/workspace/Bogodroid/thunks/egl_sdl/egl_sdl.cpp
+```
+
+- Git Bash 下 `docker cp` 用**相对路径**最稳；绝对路径必须是 `D:/…` 形式，`/d/…` 会被 MSYS 改写。
+- `docker cp` 保留 mtime。增量构建靠 mtime 判断，若本机文件更旧但内容不同，改完 `touch` 一下再推。
+- 同步完先自检：容器里 `ls -l <file>` 的时间戳与宿主一致，再动 cmake。
+
+---
+
+## 2. 构建
+
+### 2.1 发版（LOG 全 OFF + strip，约 5.7 MB）
+
+```bash
+docker exec GlES_Dev bash -lc '
+  cd /workspace/Bogodroid &&
+  cmake -S . -B build-device-release -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+    -DIL2CPP_TRACE=OFF -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF &&
+  cmake --build build-device-release -j"$(nproc)" \
+    --target unityloader plugin_<port_id> &&
+  aarch64-linux-gnu-strip build-device-release/unityloader \
+    build-device-release/unityloader.d/<port_id>.so
+'
+```
+
+- 插件有两个等价 target 名：`plugin_<port_id>`（`plugins/CMakeLists.txt:8`，`add_custom_target` 包装）和 `bogodroid_unityloader_plugin_<port_id>`（`plugins/CMakeLists.txt:6`，真正的库 target）。`--target` 用哪个都行。**产物文件名是 `<port_id>.so`**（`OUTPUT_NAME "${name}"` + `PREFIX ""`），落在 `unityloader.d/`。
+- 没有插件就只编 `--target unityloader`。
+- `-DCMAKE_TOOLCHAIN_FILE` 保留是历史一致：容器本身就是 aarch64，等于同架构"交叉"，产物与原生一致。删掉也能编，但会让缓存与既有目录不一致。
+
+### 2.2 排查（LOG=ON，不 strip）
+
+用 `RelWithDebInfo`（`-O2 -g`，保留符号与日志，跑得动），换一个目录，不 strip：
+
+```bash
+docker exec GlES_Dev bash -lc 'cd /workspace/Bogodroid &&
+  cmake -S . -B build-anbernic-rel -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBD_ENABLE_LOG=ON -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+    -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF &&
+  cmake --build build-anbernic-rel -j"$(nproc)" --target unityloader'
+```
+
+要 `BD_DEBUG` 级细节再自己加 `-DBD_ENABLE_TRACE=ON`。**日志档不要发出去**：产物约 90–168 MB，且 `log.txt` 会刷满 `[BD-*]`。
+
+`BD_ENABLE_OPENSLES_SHIM` 别写 `OFF`——默认已是 ON，写成 OFF 在 Wwise 端口上启动即 `SIGABRT`（`docs/PORTING_PLAYBOOK.md` §8）。
+
+### 2.3 增量与缓存
+
+- 同目录只跑 `cmake --build <dir> -j$(nproc)`：改一个文件约 45–50 s。
+- **`cmake -S . -B` 会改写 `CMakeCache.txt`**：`build-device-release` 上一次被谁用过，cache 里就是谁的口径（实测现在 `BD_ENABLE_LOG:BOOL=ON`）。所以发版和排查**用两个目录**（`build-device-release` / `build-anbernic-rel`），别共用一个。
+- 宿主上那几个 `build-trimui-*`、`build-spacesquids-container` 是从旧容器里拿出来的，cache 里的绝对路径是 `/workspace/Bogodroid-brickgame/…` 或 `/work/…`，在现在的 `/workspace/Bogodroid` 下**无效**。要用就重配，别指望拷进去直接 `ninja`。
+
+---
+
+## 3. CMake 选项
+
+以 `CMakeLists.txt` 的 `option()` 为准（行号会漂）：
+
+```bash
+grep -nE '^\s*option\(' CMakeLists.txt
+```
+
+| 选项 | 默认 | 作用 |
 |---|---|---|
-| `REPO` | 本仓库根（含 `CMakeLists.txt` / `Dockerfile.builder`）| `pwd`，或 cwd 的根 |
-| `SD_PORT` | SD 卡上 PortMaster 端口目录（含 `wsm.toml` / `unityloader` / `lib/arm64-v8a/`） | 必须从用户或环境探测（macOS 通常挂在 `/Volumes/<label>/roms/ports/<port>/`），AI 不要硬编码 |
+| `BD_ENABLE_LOG` | OFF | **日志主开关**：`BD_LOG` / `[BD-MEM]` / 插件 `api->log` / jnivm `LOG` |
+| `BD_ENABLE_TRACE` | OFF | 需 LOG：`BD_DEBUG` / `warning` / `BOOT_LOG` |
+| `BD_ENABLE_VERBOSE` | OFF | 需 LOG：`verbose()`，行数极多 |
+| `IL2CPP_TRACE` | OFF | 需 LOG：il2cpp 内部 trace |
+| `BD_ENABLE_OPENSLES_SHIM` | **ON** | OpenSL ES → SDL 桥，按调用方分发（只给 Wwise，FMOD 走 fakefmod） |
+| `BD_FAKE_EGL` | **ON** | SDL 建好 GLES 上下文后，Unity 的 EGL 调用不再转给系统 libEGL（Anbernic / Mali） |
+| `BD_ENABLE_GPLAY` | OFF | Google Play Games 桩；不开省约 340 KB |
+| `BD_ENABLE_MOBGE_ASSETLOCATOR` | OFF | Oddmar 专用 `com.mobge.assetlocator` 桩；首选 `oddmar_assetlocator` 插件 |
+| `USE_MOLD` | OFF | mold 链接器；交叉工具链文件里强制 OFF |
+| `USE_LLD` | OFF | lld 链接器 |
 
-下文写 `$REPO` / `$SD_PORT` 时一律指上面这两个变量。
+`BD_ENABLE_TRACE / VERBOSE / IL2CPP_TRACE` 开了但 `BD_ENABLE_LOG=OFF` 会 `FATAL_ERROR`。
 
----
+`Release`（含 `CMAKE_BUILD_TYPE` 未定义）额外启用 `-ffunction-sections -fdata-sections -fvisibility=hidden -flto` 与 `-Wl,--gc-sections -flto -s`。**LTO 在 ninja 下是串行的**，全量链接可能 10 min 起；只想快速迭代就 `RelWithDebInfo`（不带 LTO）。
 
-## 1. 目录结构
-
-仓库根 (`$REPO`)：
-
-```
-$REPO/
-├── Dockerfile.builder       预装工具链的镜像配方
-├── BUILD-DOCKER.md          本文档
-├── tomlplusplus/            submodule，首次 clone 后必须 init
-├── CMakeLists.txt           构建入口；feature flag 在 207–255 行
-├── platform/common/logging.h  日志宏单一来源 (BD_LOG / BD_DEBUG / fatal_error)
-└── build-release/           Release 构建输出 (我们的产物)
-    └── unityloader          ← 目标 ELF
-```
-
-SD 卡端口目录 (`$SD_PORT`)：
-
-```
-$SD_PORT/
-├── unityloader              build-release/unityloader 拷贝过来
-├── wsm.toml                 运行时配置 (paths / unity / input / gpu / debug 段)
-├── lib/arm64-v8a/           游戏自带的 *.so (libil2cpp / libmain / libc++_shared / ...)
-├── gamedata/                APK 解包出来的 assets / global-metadata.dat 等
-└── log.txt                  运行时 stderr 重定向到这里
-```
+FFmpeg 运行时不进 `DT_NEEDED`：`thunks/ndk/media.cpp` 用 `dlopen` 按需加载。编译期仍然要头文件——这也是为什么构建必须在带 FFmpeg dev 的容器里做（§5）。
 
 ---
 
-## 2. 一次性准备
-
-### 2.1 拉子模块
+## 4. 产物检查
 
 ```bash
-cd "$REPO"
-git submodule update --init --recursive
+file build-device-release/unityloader                    # ELF 64-bit, ARM aarch64, stripped
+objdump -p build-device-release/unityloader | grep NEEDED
+LC_ALL=C grep -ao 'GLIBC_[0-9.]*' build-device-release/unityloader | sort -uV | tail -3
+strings build-device-release/unityloader | grep -E '^\[BD-' | sort -u
 ```
 
-### 2.2 建 builder 镜像
+当前发版产物的正常长相（`build-trimui-release/unityloader`，5,705,976 字节）：
 
-镜像里预装了 cmake / ninja / mold / g++ / SDL2 / GLES / libbsd。**只需建一次**：
-
-```bash
-docker build --progress=plain --platform linux/arm64 \
-  -t bogo-builder \
-  -f "$REPO/Dockerfile.builder" "$REPO"
+```
+NEEDED: libdl.so.2  libc.so.6  ld-linux-aarch64.so.1  libSDL2-2.0.so.0  libpthread.so.0  libz.so.1  libm.so.6
+最高 GLIBC 符号: GLIBC_2.30
+strings '^[BD-': [BD-SEGV] signal … / [BD-J2] native=… （这两条恒在，不算日志开关）
 ```
 
-首次约 1–2 分钟（拉 ubuntu:22.04 + 装 ~150 MB dev 包）。之后镜像在本地，下次跳过。
+判读：
 
-判断是否已存在：
-
-```bash
-docker images --format '{{.Repository}}' | grep -q '^bogo-builder$'
-```
+- `file` 说 `x86-64` → 用错了容器或漏了交叉工具链，重新配。
+- `NEEDED` 出现 `libav*` / `libEGL*` → 链接口径不对。`libSDL2-2.0.so.0`、`libz.so.1` 由掌机系统提供，属正常。
+- `GLIBC_2.xx` 高于掌机版本 → 换了更新的基础镜像，退回 Ubuntu 20.04 基线。
+- `strings` 出现 `[BD-MEM]` / `[BD-TIME]` / `[BD-INPUT]` 这类 → 这是**带 LOG** 的包，发版不合格，见 playbook §6。`[BD-SEGV]`（崩溃回溯）与 `[BD-J2]`（运行时 `BD_J2_TRACE` 才触发）无条件编入，不能当判据。
 
 ---
 
-## 3. 日常：编 unityloader
+## 5. 已废弃：x86 Debian 交叉（`Dockerfile.builder` / `build-docker.sh`）
 
-默认 **Release** 配置（4.9 MB 产物，LTO + strip），输出在 `$REPO/build-release/`。
+上游时代留下的第二条路：x86 主机上用 `bogo-builder`（Debian 11）交叉编 aarch64。**现在跑不通，别再试**，理由按发现顺序：
 
-**增量构建**（改了几个 .cpp）：
+1. 镜像里**没有 FFmpeg dev**，而 `thunks/ndk/media.cpp`、`thunks/ndk/ffmpeg_optional.cpp`、`projects/unityloader/startup_video.cpp` 无条件 `#include <libavcodec/avcodec.h>` —— 编译直接 `fatal error: libavcodec/avcodec.h: No such file or directory`（2026-10-29 实测复现）。CMake 那边只有 `pkg_check_modules(FFMPEG QUIET …)`，找不到也只打一行 STATUS，不报错。
+2. 想补装也不行：Debian 11 已 EOL，`deb.debian.org/debian-security` 上 ffmpeg 包 404；换 `archive.debian.org` 会因索引版本倒退被 apt 为了解依赖**卸掉 `cmake` / `libsdl2-dev`**（2026-09-21 记录，`apt-get install -s` 可预演）。
+3. 顺带发现的两个历史镜像也都残：`bogo-builder:oddmar-ffmpeg` 有 FFmpeg 但**没 cmake**；`bogo-builder:unity2017-armv7` 有 cmake 但**没 FFmpeg 头**。
 
-```bash
-docker run --rm --platform linux/arm64 \
-  -v "$REPO:/work" -w /work/build-release \
-  bogo-builder ninja unityloader
-```
+所以 `scripts/build-docker.sh` 与 `scripts/unity6/build-rel.sh` / `build-log.sh` 属于没落地的路线：它们要求的 `build-unity6/` 从未成功配出来。留着当历史参考，日常别用。
 
-**全量重链接**（换分支 / 改链接 flag 时）：
-
-```bash
-docker run --rm --platform linux/arm64 \
-  -v "$REPO:/work" -w /work/build-release \
-  bogo-builder bash -c "ninja -t clean && ninja unityloader"
-```
-
-**首次初始化 / `CMakeCache.txt` 损坏 / 换 build type**，重跑 cmake：
-
-```bash
-docker run --rm --platform linux/arm64 \
-  -v "$REPO:/work" -w /work/build-release \
-  bogo-builder bash -c "rm -rf * && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja unityloader"
-```
+要恢复这条路，前提是换掉 `FROM debian:11`、把 FFmpeg dev 补进配方、并重新验证 glibc 基线——那是独立的一件事，不是改两行 flag。
 
 ---
 
-## 4. CMake 可选 flag
-
-通过 `cmake -DXXX=ON ..` 传入。源代码定义在 `CMakeLists.txt` 207–255 行。
-
-| Flag | 默认 | 作用 |
-|---|---|---|
-| `CMAKE_BUILD_TYPE=Release` | Debug | 启用 LTO + `-fvisibility=hidden` + `-Wl,--gc-sections -s`。9.5 MB → 4.9 MB |
-| `BD_ENABLE_LOG=ON` | OFF | **日志主开关**。打开关键启动、状态、错误、退出的 `BD_LOG` + jnivm `LOG` + `[BD-MEM]`。所有 sub-trace 开关都依赖它，否则 cmake `FATAL_ERROR` |
-| `BD_ENABLE_TRACE=ON` | OFF | 在 LOG 之上额外打开 `BD_DEBUG` / `warning` / `BOOT_LOG` 细节诊断行。需 `BD_ENABLE_LOG=ON` |
-| `BD_ENABLE_VERBOSE=ON` | OFF | 在 LOG 之上额外打开 `verbose()`（大量 legacy，含 NATIVE/JNI）。需 `BD_ENABLE_LOG=ON` |
-| `IL2CPP_TRACE=ON` | OFF | 在 LOG 之上额外打开 il2cpp 内部 trace（仅 unityloader）。需 `BD_ENABLE_LOG=ON` |
-| `BD_ENABLE_OPENSLES_SHIM=ON` | OFF | 把 `thunks/opensles/` 编进 + 暴露给 FMOD。当前 AudioTrack/fakefmod 路径已经能用，此 flag 保留为后续 A/B |
-
-FFmpeg 是可选运行时依赖：`thunks/ndk/media.cpp` 使用 `dlopen`/`dlsym` 在首次创建
-Android media 对象时加载 FFmpeg 4.2，不再把 `libav*.so.*` 写入 `unityloader` 的
-`DT_NEEDED`。没有视频的 Unity 游戏因此不需要 FFmpeg；需要视频的游戏仍需在启动脚本
-中提供匹配 ABI 的库路径（Oddmar 使用 `System/lib` + `ff58/`）。
-
-**上机约定（2026-09-11）**：发布包用 Release + **保持 `BD_ENABLE_LOG=OFF`**（及 TRACE/VERBOSE OFF）再 `strip`；排障再临时开 LOG。详见根目录 `AGENTS.md` 与 `docs/PORTING_PLAYBOOK.md` §1.1。
-
----
-
-## 5. 部署到 SD 卡
-
-```bash
-# 1. 确认 SD 卡已挂载且端口目录存在
-[ -d "$SD_PORT" ] || { echo "ERR: $SD_PORT 不存在，请确认 SD 已挂载"; exit 1; }
-
-# 2. 拷贝 + 强制刷写
-cp "$REPO/build-release/unityloader" "$SD_PORT/unityloader"
-sync
-```
-
-**必须 `sync`**：macOS 写缓存默认是异步的，不 sync 拔卡会回滚。
-
----
-
-## 6. 健全性检查
-
-```bash
-ls -la "$SD_PORT/unityloader"                                          # 期望 ~4.9 MB
-strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u            # BD-* 字符串清单
-```
-
-### 6.1 Release 二进制里的常用 BD-* 标签
-
-`BD_LOG` 是事件级日志，默认 **关闭**；编译时加 `-DBD_ENABLE_LOG=ON` 才会出现以下标签：
-
-| 标签 | 源文件 | 出现时机 |
-|---|---|---|
-| `[BD-TIME]` | `projects/unityloader/main.cpp` | 启动各阶段耗时（"+N ms <stage>"）|
-| `[BD-MEM]` | `loader/so_util.cpp` | 每个 .so mmap 的 base / size，一行 |
-| `[BD-DATADIR]` | `thunks/libc/fcntl.cpp` | Android files dir 解析结果 |
-| `[BD-PREFS]` | `javastubs/android_content.cpp` | SharedPreferences load/save 关键事件 |
-| `[BD-MKPARENT]` | `thunks/libc/stdio.cpp` | open() 自动建父目录时 |
-| `[BD-CAP]` | `thunks/khronos/gles2.cpp` | textureMaxDim 启用值，启动时一次 |
-| `[BD-INPUT-REMAP]` | `platform/common/input_backend.cpp` | wsm.toml 有 key remap 时 |
-| `[BD-INPUT]` | `platform/common/input_backend.cpp` | 控制器发现、轴校准配置及关键错误 |
-| `[BD-JNI]` | `javastubs/javac.cpp` | `System.load / loadLibrary` 调用 |
-| `[BD-SEGV]` | `platform/common/debug_utils.cpp` | SIGSEGV 处理器 |
-| `[BD-SYM]` | `loader/so_util.cpp` | 链接没解析到的符号 |
-| `[BD-EXIT]` | `projects/unityloader/main.cpp` | Unity 主动退出 (nativeRender 返回 false) |
-| `[BD-OPENSLES]` | `thunks/opensles/opensles.cpp` | 仅 `-DBD_ENABLE_OPENSLES_SHIM=ON` 编进时 |
-
-默认 build（不传 `-DBD_ENABLE_LOG=ON`）**以上全没**。崩溃信息仍然会打：`fatal_error` 走 stderr，`SIGSEGV` 走 libc `backtrace_symbols_fd` 直接打栈帧符号（不经 BD_LOG）。
-
-日志没有 TOML 分类过滤器，也没有 `[logging].exclude`。常态运行曾经持续输出的
-`nativeRender` 帧耗时、`eglSwapBuffers`、`glTexStorage2D`、控制器逐键事件和摇杆轴采样
-已经从代码中删除，不需要每个游戏携带一份过滤器配置。这样 `BD_ENABLE_LOG=ON` 仍能
-保留控制器识别、EGL 初始化、音频后端、插件安装、退出和错误信息，同时不会让
-`log.txt` 被帧级遥测淹没。
-
-如果以后需要排查这些热路径，应在问题分支中临时加入有界/限频日志，验证完成后删除，
-而不是扩展公共 TOML。Hollow Knight 视口插件是例外：其已有的
-`[game_patches.hollow_knight_viewport] debug = true` 可临时打开有限次数的摄像机/tk2d 状态日志；
-默认 `false` 时只保留插件加载、hook 和失败状态。
-
-### 6.2 仅在 `-DBD_ENABLE_TRACE=ON` 出现的 BD-* 标签
-
-`BD_DEBUG` 由 `BD_ENABLE_TRACE` 控制；默认关闭时编译成 `((void)0)`。它与
-`CMAKE_BUILD_TYPE` 独立，因此也可以在 Release 构建中临时开启：
-
-`[BD-ASSET]` `[BD-WROPEN]` `[BD-RES]` `[BD-PREFS-GET]` `[BD-PREFS-PUT]`
-`[BD-PREFS-EDIT]` `[BD-PREFS-IO]` `[BD-GRAPHICS-IO]` `[BD-STRGUARD]`
-`[BD-DLOPEN]` `[BD-SYSCONF]`
-
-要在 release 里临时启用，重编：`cmake .. -DCMAKE_BUILD_TYPE=Release -DBD_ENABLE_TRACE=ON`。
-
-### 6.3 log.txt 里的已知噪音（无害，不用排查）
-
-| 行 | 来源 | 含义 |
-|---|---|---|
-| `xkbcommon: ERROR: couldn't find a Compose file for locale "en_US.UTF-8"` | libxkbcommon (被 SDL2 间接拉进来) | 找不到本地化 Compose；不收文本输入，安全 |
-| `arm_release_ver: g13p0-..., rk_so_ver: 10` | Mali-G52 GPU 驱动 | RK3566 厂商 GL driver 启动时打的版本号 |
-| `` [JNIVM]: [STUB-MISS] <kind>: Class=`...` Member=`...` Sig=`...` -> returning default `` | `libjnivm/.../method.cpp` | 游戏调了没实现的 Java 成员。**关键诊断信号**：每个 (class+name+sig) 只打 1 次（dedup）。反复刷屏才需要补 stub 或加 `vm->setDefault<T>()` |
-| `LOG[Unity]:` / `LOG[IL2CPP]:` | Unity / IL2CPP 引擎自己 | 控不了 |
-
----
-
-## 7. 常见坑
+## 6. 常见坑
 
 | 现象 | 原因 | 解法 |
-|------|------|------|
-| `ninja: command not found` | 没用 `bogo-builder`，直接跑了 ubuntu 镜像 | 用 `bogo-builder` |
-| `mold not found` / 链接失败 | 镜像版本旧 | 重建 builder 镜像 |
-| 警告 `using serial compilation of N LTRANS jobs` | LTO 串行，正常 | 忽略 |
-| 二进制 ~9 MB | Release flags 没启用 | 看 `build-release/CMakeCache.txt`：`CMAKE_BUILD_TYPE:STRING=Release` |
-| segfault on dlopen | `$SD_PORT/lib/arm64-v8a/*.so` 缺失或权限不对 | `chmod 755 $SD_PORT/lib/arm64-v8a/*.so`，确认游戏自带的 4–6 个 so 都在 |
-| `Couldn't open Display` | EGL 初始化失败，多半是 SDL2 与 Mali 驱动不兼容 | 看 log.txt 里 `OpenGL Version` 那行 |
-| log.txt 末尾被截断 | 应已修复（main.cpp 里 `setvbuf(stderr, _IONBF, 0)`）；仍出现则 build 太老 | 重新 build + 部署 |
+|---|---|---|
+| 改了代码，容器里编出来没变 | 只改了宿主，没 `docker cp` 进副本 | 同步后核对容器内文件 mtime |
+| `fatal: not a git repository: …/worktrees/…` | 副本里的 `.git` 是失效 worktree 指针 | 容器里不做 git 操作，版本以宿主为准 |
+| `ninja: unknown target bogodroid_unityloader_plugin_x` | 那是产物名不是 target | 用 `plugin_x` |
+| 链接阶段卡 10 分钟以上 | Release 带 LTO，ninja 下 ltrans 串行 | 迭代期用 `RelWithDebInfo`，或等 |
+| 发版包跑起来刷 `[BD-*]` | 用了 `build-device-release` 里上次留下的 `BD_ENABLE_LOG=ON` | 发版单独目录；显式传 `-DBD_ENABLE_LOG=OFF` 并核对 cache |
+| 拷回宿主的 `build-trimui-*` 在容器里 `ninja` 报路径错 | cache 里是旧绝对路径 `/workspace/Bogodroid-brickgame` | 删掉重配，别跨环境搬构建目录 |
+| `docker cp` 报 `Cannot connect to D:` | Git Bash 把 `D:/…` 当远程主机 / tar 行为差异 | 用相对路径；`tar` 加 `--force-local` |
+| Debug 构建测帧率偏低 | `-O0` | 用 `RelWithDebInfo` 复测 |
 
 ---
 
-## 8. 一键脚本模板
+## 7. 引用
 
-把以下保存为 `~/bin/bogo-deploy.sh`，开头两个变量按本机情况改：
-
-```bash
-#!/usr/bin/env bash
-set -e
-: "${REPO:?REPO must be set (the Bogodroid checkout)}"
-: "${SD_PORT:?SD_PORT must be set (e.g. /Volumes/<label>/roms/ports/<port>)}"
-
-echo "[1/3] building..."
-docker run --rm --platform linux/arm64 \
-  -v "$REPO:/work" -w /work/build-release \
-  bogo-builder ninja unityloader
-
-echo "[2/3] deploying..."
-[ -d "$SD_PORT" ] || { echo "ERR: SD card not mounted at $SD_PORT"; exit 1; }
-cp "$REPO/build-release/unityloader" "$SD_PORT/unityloader"
-sync
-
-echo "[3/3] verifying..."
-ls -la "$SD_PORT/unityloader"
-echo "BD-* tags embedded:"
-strings "$SD_PORT/unityloader" | grep -E '^\[BD-' | sort -u | sed 's/^/  /'
-echo "done."
-```
-
-调用：`REPO=... SD_PORT=... bogo-deploy.sh`
-
----
-
-## 9. 引用
-
-- 镜像配方：[`Dockerfile.builder`](./Dockerfile.builder)
-- 上游构建文档：[`README.md`](./README.md) §How to Build（Linux 原生路线，仅参考）
-- CMake flag 块：[`CMakeLists.txt`](./CMakeLists.txt) 207–255 行
-- 日志宏定义：[`platform/common/logging.h`](./platform/common/logging.h)
+- 容器内构建命令（发版 / 排查两档）：[`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) §1.1、§1.5
+- 交叉工具链：[`cmake/aarch64-linux-gnu.cmake`](cmake/aarch64-linux-gnu.cmake)
+- 历史配方（不可用）：[`Dockerfile.builder`](Dockerfile.builder)、[`scripts/build-docker.sh`](scripts/build-docker.sh)
+- 日志宏单一来源：[`platform/common/logging.h`](platform/common/logging.h)
+- 完整流程：[`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md)

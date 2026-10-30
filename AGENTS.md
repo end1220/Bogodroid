@@ -1,7 +1,16 @@
 # Bogodroid Agent Notes
 
-新端口先读 [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md)（含 Skul 止损判据、Maximus2 的 `JNIVM_ENABLE_RETURN_NON_ZERO` 缓存坑）。Skul 已止损。
-Unity **6000.x** 端口见 [`docs/UNITY6.md`](docs/UNITY6.md)：玩家类搬家、`initJni(Context,int,String)`、主线程 `ALooper`、`Class.forName` 的 Java 二进制名归一化。
+## 从哪开始（按处境选一个，别通读全部）
+
+| 处境 | 读这个 |
+|---|---|
+| **要把一款 Unity 游戏从解包做到发版** | [`docs/PORTING_PLAYBOOK.md`](docs/PORTING_PLAYBOOK.md) — **唯一的通用流程文档**：止损判据、六段流水线、每段命令、断言脚本、硬坑清单、维护契约 |
+| 手上游戏做到一半，想知道进度 | `docs/` 下的端口记录：[`BRICKGAMEPRO.md`](docs/BRICKGAMEPRO.md)（已走完全流程）、[`BLACKMOOR2.md`](docs/BLACKMOOR2.md)（进行中） |
+| 目标是 Unity **6000.x** | 先 [`docs/UNITY6.md`](docs/UNITY6.md)（玩家类搬家、`initJni` 签名、主线程 `ALooper`、`Class.forName` 二进制名归一化），再回 playbook |
+| 只是改一个按钮 / 一个画面参数 | 直接跳 playbook §4 插件约定 → §1.6 容器回放，别从头读 |
+
+> **规范只在 `PORTING_PLAYBOOK.md` 里**，不放"某款游戏做到哪"的过程；过程进 `docs/<端口名>.md`。
+> playbook §0.4 有基线状态和"怎么判断本文是否过期"的两条命令，动手前先跑一遍。那两条只看**已提交**历史，`git status --short` 有改动时同样按"可能已过期"处理。
 
 ## 日志 / 构建开关（必读）
 
@@ -14,15 +23,23 @@ Unity **6000.x** 端口见 [`docs/UNITY6.md`](docs/UNITY6.md)：玩家类搬家�
 | `BD_ENABLE_VERBOSE` | OFF | 需 LOG：大量 `verbose()`（含 NATIVE/JNI 刷屏） |
 | `IL2CPP_TRACE` | OFF | 需 LOG：il2cpp 内部 trace |
 
-**上机默认（中间态）**：`CMAKE_BUILD_TYPE=Release` + **`BD_ENABLE_LOG=ON`** + TRACE/VERBOSE/IL2CPP_TRACE 全 OFF + `strip`。  
-LOG 层：`[BD-MEM]`、视频 `publish`/`swap`、codec 周期摘要、worker 启停、`[STUB-MISS]`；  
-逐帧 upload/step/luma/blit 等在 **TRACE**（`BD_DEBUG`）。精简止于此，不再继续砍 LOG。  
-全关（LOG=OFF）只在压体积/对照性能时用；深挖再临时开 TRACE/VERBOSE。  
+**两个档位，别混**（构建都在 `GlES_Dev` 容器里做，源码副本 `/workspace/Bogodroid`，不是 bind mount）：
+
+| 用途 | 构建 | 产物 |
+|---|---|---|
+| 发版 / 上机 | Release + **LOG/TRACE/VERBOSE/IL2CPP_TRACE 全 OFF** + `strip` | `build-device-release/unityloader`，约 5.7 MB |
+| 排查 / 容器回放 | **RelWithDebInfo**（`-O2 -g`，符号可读）+ **`BD_ENABLE_LOG=ON`** + 不 `strip`（要 `BD_DEBUG` 再加 TRACE） | `build-anbernic-rel/unityloader`，约 90–168 MB，只临时上机 |
+
+两个档位用**两个构建目录**：`cmake -S . -B` 会改写 `CMakeCache.txt`，共用一个目录会让发版包带上上一次的 `BD_ENABLE_LOG=ON`。
+
+LOG 层（仅排查档）：`[BD-MEM]`、视频 `publish`/`swap`、codec 周期摘要、worker 启停、`[STUB-MISS]`；逐帧 upload/step/luma/blit 在 **TRACE**（`BD_DEBUG`）。
+正式包判定：`log.txt` 里**零 `[BD-*]` 行**（崩溃时的 `[BD-SEGV]` 除外），有就是拿错了二进制。静态检查别用 `strings | grep '^\[BD-'` 判空——`[BD-SEGV]`、`[BD-J2]` 无条件编入，发版包也有；口径见 playbook §6.1。
 `fatal_error` / SEGV 回溯**不依赖** `BD_ENABLE_LOG`。
 
 toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_MEM_LOG_MS` 环境变量优先，`0` 关闭），整个 `[debug]` 表都可以不写。`[device]` 同理：`displayWidth/Height/RefreshRate` 省略或 `0` 即自动探测。铺配置只写必要项。
 
-完整命令见 playbook §1.1；CMake 细节见 [`BUILD-DOCKER.md`](BUILD-DOCKER.md) §5–6。
+完整命令见 playbook §1.1；容器基线、源码同步与产物检查见 [`BUILD-DOCKER.md`](BUILD-DOCKER.md)；CMake 选项表以 `CMakeLists.txt` 的 `option()` 为准（[`BUILD-DOCKER.md`](BUILD-DOCKER.md) §3 有同样一份）。
+`scripts/build-docker.sh` 与 `scripts/unity6/build-{rel,log}.sh` 属上游 x86 交叉路线，**已废弃**，别照它们编（原因见 BUILD-DOCKER.md §5）。
 
 ### `JNIVM_ENABLE_RETURN_NON_ZERO`（CMake 缓存陷阱，必读）
 
@@ -31,13 +48,15 @@ toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_M
 - **OFF**（默认，上机必须）→ `null` / 0，Unity 自己 try/catch，最好情况只丢一个 NRE；
 - **ON**（实验）→ 硬造 dummy 对象，Unity 把它 cast 成 `String`/`Throwable` → jnivm `Invalid Reference, Unexpected Type` → `terminate()` / `exited 134`。
 
-它是 **CMake 缓存项**：共用 `build-aarch64/` 时会被上一次实验遗留成 `ON`，之后即使只改无关代码，编出来的 `unityloader` 也会崩，且崩点看着落在完全不相关的桩上。**每次构建显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**，细节与判读方法见 playbook §1.2。
+它是 **CMake 缓存项**：共用构建目录（`build-unity6/`、`build-trimui-*/` 之类）时会被上一次实验遗留成 `ON`，之后即使只改无关代码，编出来的 `unityloader` 也会崩，且崩点看着落在完全不相关的桩上。**每次构建显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`**，细节与判读方法见 playbook §1.2。
 
 同类缓存项还有两个，已在 `CMakeLists.txt` 里 `FORCE` 固定，别再靠命令行覆盖：`JNIVM_ENABLE_DEBUG` **恒 ON**（不是日志开关：`JNI_DEBUG` 影响 `InternalFindClass()` 的类注册与嵌套类身份，也保留 `object is null` 诊断）；`JNIVM_ENABLE_TRACE` 跟随 `BD_ENABLE_LOG`。见 playbook §1.3。
 
 ## Dropbeak：大文件推送 / 拉取（掌机）
 
 掌机 Dropbeak agent（默认 `http://<host>:8080`）对大 `.bundle` / `unityloader` 等文件有几条硬坑，按下面做。
+
+**地址是 DHCP 分的，别抄文档里的 IP。** 端点表只维护在 playbook §1.7.1，命令里一律用 `$env:DROPBEAK_HOST` 或 `<DEV_HOST>` 占位。
 
 ### 已知问题
 
@@ -55,7 +74,7 @@ toml 里的 `[debug] mem_log_interval_ms` **可省略**（默认 2000 ms；`BD_M
 **≥50MB 推送：用 CLI chunk + force**（0.6.4+ 建议 `--chunk-size 16m --verify`；实测 ~311MB `ea9c` ≈45s）：
 
 ```powershell
-$env:DROPBEAK_HOST = '172.16.7.55'   # 按环境改
+$env:DROPBEAK_HOST = '<DEV_HOST>'   # 按环境改，见 playbook §1.7.1
 & 'D:\Locke\gitee\dropbeak\dist\dropbeak-cli.exe' push `
   <local-file> <remote-abs-path> `
   --force --chunk --chunk-size 16m --verify --progress
@@ -67,7 +86,7 @@ $env:DROPBEAK_HOST = '172.16.7.55'   # 按环境改
 
 ```powershell
 $remote = '/mnt/mmc/Roms/ports/Skul/...'
-$uri = 'http://172.16.7.55:8080/api/v1/files?path=' +
+$uri = 'http://<DEV_HOST>:8080/api/v1/files?path=' +
   [uri]::EscapeDataString($remote) + '&force=true'
 curl.exe -X PUT --max-time 7200 --upload-file <local-file> $uri `
   -w "`nhttp=%{http_code} size=%{size_upload}`n"
@@ -76,7 +95,7 @@ curl.exe -X PUT --max-time 7200 --upload-file <local-file> $uri `
 **大文件拉取：用 curl download**，勿依赖 CLI 默认超时：
 
 ```powershell
-$uri = 'http://172.16.7.55:8080/api/v1/files/download?path=' +
+$uri = 'http://<DEV_HOST>:8080/api/v1/files/download?path=' +
   [uri]::EscapeDataString($remote)
 curl.exe -L --max-time 7200 -o <local-out> $uri
 ```
@@ -112,7 +131,7 @@ curl.exe -L --max-time 7200 -o <local-out> $uri
 3. 脚本**必须前台 `exec` loader**，绝不能 `&` 后台：一旦后台，脚本立即返回，runtrimui 会马上把 MainUI 拉回来，表现为系统界面与游戏交替闪烁。
 4. 停止：`killall -9 unityloader`。MainUI 由 runtrimui 自动拉起，不用管；`/tmp/cmd_to_run.sh` 会被同一轮循环删掉（清理是自动的）。
 
-`Data/ports/Oddmar/` 下的 `cmd_to_run.sh` → `trimui_run.sh` 就是这么一条遥控入口，`launch*.sh` 是更早的版本。
+仓库里 [`docs/trimui_run.sh`](docs/trimui_run.sh) 是一份可参考的遥控入口脚本；Oddmar 的实机细节见 [`docs/ODDMAR.md`](docs/ODDMAR.md)。
 
 ### 必须自己设 `LD_LIBRARY_PATH`
 
@@ -128,7 +147,7 @@ export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:$GAMEDIR/ff58${LD_LIBRARY_PATH:+:
 
 ### 验证画面
 
-- `Data/ports/Oddmar/log.txt` 是正式脚本 `tee` 的落点；**LOG=OFF 的 build 里应只剩 SDL/EGL 原生噪声**（`SDL_UDEV_*`、`MALI_CreateWindow`、`OpenGL Renderer:`），**零 `[BD-*]` 行**。有 `[BD-*]` 就说明拿错了带 LOG 的二进制。
-- 帧导出（`BD_DUMP_FRAME` / `BD_VIDEO_DUMP_FRAME`，默认关闭，说明见 `trimui_run.sh` 注释）一次全开会留约 31 MB PPM，用完记得清。
+- `<PORT>/log.txt` 是正式脚本 `tee` 的落点；**LOG=OFF 的 build 里应只剩 SDL/EGL 原生噪声**（`SDL_UDEV_*`、`MALI_CreateWindow`、`OpenGL Renderer:`），**零 `[BD-*]` 行**。有 `[BD-*]` 就说明拿错了带 LOG 的二进制。
+- 帧导出（`BD_DUMP_FRAME` / `BD_VIDEO_DUMP_FRAME`，默认关闭，说明见 [`docs/trimui_run.sh`](docs/trimui_run.sh) 注释）一次全开会留约 31 MB PPM，用完记得清。
 - 部署后核对哈希：`sha256sum` 掌机文件 vs 本地构建产物，别只看大小。
 - dropbeak `exec` 有约 30 s HTTP 超时：启动命令要后台化，或避免在里面长 `sleep`；大文件按上文 `--chunk` 走。

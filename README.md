@@ -1,23 +1,45 @@
-# Bogodroid NEO
+# Bogodroid NEO — BrickGame 分支
 
 > © 2025-2026 jenny92-tech &lt;jennyliu90223@gmail.com&gt; · GPL v3 · See [LICENSE.md](./LICENSE.md)
 
-> **Cross-compile from macOS / x86 Linux → ARM64 PortMaster handheld?**
-> 看 **[BUILD-DOCKER.md](./BUILD-DOCKER.md)**（中文，专门写的 Docker 工作流）。
-> 下面 `How to Build` 一节是上游原生 Linux 编译，路线不同。
+> **这个仓库在干什么**
+> 把 Android 端 Unity IL2CPP（arm64）的原生库包进 ARM Linux 掌机跑通 —— 目标机是 **Anbernic H700** 与 **TrimUI Smart Pro**。
+>
+> | 想知道 | 看 |
+> |---|---|
+> | 怎么编 `unityloader`（容器、选项、产物检查） | **[BUILD-DOCKER.md](./BUILD-DOCKER.md)** |
+> | 从解包到发版的完整流程 | **[docs/PORTING_PLAYBOOK.md](./docs/PORTING_PLAYBOOK.md)** |
+> | 日志开关、Dropbeak 推文件、掌机启动 | **[AGENTS.md](./AGENTS.md)** |
+> | 某款游戏做到哪一步 | `docs/<端口名>.md` |
 
-This is an experimental project attempting to create a wrapper environment around native libraries from ARM Android Apps, with the intent of running the libraries (or entire apps and games) on ARM Linux (armhf and arm64) handhelds. The current focus is on supporting the Unity game engine.
+---
+
+This is an experimental project attempting to create a wrapper environment around native libraries from ARM Android Apps, with the intent of running the libraries (or entire apps and games) on ARM Linux handhelds. The current focus is on supporting the Unity game engine.
 
 The project is heavily based on [JohnnyOnFlame/gmloader-net](https://github.com/JohnnyonFlame/gmloader-next) and [ChristopherHX/libjnivm](https://github.com/ChristopherHX/libjnivm).
 
 The idea is to:
 - load the libraries, patch them at runtime
 - wrap, bridge or stub any required symbols from Android system libraries
-- Provide a JNI interface for communication with placeholder "java" classes
-- Provide implementations and stubs for common java and android classes
-- Ultimately wrap Audio, GLES and Input to host interfaces and libraries.
+- provide a JNI interface for communication with placeholder "java" classes
+- provide implementations and stubs for common java and android classes
+- ultimately wrap Audio, GLES and Input to host interfaces and libraries
 
-This project does not aim to be able to run your App out of the box. It is meant as a framework or starting point for your own porting project. For existing porting projects, check the "Ports in progress" table and the projects folder.
+This project does not aim to run your App out of the box. It is a framework and a set of working samples for your own porting project.
+
+# 已移植 / 进行中的端口
+
+只列有文档记录的；更细的过程、断言与未完成项在各文档里。
+
+| 游戏 | 包名 | 状态 | 记录 |
+|---|---|---|---|
+| BrickGame Pro（肥鱼方块） | `com.perseusgames.brickgamepro` | 已发版，走完整条流水线 | [BRICKGAMEPRO.md](docs/BRICKGAMEPRO.md) · [TODO](docs/BRICKGAME_TODO.md) |
+| Oddmar | `com.mobge.Oddmar` | 标题界面已渲染，输入/资源仍在收尾 | [ODDMAR.md](docs/ODDMAR.md) · [资源瘦身](docs/ODDMAR-ASSET-SLIMMING.md) |
+| Blackmoor 2 | `com.fourfats.blackmoor2` | 进行中（流水线第二个样本） | [BLACKMOOR2.md](docs/BLACKMOOR2.md) |
+| FiveHearts | `com.fivehearts.offline` | 可运行，视频桥已修 | [FIVEHEARTS.md](docs/FIVEHEARTS.md) |
+| Space Squids | — | 掌机验证：触摸光标 + 原生震动 | [SPACESQUIDS_CONTROLLER.md](docs/SPACESQUIDS_CONTROLLER.md) · [HAPTICS.md](docs/HAPTICS.md) |
+
+`projects/unityloader/plugins/` 里还有 `hollow_knight_viewport`、`skul_pad`、`samurai2_offline`、`terraria_autoname`、`oddmar_input`、`oddmar_video`、`oddmar_assetlocator` 等端口专用插件，约定见 [plugins/README.md](projects/unityloader/plugins/README.md)。
 
 # License & Community Spirit
 
@@ -77,168 +99,70 @@ tools/unity_astc: validate audio resource metadata
 
 # How to Build
 
-### 1. Install Prerequisites
-
-First, ensure you have the necessary tools and libraries installed. On a Debian-based system (like Ubuntu), you can install them with the following command:
+构建在 `GlES_Dev` 容器里做（Ubuntu 20.04 + `aarch64-linux-gnu-g++` 9.4 + FFmpeg dev），宿主机不需要装交叉工具链。完整说明、源码同步方式和产物自检见 **[BUILD-DOCKER.md](./BUILD-DOCKER.md)**；最短路径：
 
 ```bash
-sudo apt update
-sudo apt install cmake git libzip-dev libsdl2-dev
+docker cp projects/unityloader/. GlES_Dev:/workspace/Bogodroid/projects/unityloader/
+docker exec GlES_Dev bash -lc '
+  cd /workspace/Bogodroid &&
+  cmake -S . -B build-device-release -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+    -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF &&
+  cmake --build build-device-release -j"$(nproc)" --target unityloader &&
+  aarch64-linux-gnu-strip build-device-release/unityloader
+'
 ```
 
-### 2. Clone the Repository
+三个开关别省：`BD_ENABLE_LOG=OFF`（发版不带日志）、`JNIVM_ENABLE_RETURN_NON_ZERO=OFF`（CMake 缓存陷阱，见 [AGENTS.md](./AGENTS.md)）、`-DCMAKE_BUILD_TYPE=Release`（否则是 `-O0`，跑起来像卡）。
 
-Clone the project repository to your local machine using git:
-
-```bash
-git clone --recursive --branch neo https://github.com/binarycounter/Bogodroid/
-cd Bogodroid
-```
-
-### 3. Configure the Project with CMake
-
-Create a dedicated build directory. This keeps the main project folder clean.
-
-```bash
-mkdir build && cd build
-```
-
-Next, run CMake to configure the project and generate the build files. You must specify a build type.
-
-#### To create a **Release** build:
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release
-```
-
-#### To create a **Debug** build (**SLOWER!** Debug symbols and extensive trace logging):
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-```
-
-#### To create a **Release with Debug Info** build (optimized, but includes debug symbols):
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
-```
-
-### 4. Compile the Code
-
-Once CMake has finished configuring, you can compile the project using `make`. The command below uses all available CPU cores to speed up the process.
-
-```bash
-make -j$(nproc)
-```
-
-The final executable will be located in the `build` directory.
-
----
+> 上游那份「在 Linux 主机上 `apt install` 后直接 `cmake ..`」的原生路线不适用于本仓库：产物是宿主架构，而且要额外照顾 FFmpeg / SDL2 / libbsd 的 arm64 头文件。仓库里的 `scripts/build-docker.sh`、`scripts/unity6/build-{rel,log}.sh` 是这条旧路线的残留，**已废弃**（原因见 BUILD-DOCKER.md §5），现在运行会在开头直接报废弃并 `exit 1`。
 
 ### Building a Specific Project
 
-By default, the build system compiles the `unityloader` project. If you wish to build a different project, you can specify it during the CMake configuration step (step 3) by adding the `-DPROJ` flag.
-
-For example, to build a project named `hexagonloader` as a `Release` build, you would run:
+By default the build compiles the `unityloader` project. To build another one (e.g. `hexagonloader`), pass `-DPROJ` at configure time:
 
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DPROJ=hexagonloader
+cmake -S . -B build-hexagon -DPROJ=hexagonloader -DCMAKE_BUILD_TYPE=Release
 ```
 
 ### Unityloader Plugins
 
-Game-specific compatibility code can be built as shared-library plugins and
-deployed beside a game's TOML file in `unityloader.d/`. Build all bundled
-plugins with `cmake --build build --target unityloader_plugins`, or use a
-specific `plugin_<name>` target. See
-[`projects/unityloader/plugins/README.md`](projects/unityloader/plugins/README.md)
-for the Plugin ABI, lifecycle, configuration, and deployment layout.
+Game-specific compatibility code is built as shared-library plugins and deployed beside a game's TOML file in `unityloader.d/`. Build all bundled plugins with `--target unityloader_plugins`, or a single one with `--target plugin_<name>` (the artifact is `<name>.so`). See [`projects/unityloader/plugins/README.md`](projects/unityloader/plugins/README.md) for the Plugin ABI, lifecycle, configuration and deployment layout.
 
 # Running
 
-*Please note that most loaders require /proc to be mounted, which is not the case in the chroot environment in the VM image. Run `mount -t proc none /proc` as root inside the chroot environment to fix this.*
-
-`unityloader` and `limboloader` use a TOML config file to configure paths and properties. Example config files are provided in `configs/`. If you run the program directly from the build directory and have extracted your Unity game APK in `gamefiles/unity/` you can use this config without changes:
-
-`./unityloader ../configs/unity.toml`
-
-# Debugging with QEMU and GDB-multiarch
-
-(This expects the chroot environment as provided by [this VM](https://forum.odroid.com/viewtopic.php?p=306185#p306185))
-
-1. Exit your chroot, we will call the binary directly
-2. Enter the build directory 
-3. Start the binary with: 
-`QEMU_LD_PREFIX=/mnt/data/aarch64/ qemu-arm-static -g 5 ./unityloader ../configs/unity.toml`
-4. Open another terminal and type in `gdb-multiarch`
-5. Enter the location of your chroot: `set sysroot /mnt/data/armhf`
-6. Enter the location of your binary: `file /mnt/data/armhf/root/bogodroid/build/unityloader`
-7. Connect to the open GDB session in QEMU: `target remote :5`
-6. "c" to run the program, "si" to step a single instruction, "bt" to read stack trace, "break" to set breakpoint. ***Refer to the GDB manpage and internet resources on how to debug***
-
-# JNI Tracing your App
-
-(This requires a rooted Android device and a computer with ADB and Python installed)
-
-1. [Install a Frida server on your Android device](https://frida.re/docs/android/)
-2. Install jnitrace on your computer: `pip install jnitrace`
-3. Run the trace: `jnitrace -o jnitrace.json com.example.myapplication`
-4. Press CTRL-C to finish aquiring data
-5. `jnitrace.json` will contain all JNI calls made by the application
-6. `python tools/jnitrace_parse.py <input_json_file> <output_json_file>` will give you a consolidated tree of all classes, methods and fields (and their signatures) accessed during the tracing period.
-
-See `tools/unity_traces` for a trace of a minimal Unity game starting up
-
-# IL2CPP Trace Logging your Game
-
-1. Locate your copy of il2cpp from your Unity Editor in `Data/il2cpp`
-2. Copy this folder to `projects/unityloader/`
-3. Run `cd tools/ && python3 gen_il2cpp_log_shim.py`
-4. Configure your build with `-DIL2CPP_TRACE=1`
-
-
-# Port Tools
-
-## `tools/shrink_bundle.py` — texture-atlas size reducer
-
-For Unity ports targeting 1 GB-class handhelds. Many Unity games (Hollow
-Knight, etc.) ship 4096×4096 ASTC sprite atlases that consume 300+ MB of
-Mali GPU memory — too much for a 1 GB device after the system claims its
-share. This script downsamples oversized atlases at install time and
-rewrites all sprite UV coordinates to match.
+`unityloader` uses a TOML config file. Examples live in `configs/`; after extracting a game's APK into `gamefiles/unity/` you can run it as-is:
 
 ```bash
-pip install UnityPy Pillow astc-encoder-py
-python3 tools/shrink_bundle.py /path/to/gamedata/.../data.unity3d --cap 1280
+./unityloader ../configs/unity.toml
 ```
 
-Measured on Hollow Knight, 1280-cap saves ~140 MB total RSS (824 → 685 MB)
-with no visible quality loss on a 540p screen. See `python3 tools/shrink_bundle.py --help`
-for the full CLI; the file's module docstring documents which UV paths are
-handled and which (particle systems, custom shaders) may need `--skip`.
+Toml 里只有必要项：`[debug]` / `[device]` 整表都可以不写（日志间隔默认 2000 ms，分辨率自动探测）。掌机侧部署（Dropbeak 推送、启动脚本、`LD_LIBRARY_PATH`、日志判据）见 [AGENTS.md](./AGENTS.md) 与 playbook §1.7。
 
-# Ports in Progress
+# 调试与取证
 
-| Name                              | Project Name  | Status        | Notes                                                                                                              |
-|-----------------------------------|---------------|---------------|--------------------------------------------------------------------------------------------------------------------|
-| Unity 2021.3f (aarch64 il2cpp)                      | unityloader   | Working  | Runs simple games. Graphics, audio and input work. |
-| Space Squids (Unity 2022.2.14f1, ARM64 IL2CPP) | unityloader + spacesquids | Handheld tested | Native flight/fire, X missiles, touch cursor menus, all 11 ship cards and [native vibration](docs/HAPTICS.md). [Setup and controls](docs/SPACESQUIDS_CONTROLLER.md). |
-| Unity 2021.3f (aarch64 mono)                      | unityloader   | Working POC  | Simple demos and benchmarks are working, with low but reasonable performance. Implementation is still incomplete. |
-| Super Hexagon                     | hexagonloader | Not Booting   | Unchanged from Pre-NEO Bogodroid, needs complete rework  |
-| Limbo                             | limboloader   | Loading Screen| Unchanged from Pre-NEO Bogodroid, needs complete rework  |
-| Crazy Taxi Classic                | taxiloader    | Investigated  | Requires better file handling for loading the big OBB files, before it can be attempted.                           |
-| Terraria                          | -             | Not attempted | (Engine: FNA, Monogame port might be easier)                                                                       |
-| Baba is you                       | -             | Not attempted |                                                                                                                    |
-| Super Meat Boy Forever            | -             | Not attempted |                                                                                                                    |
-| Streets of rage 4                 | -             | Not attempted | (Engine: FNA, Monogame port might be easier)                                                                       |
-| Chrono Trigger                    | -             | Not attempted | (Engine: cocos2d-x)                                                                                                |
-| Dead Cells                        | -             | Not attempted |                                                                                                                    |
-| Brotato                           | -             | Not attempted |                                                                                                                    |
-| Castlevania Symphony of the Night | -             | Not attempted |                                                                                                                    |
-| Five Nights At Freddy             | -             | Not attempted |                                                                                                                    |
-| Gris                              | -             | Not attempted |                                                                                                                    |
-| The Way Home                      | -             | Not attempted |                                                                                                                    |
-| Vampire Survivors                 | -             | Not attempted |                                                                                                                    |
-| Scourgebringer                    | -             | Not attempted |                                                                                                                    |
-| Haak                              | -             | Not attempted |                                                                                                                    |
+**JNI tracing（需要 root 过的 Android 设备 + ADB + Python）**
 
+1. [Install a Frida server on your Android device](https://frida.re/docs/android/)
+2. `pip install jnitrace`
+3. `jnitrace -o jnitrace.json com.example.myapplication`
+4. Press CTRL-C to finish acquiring data
+5. `python tools/jnitrace_parse.py <input.json> <output.json>` gives a consolidated tree of the classes, methods, fields and signatures that were touched
+6. `tools/unity_traces` holds a trace of a minimal Unity game starting up
+
+**IL2CPP trace logging**
+
+1. Locate your copy of il2cpp from the Unity Editor under `Data/il2cpp`
+2. Copy that folder into `projects/unityloader/`
+3. `cd tools/ && python3 gen_il2cpp_log_shim.py`
+4. Configure with `-DIL2CPP_TRACE=ON -DBD_ENABLE_LOG=ON`（子开关依赖主开关，否则 CMake 直接 `FATAL_ERROR`）
+
+**容器回放取证**：不接掌机也能跑一局并截图/断言，参数与判定见 playbook §1.6；Unity 6 的运行镜像与逐帧脚本见 [UNITY6.md](docs/UNITY6.md)。
+
+# 资产工具
+
+- **[tools/unity_astc/](tools/unity_astc/README.md)** — bundle 瘦身主流程：ASTC 重分档、音频重编码、资源校验。判据是**运行时 RSS**（UMA 内存），不是磁盘体积。
+- [tools/dll_surgery/](tools/dll_surgery/README.md) — 替换 mono/il2cpp 侧原生库的样例。
+- [tools/godot_pck/](tools/godot_pck/README.md) — Godot `.pck` 处理。
+- `tools/fonts`、`tools/steam_mock`、`tools/tests` — 字体替换、Steam API 假实现、工具自测。

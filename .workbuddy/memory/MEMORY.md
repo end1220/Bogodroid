@@ -1,14 +1,18 @@
 # Bogodroid-oddmar — 项目长期记忆
 
 > 详细过程看 `docs/ODDMAR.md`；资源瘦身看 `docs/ODDMAR-ASSET-SLIMMING.md`。本文件只留硬性约束、当前状态和止错点。
+>
+> **本文件不承担规范入口职责。** 工作流规范在仓库内：`README.md` → `docs/PORTING_PLAYBOOK.md` → `docs/<端口名>.md`。
+> 这里只记我自己跨会话要记住的止错点，别人 clone 仓库看不到也不需要它。
 
 ## 硬性约束
 
 - 掌机：`172.16.6.77`，Oddmar 根目录 `/mnt/mmc/Roms/ports/Oddmar/`，Dropbeak 0.6.4。
 - 大文件推送用 `dropbeak-cli push --force --chunk --chunk-size 16m --verify`；推完核对 sha/大小。超时/失败后当残缺文件处理，整文件重推。
 - 掌机上只保留一个运行日志 `/mnt/mmc/Roms/ports/Oddmar/log.txt`；大日志先在掌机侧 grep/tail，必要时再拉本地。
-- 构建每次显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`。上机默认：Release + `BD_ENABLE_LOG=ON` + TRACE/VERBOSE/IL2CPP_TRACE OFF + strip。
-- 容器 `GlES_Dev` 的源码副本不会自动同步；本机改源码后要 `docker cp` 对应文件到 `/workspace/Bogodroid/...` 再构建。`docker cp` 保留 mtime，必要时 `touch`。
+- 构建只在 `GlES_Dev` 容器里做（Ubuntu 20.04 / cmake 3.16.3 / `aarch64-linux-gnu-g++` 9.4 / FFmpeg 4.2 dev），副本 `/workspace/Bogodroid`，**无 bind mount**。x86 Debian 交叉那套（`Dockerfile.builder`、`build-docker.sh`、`unity6/build-*.sh`）已废弃：镜像缺 FFmpeg 头、Debian 11 源 404，`build-unity6/` 从未配出来。
+- 构建每次显式带 `-DJNIVM_ENABLE_RETURN_NON_ZERO=OFF`。发版：Release + LOG/TRACE/VERBOSE/IL2CPP_TRACE **全 OFF** + strip ≈5.7 MB（`build-device-release`）；只有排查才 `BD_ENABLE_LOG=ON` 不 strip（`build-anbernic-rel`）。两档用两个目录，别共用。
+- 容器 `GlES_Dev` 的源码副本不会自动同步；本机改源码后要 `docker cp` 对应文件到 `/workspace/Bogodroid/...` 再构建。`docker cp` 保留 mtime，必要时 `touch`。宿主的 `build-trimui-*` 缓存指向旧路径 `/workspace/Bogodroid-brickgame`，不能搬回容器直接用。
 
 ## Oddmar 当前按键状态（2026-09-23 晚）
 

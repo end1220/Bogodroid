@@ -2,7 +2,7 @@
 
 > 日期：2026-09-22 深夜 · 分支 `oddmar` · 状态：**方案 + ✅ 已执行并通过验收**（§9）
 > 前置阅读：[`ODDMAR.md`](ODDMAR.md) §0（现状）、§⛔（接手第 0 步）、§8（诊断开关）、§9.2（跑测命令）。
-> 目标机：Anbernic 掌机 —— **物理面板 640×480**、Mali-G31、GLES 3.2（`ANBERNIC.md` §1）。
+> 目标机：Anbernic 掌机 —— **物理面板 640×480**、Mali-G31、GLES 3.2（[`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md) §1.7.1 设备基线）。
 > 本文所有数字都是**实测**：脚本在 `D:\Locke\gitee\LinuxArmPorts\oddmar_port_stage\_analysis\`，命令见 §7。
 
 ---
@@ -93,7 +93,7 @@
 | 画面判据 | X 根窗口截图 **290–300 KB**（≥180 KB 算活）；`seq/timeline.txt` 不能只有 192 B | §0.1 |
 | 容器内存 | 15.5 GB / 32 核 → **容器里永远看不到 OOM**，判活只能靠计数与截图 | `free -m` |
 | 容器 GL | `llvmpipe (LLVM 12.0.0)`，Mesa 21.2.6 | 日志 / `libgl1-mesa-dri 21.2.6` |
-| 设备 GL | **GLES 3.2 / Mali-G31** → **ASTC LDR 是 ES 3.2 的强制项** | `ANBERNIC.md` §1 |
+| 设备 GL | **GLES 3.2 / Mali-G31** → **ASTC LDR 是 ES 3.2 的强制项** | `PORTING_PLAYBOOK.md` §1.7.1 |
 
 ---
 
@@ -440,7 +440,7 @@ $PY $A/retier_spike.py "<某个 bin/Data 文件>" -o "$A/spike_out/x.assets" --i
 - [`H700_VIDEO_DECODE_SPIKE.md`](H700_VIDEO_DECODE_SPIKE.md) —— **必读**：H700 硬解 No-Go、854×480 软解实测 23–28 fps、推荐"离线 854×480@30 低参考帧"
 - [`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md) §0/§1 —— 资源体量粗估与止损判据
 - [`../tools/unity_astc/README.md`](../tools/unity_astc/README.md) —— ASTC/音频/视频工具链全参数
-- [`../ANBERNIC.md`](../ANBERNIC.md) §1 —— 真机约束（640×480 / Mali-G31 / GLES 3.2）
+- [`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md) §1.7.1 —— 真机约束（640×480 / Mali-G31 / GLES 3.2）
 
 ---
 

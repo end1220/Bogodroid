@@ -1,19 +1,35 @@
 #!/bin/bash
-# Build the shippable unityloader: Release, BD logging off, stripped (~6 MB,
-# vs ~90 MB with Debug symbols). This is what goes on the handhelds.
+# ============================================================================
+# DEPRECATED — 与 scripts/build-docker.sh 同属 x86 Debian 交叉路线，整条不通。
 #
-#   scripts/unity6/build-rel.sh            (host side; wraps docker)
-#   bash /work/scripts/unity6/build-rel.sh --in-container   (inside the builder)
+# 这个脚本要求先用 build-docker.sh 配出 build-unity6/，而那一步的第一次编译
+# 就死在 libavcodec/avcodec.h 找不到（镜像缺 FFmpeg dev 头，Debian 11 源已 404）。
+# 也就是说：仓库里从未存在过由这个脚本产出的 unityloader。
 #
+# 现行发版做法（GlES_Dev 容器内，/workspace/Bogodroid）：
+#   cmake -S . -B build-device-release -G Ninja \
+#     -DCMAKE_BUILD_TYPE=Release \
+#     -DBD_ENABLE_LOG=OFF -DBD_ENABLE_TRACE=OFF -DBD_ENABLE_VERBOSE=OFF \
+#     -DIL2CPP_TRACE=OFF -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF &&
+#   cmake --build build-device-release -j"$(nproc)" --target unityloader &&
+#   aarch64-linux-gnu-strip build-device-release/unityloader
+# 完整命令见 docs/PORTING_PLAYBOOK.md §1.1 与 BUILD-DOCKER.md §2。
+# 要复活：先修镜像，再删掉下面那段 guard。
+# ============================================================================
+#
+# 原始说明（历史）：Release + LOG OFF + strip（~6 MB，Debug 档约 90 MB）。
+#   scripts/unity6/build-rel.sh                            (host side)
+#   bash /work/scripts/unity6/build-rel.sh --in-container  (in the builder)
 #   BUILD_DIR  cmake build dir (default build-unity6)
 #   SYNC_TO    optional path to copy the stripped binary to
-#
-# Run from the repo root on the host; it re-execs itself in the builder image
-# the same way scripts/build-docker.sh does. Passes
-# -DJNIVM_ENABLE_RETURN_NON_ZERO=OFF explicitly: it is a CMake cache entry, and
-# a leftover ON from an experiment makes unityloader abort (exit 134) in code
-# that looks unrelated. See AGENTS.md and docs/PORTING_PLAYBOOK.md 1.2.
 set -eu
+
+cat >&2 <<'EOF'
+[build-rel.sh] DEPRECATED：依赖 build-docker.sh 那条从未跑通的 x86 交叉路线。
+现行发版在 GlES_Dev 容器内 cmake -S . -B build-device-release 加 strip，
+见 docs/PORTING_PLAYBOOK.md §1.1 / BUILD-DOCKER.md §2。
+EOF
+exit 1
 
 BUILD_DIR="${BUILD_DIR:-build-unity6}"
 IMAGE="${BOGO_BUILDER_IMAGE:-bogo-builder:unity2017-armv7}"

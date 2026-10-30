@@ -1,7 +1,7 @@
 # Unity 6（6000.x）Android 端口说明
 
-本分支（`unity6`，从 `anbernic` 拉出）把 Bogodroid 的 Android 加载器扩到 Unity **6000.x**。
-只写结论与判据，通用流程见 [`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md)，历史案例见 [`CASE_STUDIES.md`](CASE_STUDIES.md)。
+本仓库的 `unity6` 分支把 Bogodroid 的 Android 加载器扩到 Unity **6000.x**。
+只写结论与判据，通用流程见 [`PORTING_PLAYBOOK.md`](PORTING_PLAYBOOK.md)，单款游戏的过程记录见 `docs/<端口名>.md`（[`BRICKGAMEPRO.md`](BRICKGAMEPRO.md)、[`BLACKMOOR2.md`](BLACKMOOR2.md)）。
 
 ## 0. 现状
 
@@ -261,17 +261,16 @@ Unity 6 会 forName 并把代理塞给 `View.addOnLayoutChangeListener` 与
 | 文件 | 作用 |
 |------|------|
 | `Dockerfile.test` | 运行镜像 `bogo-arm64-test:20.04`（aarch64 + qemu binfmt；Xvfb + Mesa llvmpipe 顶替 Mali/EGL；带 `xdpyinfo`/`import`/`xdotool`） |
-| `scripts/unity6/build-rel.sh` | 上机用：Release + LOG/TRACE/VERBOSE OFF + `strip`（~6 MB） |
-| `scripts/unity6/build-log.sh [TRACE]` | 排障用：Release 优化级 + LOG ON，**不 strip**（回溯可用） |
 | `scripts/unity6/run.sh` | 容器跑一局（起 Xvfb、跑加载器、截一张图），`SECS`/`JTRACE` 可调 |
 | `scripts/unity6/frames.sh` | 逐秒抓帧时间线：黑 → splash → 首场景，证明"真的在渲染" |
 | `scripts/unity6/device-launcher.sh` | 掌机启动脚本，部署为 `<PORTS>/Unity6.sh` |
 | `configs/unity6.toml` / `configs/unity6-device.toml` | 容器布局 / 掌机布局（`gamedata/` 子目录 + `[input]` 手柄） |
 
+`scripts/unity6/build-rel.sh` 与 `build-log.sh` 属上游 x86 Debian 交叉路线，**已废弃**（镜像缺 FFmpeg dev、Debian 11 源 404），现在运行会在开头直接报废弃并 `exit 1`；构建改在 `GlES_Dev` 容器内做，命令见 [`../BUILD-DOCKER.md`](../BUILD-DOCKER.md) §2。
+
 ```bash
-# 1) 构建加载器（两种配置各一条命令；都显式带 RETURN_NON_ZERO=OFF）
-scripts/unity6/build-rel.sh            # 上机
-scripts/unity6/build-log.sh TRACE      # 排障
+# 1) 构建加载器：容器内 cmake（发版 LOG 全 OFF + strip；排障 LOG=ON 不 strip）
+#    见 ../BUILD-DOCKER.md §2.1 / §2.2
 
 # 2) 运行镜像（aarch64 + qemu binfmt；Xvfb + llvmpipe 顶替 Mali/EGL）
 docker build --platform linux/arm64 -t bogo-arm64-test:20.04 -f Dockerfile.test .
@@ -342,7 +341,7 @@ grep -c 'CallMethod object is null' log.txt           # native 拿着 null 对�
 /mnt/mmc/Roms/PORTS/
 ├── Unity6.sh              <- scripts/unity6/device-launcher.sh（菜单项名 = 文件名）
 └── Unity6/
-    ├── unityloader        <- scripts/unity6/build-rel.sh 产物
+    ├── unityloader        <- 发版构建产物（BUILD-DOCKER.md §2.1，LOG 全 OFF + strip）
     ├── unity.toml         <- configs/unity6-device.toml（含 [input.remap] ABXY identity）
     ├── gamecontrollerdb.txt  <- configs/gamecontrollerdb.txt（**必须推到掌机**，见下）
     ├── gamedata/          <- 摊开的 APK（assets/ + lib/），game_files 指向它
